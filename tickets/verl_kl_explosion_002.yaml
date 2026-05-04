@@ -1,0 +1,96 @@
+id: verl_kl_explosion_002
+title: verl PPO/GRPO KL 爆炸（policy 偏离 reference 过快）
+mission: l29_verl_rl_baseline
+severity: medium
+symptom: |
+  verl RL 训练中 KL(policy || reference) 在前几十步从 ~0 迅速飙升到 5 / 10 甚至几十；
+  往往伴随 reward 先升后崩、entropy 骤降、rollout 输出进入重复/乱码模式；
+  触发 early stop 或被 KL penalty 压住但 policy 已经不可用。
+error_signatures:
+- "metrics: kl_mean: 18.4（正常应在 0.01 - 1 范围内）"
+- "metrics: kl_max: 342.7（某些 token 上 KL 爆表）"
+- "WARNING: KL exceeded threshold X, early stopping"
+- "approx_kl 每次 PPO update 后翻倍"
+- "entropy_mean: 0.03（极低，mode collapse）"
+- "policy_loss 变得非常大或变负"
+classification_questions:
+- 是**训练一开始**就 KL 非零，还是**跑几十/几百步后**才飙升？前者是初始化/reference 问题，后者是 policy drift。
+- PPO/GRPO 的 **epoch / mini-batch 次数** 是多少？每个 rollout batch 过了几次 gradient step？
+- "**clip ratio** 和 **KL coefficient** 设的什么？`kl_coef=0.001` 还是 `0.05`？`clip_range=0.2` 还是 `0.5`？"
+- 是否用了 **adaptive KL controller**（根据当前 KL 动态调 coef）？target_kl 设多少？
+- Reference model 加载的是**原始 base model** 还是 **SFT 之后的 checkpoint**？与 actor 初始化是否一致？
+likely_causes:
+- 初始 KL 非零：reference model 与 actor 初始化不同（加载错 checkpoint、tokenizer 不同、架构不等），第一步就有 offset。
+- PPO epochs 过多：一个 rollout batch 跑了 4+ 次 gradient step，每步 policy 都远离原来的 rollout 行为，importance ratio 爆炸。
+- Clip range 过大：`clip_range=0.5` 允许 importance ratio [0.5, 1.5]，一步就能走很远。
+- KL penalty 系数太小：`kl_coef=0.001` 根本压不住更新。
+- Learning rate 太高（对 7B 规模一般 1e-6 级）。
+- Reward 信号只鼓励某类输出，policy 直接跳到 mode，entropy 崩塌导致 KL 飞。
+- Advantage 没 normalize / reward 没 clip，outlier reward 把梯度拉爆。
+- Rollout 用了跟 actor 不同的 tokenizer（分布式架构下，rollout serving 是单独的 SGLang/vLLM 实例），重算 log_prob 本身就有偏。
+minimal_checks:
+- "看 **初始 KL**：第一步（actor 更新前）的 `kl_mean` 应 < 0.001。不是这个量级就是 reference 加载/tokenizer 问题。"
+- "看 **per-step KL 曲线**：`kl_mean` 是否每次 PPO update 后呈指数上涨？是 → PPO epochs / clip / kl_coef 问题。"
+- "看 **advantage 分布**：min/max/std。outlier（std 远大于 mean）会把梯度拉飞；reward_min 如果是 -1000 之类的异常值，一步就能炸。"
+- "看 **entropy**：健康训练 entropy 缓慢下降；若陡降到 0 附近，policy 已经 mode collapse。"
+- "在**独立进程**里用 reference model 重算 rollout 上的 log_prob，与训练时记录的 `ref_logp` 比对，确认 reference model 真的被正确用了。"
+minimal_fixes:
+- 先让初始 KL ≈ 0：确认 reference 与 actor 初始 checkpoint 完全相同（`md5sum`），tokenizer 和 chat template 一致。
+- 降 PPO epochs：从 4 降到 1-2；GRPO 类算法一般 1 epoch 就够。
+- 收紧 clip：`clip_range=0.2` 或更小（0.1）。
+- 开 adaptive KL controller：`target_kl=6` 左右（token-level KL）；超过就放大 `kl_coef`，低于就收缩。
+- 降 learning rate：7B 用 1e-6 到 5e-6；scale 按参数量下降。
+- Advantage normalization：`adv = (adv - adv.mean()) / (adv.std() + 1e-8)`，按 mini-batch 或按 group（GRPO）做。
+- Reward clip / scale：`reward = clip(reward, -5, 5)` 或用 `reward_norm` 做滑动 whitening。
+- "严格 early stop：`if kl > 10: break`；回滚到 kl < 1 的 checkpoint。"
+what_not_to_do:
+- 不要把 KL threshold 调大让它“过”——policy 已坏，跑下去只会更糟。
+- 不要在 KL 飙升时加大 learning rate 或 batch，只会加速爆炸。
+- 不要忽略 reference model 的 md5 / 配置一致性，一切 RL 的 KL 都相对于 reference。
+- 不要关掉 advantage normalization，reward outlier 会直接杀死训练。
+hint_1: |
+  先确认 **step 0 的 KL 基线**：
+  ```bash
+  head -5 runs/<mission>/<run>/metrics.jsonl | jq '.kl_mean'
+  ```
+  - 第一步 `kl_mean > 0.01` → reference / tokenizer / 初始化出错。
+    检查：`md5sum actor_init.pt reference.pt`；reference model 的 tokenizer 与 rollout 的 tokenizer 是否同一份；chat template 是否一致。
+  - 第一步 ≈ 0，但之后上涨 → 参数问题，跳 hint_2。
+hint_2: |
+  定位 KL drift 的原因：
+  ```
+  看 per-update KL：
+    - 每个 PPO epoch 后 KL × N 倍暴涨 → epochs 太多或 clip 太宽
+      修：ppo_epochs=1, clip_range=0.1~0.2
+    - KL 线性缓慢上涨但 entropy 同步骤降 → reward hack / mode collapse
+      修：加 entropy bonus (entropy_coef=0.01), reward clip [-5, 5]
+    - 个别 token 的 kl_max 极大（几百）但 mean 没那么高 → outlier token
+      修：advantage normalization + token-level KL clip
+
+  看 advantage 分布：
+    - std / |mean| > 10 → 没 normalize，加 per-batch normalization
+    - reward 有 outlier → reward_norm 或 reward_clip
+
+  看 kl_coef：
+    - 固定值：kl_coef=0.001 太小对大多数模型；0.01-0.05 更合理
+    - adaptive controller：target_kl=6（token 级），超了自动放大 coef
+  ```
+  每改一项跑 50 步，观察 kl_mean 稳态。
+solution: |
+  KL 爆炸的不变量：**policy 和 reference 的差距要始终有界，否则 policy gradient 估计失效**。诊断顺序：
+  1. **步 0 基线**：kl_mean 必须 < 0.01。不是就去修 reference / tokenizer / 初始化一致性。
+  2. **per-update 行为**：KL 每个 PPO epoch 暴涨 → epochs/clip 问题；线性上涨 + entropy 崩 → reward hack；outlier 主导 → advantage/reward normalize。
+  3. **配置基线**（7B 量级 PPO 合理值）：
+     ```
+     ppo_epochs: 1
+     clip_range: 0.2
+     kl_coef: 0.01-0.05 or adaptive target_kl=6
+     learning_rate: 1-5e-6
+     entropy_coef: 0.001-0.01
+     advantage_normalization: per_batch
+     reward_clip: [-5, 5]
+     ```
+  4. **early stop**：`kl_mean > 10` 或 `kl_max > 50` 立即停，回滚 checkpoint。
+  5. **验证**：前 100 步 kl_mean 稳定 < 2，entropy 缓降不崩，reward 上升。
+  报告贴：初始 KL、kl_mean/kl_max/entropy/reward 的 100 步曲线、修复前后对照。
+  参考：`github_repo/verl/verl/`（PPO/GRPO 实现）、labs/l29_verl_rl_baseline、notebooks/n10_rl_kl_reward、相关 ticket: slime_reward_collapse_002、verl_reward_parse_001。

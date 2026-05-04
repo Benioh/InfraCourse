@@ -1,0 +1,5 @@
+actor_gpus: 4
+rollout_gpus: 4
+weight_sync:
+  mode: checkpoint_metadata
+  max_staleness_steps: 1

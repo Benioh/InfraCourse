@@ -1,0 +1,16 @@
+{
+  "mission": "l23_quant_serving",
+  "passed": true,
+  "exit_code": 0,
+  "started_at": "2026-05-02T13:30:05.384607Z",
+  "finished_at": "2026-05-02T13:30:08.177347Z",
+  "duration_s": 2.79,
+  "summary": {
+    "passed": 5,
+    "failed": 0,
+    "total": 5
+  },
+  "output": "============================= test session starts ==============================\nplatform linux -- Python 3.12.3, pytest-8.1.1, pluggy-1.6.0 -- /usr/bin/python\ncachedir: .pytest_cache\nhypothesis profile 'default' -> database=DirectoryBasedExampleDatabase(PosixPath('/inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l23_quant_serving/patch/.hypothesis/examples'))\nrootdir: /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l23_quant_serving/patch\nconfigfile: pytest.ini\nplugins: anyio-4.9.0, hypothesis-6.130.8, flakefinder-1.1.0, rerunfailures-15.1, shard-0.1.2, xdist-3.7.0, xdoctest-1.0.2\ncollecting ... collected 5 items\nRunning 5 items in this shard: tests/test_patch.py::test_int8_range, tests/test_patch.py::test_quantize_dequantize_roundtrip, tests/test_patch.py::test_per_channel_scale_shape, tests/test_patch.py::test_awq_scale_responds_to_outliers, tests/test_patch.py::test_alpha_zero_equals_naive\n\ntests/test_patch.py::test_int8_range PASSED                              [ 20%]\ntests/test_patch.py::test_quantize_dequantize_roundtrip PASSED           [ 40%]\ntests/test_patch.py::test_per_channel_scale_shape PASSED                 [ 60%]\ntests/test_patch.py::test_awq_scale_responds_to_outliers PASSED          [ 80%]\ntests/test_patch.py::test_alpha_zero_equals_naive PASSED                 [100%]\n\n============================== 5 passed in 1.96s ===============================\n",
+  "output_truncated": false,
+  "all_gpu_skipped": false
+}

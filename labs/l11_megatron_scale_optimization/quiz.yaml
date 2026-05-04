@@ -1,0 +1,187 @@
+mission: l11_megatron_scale_optimization
+title: L05 Quiz · DDP Bucketing & Distributed Optimizer
+pass_threshold: 1.0
+description: |
+  这 5 题打中 DDP bucketing 与 distributed optimizer 最容易混淆的点：
+  bucket size 的 tradeoff、合并通信的数学等价性、与 ZeRO 的关系。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l11_megatron_scale_optimization/patch/task.md
+  - title: 读 Megatron distributed_data_parallel
+    kind: source
+    path: github_repo/Megatron-LM/megatron/core/distributed/
+  - title: 读 PyTorch DDP reducer 注释
+    kind: source
+    path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+
+questions:
+  - id: q1_bucket_purpose
+    prompt: |
+      为什么 PyTorch DDP 默认把 grad 分成 25MB 的 bucket 一起 all-reduce，
+      而不是每个 param 单独 all-reduce？
+    options:
+      - id: a
+        text: 减少总通信字节数（合并后字节数更少）
+      - id: b
+        text: 摊薄 NCCL 启动开销（每次 all-reduce 启动 ~10us，1000 个 param 单独算就是 10ms 浪费）
+        correct: true
+      - id: c
+        text: 让 grad 数值更稳定（合并后误差小）
+      - id: d
+        text: 节省 GPU 显存
+    explanation: |
+      NCCL all-reduce 的时间成本 = 启动开销 + 字节数 / 带宽。
+        - 单次启动开销：~10us（即使 0 字节）
+        - 7B 模型有 ~600 个 param，全部单独 all-reduce → 6ms 纯启动开销
+        - bucketing 25MB → 大约 ~60 次 all-reduce，启动开销缩到 0.6ms
+
+      合并不省字节，也不影响数值——目的就是**摊薄 NCCL 启动开销**。
+
+      为什么是 25MB？经验值：太小没合并好处；太大单次 all-reduce 时间太长，
+      影响与 backward 的 overlap（bucket 越小 越早能开始通信）。25MB 是早期
+      benchmark 跑出来的甜蜜点，PyTorch DDP `bucket_cap_mb=25` 默认值就是这个。
+
+      H100 / NVLink 时代有人主张降到 5-10MB（带宽更高，每次通信更快），但
+      默认 25 仍然在大多数场景接近最优。
+
+  - id: q2_bucket_overlap
+    prompt: |
+      PyTorch DDP 的"bucket overlap with backward"指的是什么？
+    options:
+      - id: a
+        text: bucket 之间互相计算重叠
+      - id: b
+        text: 当一个 bucket 内所有 param 的 grad 都准备好时，立即异步发起 all-reduce；
+              backward 继续算下一个 bucket，二者并行执行
+        correct: true
+      - id: c
+        text: bucket 在 GPU 显存里 overlap 存储
+      - id: d
+        text: bucket 与 forward 计算 overlap
+    explanation: |
+      backward 是反向遍历，最后一层的 grad 先算完。DDP 的 reducer hook 在每个
+      param 的 grad 写入时被调用，记录"这个 bucket 还差几个 param"。一旦 bucket
+      凑齐，立刻提交一个 NCCL all-reduce 到 stream，**不等 backward 算完**。
+
+      时间线：
+      ```
+      backward 时间轴：[layer N grad][layer N-1 grad][layer N-2 grad]...
+      通信时间轴：    →[bucket K all-reduce  ][bucket K-1 all-reduce]...
+      ```
+      二者 overlap 到 `T_total = max(T_backward, T_comm)` 而不是 `T_backward + T_comm`。
+
+      关键工程细节：
+      - bucket 划分顺序应该与 backward 触发顺序**反向**——让最后一层的 grad
+        先填满最早的 bucket（这样最早能开始通信）
+      - 实际 PyTorch DDP 的 reducer 在 init 时按 reverse 模型层顺序分配 bucket
+
+      面试金句："DDP 的实质优化是 bucket overlap with backward，不是 bucket 合并字节。"
+
+  - id: q3_zero1_vs_ddp
+    prompt: |
+      ZeRO-1 / Megatron's distributed optimizer 与 vanilla DDP 的核心区别是什么？
+    options:
+      - id: a
+        text: ZeRO-1 用 reduce-scatter 替代 all-reduce
+      - id: b
+        text: ZeRO-1 把 **optimizer states**（Adam 的 m, v）切到不同 rank，
+              backward 用 reduce-scatter 而非 all-reduce；step 后用 all-gather 同步参数
+        correct: true
+      - id: c
+        text: ZeRO-1 不需要 backward 通信
+      - id: d
+        text: ZeRO-1 只对 fp16 训练有效
+    explanation: |
+      vanilla DDP：每张 rank 持有完整的 params + grads + optimizer states。
+        - Adam 7B fp16 训练：14GB params + 28GB master + 56GB Adam states = 98GB
+        - **每张 rank 都重复 98GB**，浪费 (ws-1)/ws 的显存
+
+      ZeRO-1：optimizer states 按 1/ws 切到不同 rank。
+        - 每张 rank 持有 56/ws GB Adam states
+        - backward 时用 **reduce-scatter** 而不是 all-reduce：每个 rank 只拿到
+          自己负责那部分 param 的累加梯度
+        - optimizer.step() 各自更新自己的 params 切片
+        - 最后 **all-gather** 让所有 rank 都看到完整的更新后 params（用于下一步 forward）
+
+      通信代价对比：
+        DDP    backward: 1 次 all-reduce  (=1× ring volume)
+        ZeRO-1 backward: 1 次 reduce-scatter + 1 次 all-gather (= 2× ring volume)
+      多 1 倍通信，省 ws-1 倍显存。这就是 trade-off。
+
+      ZeRO-2：再切 grads（多省 ws-1× grad 字节，通信不变）
+      ZeRO-3：再切 params（forward/backward 都需要 all-gather，通信成本翻倍）
+
+      Megatron Distributed Optimizer = ZeRO-1（PyTorch FSDP 是 ZeRO-3）。
+
+  - id: q4_flatten_unflatten
+    prompt: |
+      为什么 bucket all-reduce 通常用 `_flatten_dense_tensors` + `_unflatten_dense_tensors`
+      （把多个 grad 拼成一个连续 tensor 再 all-reduce），而不是循环对每个 grad 单独 all-reduce？
+    options:
+      - id: a
+        text: 拼接更省内存
+      - id: b
+        text: NCCL 单次 all-reduce 一个连续 buffer 比多次 all-reduce 多个小 buffer 快得多
+              （avoid setup cost + better link utilization）
+        correct: true
+      - id: c
+        text: 拼接让数值更稳定
+      - id: d
+        text: 这是 PyTorch 唯一支持的 API
+    explanation: |
+      NCCL 在 bandwidth 上是 ring all-reduce，效率公式：
+        T = α + β × N，其中 α 是启动开销，β 是单字节时间，N 是总字节数
+
+      多次小 all-reduce：T = k × (α + β × N/k) = kα + βN
+      单次大 all-reduce：T = α + βN
+      节省：(k-1) × α
+
+      对于 25MB bucket / 1000 个 param 的模型：k=600（如果不合并），
+      省约 6ms 启动开销。
+
+      此外 NCCL 在大 buffer 上能更好利用 NVLink/InfiniBand 的双向带宽
+      （ring 算法的特性），小 buffer 利用率不到一半。
+
+      _flatten_dense_tensors：把多个不同 shape 的 grad 在内存里 contiguous 起来
+      （内部是 torch.cat([t.flatten() for t in tensors])）
+      _unflatten_dense_tensors：分回原 shape
+
+      实际生产实现（PyTorch DDP / Megatron）会进一步用 `gradient_as_bucket_view`：
+      让 param.grad 直接是 bucket buffer 的 view，省一次 copy。
+
+  - id: q5_ckpt_change_ws
+    prompt: |
+      你用 ZeRO-1 训练，optimizer states 切到 8 张卡。第二天换 4 张卡继续训练，
+      会怎样？
+    options:
+      - id: a
+        text: 完美兼容
+      - id: b
+        text: optimizer state shape 不匹配，必须先做 ckpt 转换
+              （所有 rank gather → 重新切到 4 份）
+        correct: true
+      - id: c
+        text: 加载成功但 loss 偏高
+      - id: d
+        text: 性能退化但数值正确
+    explanation: |
+      与 L02 quiz Q4（TP ckpt 切换）同类问题：optimizer state 是按 rank 切的，
+      所以 shape 直接依赖 ws。
+
+      切 ws=8 → 4 的步骤：
+        1. 启动 ws=8，每张卡加载自己的 optimizer state 切片
+        2. 用 dist.all_gather 把所有 rank 的 state 合并成完整 (out, in) 形状
+        3. （关闭旧集群）
+        4. 启动 ws=4，每张卡按新 ws 重新切一份
+        5. 各自 save 新 optimizer state
+
+      Megatron 提供 `tools/checkpoint/util.py`；DeepSpeed 提供
+      `zero_to_fp32.py`。
+
+      生产环境实操：训练大模型时尽量保持 ws 不变；如果硬件出问题必须改 ws，
+      预算 1-2 小时做 ckpt convert。
+
+      面试金句："任何把状态按 rank 切分的并行（TP / ZeRO / EP），
+      切片度都耦合在 ckpt 里——换并行度必须做转换。"

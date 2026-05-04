@@ -1,0 +1,8 @@
+profile: cpu_smoke
+mode: tokenize_only
+data:
+  source: synthetic
+  num_samples: 8
+max_length: 128
+acceptance:
+  min_assistant_tokens: 1

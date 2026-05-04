@@ -1,0 +1,84 @@
+mission: l12_fsdp2_llama
+title: L05.3 Quiz · FSDP2 wrap 与 MixedPrecisionPolicy
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能把 fully_shard 的 wrap 顺序、reshard 时机、mp policy 选型
+  讲清楚。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l12_fsdp2_llama/patch/task.md
+  - title: 读 PyTorch FSDP2 文档
+    kind: source
+    path: github_repo/pytorch/torch/distributed/_composable/fsdp/fully_shard.py
+  - title: 读 TorchTitan apply_fsdp2
+    kind: source
+    path: github_repo/torchtitan/torchtitan/parallelisms/parallelize_llama.py
+
+questions:
+  - id: q1_wrap_order
+    prompt: 为什么 FSDP2 推荐"先 wrap 每个 block，再 wrap root"？
+    options:
+      - id: a
+        text: 这样 root 的参数列表只剩 unsharded 的 embedding/head，blocks 各自管理 unshard/reshard
+        correct: true
+      - id: b
+        text: 反过来才正确
+      - id: c
+        text: 顺序无关
+      - id: d
+        text: 先 root 才能注册 hook
+    explanation: "FSDP2 的 unshard 粒度等于 wrap 粒度；先 block 再 root 才能让 block 之间真正流水。"
+  - id: q2_reshard
+    prompt: `reshard_after_forward=True` 的代价是什么？
+    options:
+      - id: a
+        text: 反向时需要再次 all-gather，但显存占用更小
+        correct: true
+      - id: b
+        text: 完全无代价
+      - id: c
+        text: 必须用 fp32
+      - id: d
+        text: 会让 loss 变 NaN
+    explanation: "reshard 之后反向 backward 还要再 all-gather 一次；时间换显存。"
+  - id: q3_mp_policy
+    prompt: `MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32)` 的含义？
+    options:
+      - id: a
+        text: 计算用 bf16，gradient reduce 用 fp32 提高数值稳定性
+        correct: true
+      - id: b
+        text: 全部 fp32
+      - id: c
+        text: 全部 fp16
+      - id: d
+        text: 只用 int8
+    explanation: "param_dtype 控制前向计算精度；reduce_dtype 控制 NCCL 全归约累加精度。"
+  - id: q4_grad_form
+    prompt: FSDP2 下每个 rank 看到的 `param.grad` 形状是什么？
+    options:
+      - id: a
+        text: 1D shard（DTensor 视图，rank 维度切分）
+        correct: true
+      - id: b
+        text: 与 param 完整形状一致
+      - id: c
+        text: 一定是 0D
+      - id: d
+        text: 由 Triton kernel 决定
+    explanation: "FSDP2 用 DTensor，每个 rank 只看到自己那片。"
+  - id: q5_save
+    prompt: 推荐的 FSDP2 checkpoint 类型是？
+    options:
+      - id: a
+        text: SHARDED_STATE_DICT（每 rank 保存自己分片，恢复时支持重切）
+        correct: true
+      - id: b
+        text: FULL_STATE_DICT 永远是首选
+      - id: c
+        text: 不保存 optimizer state
+      - id: d
+        text: 把 fp32 master weights 丢掉
+    explanation: "SHARDED_STATE_DICT 支持任意 rank 数恢复，FULL_STATE_DICT 只用于发布给推理。"

@@ -1,0 +1,80 @@
+mission: l16_resume_after_crash
+title: L05.8.5 Quiz · Crash-safe checkpoint
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能讲清原子写、RNG state、resume 不变量。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l16_resume_after_crash/patch/task.md
+  - title: 读 PyTorch torch.save 文档与 fsync
+    kind: source
+    path: github_repo/pytorch/torch/serialization.py
+
+questions:
+  - id: q1_atomic
+    prompt: 为什么 save 必须先写 `.tmp` 再 rename？
+    options:
+      - id: a
+        text: 同名 rename 是 POSIX 原子操作，避免 reader 看到半写文件
+        correct: true
+      - id: b
+        text: 加快磁盘速度
+      - id: c
+        text: 兼容 Windows
+      - id: d
+        text: 必须 fp16
+    explanation: "原子 rename 是 crash-safe 写入的标准 idiom。"
+  - id: q2_rng
+    prompt: 不保存 RNG state 的后果是？
+    options:
+      - id: a
+        text: resume 后 dropout / batch shuffle 不再与原 run 一致，loss 曲线偏离
+        correct: true
+      - id: b
+        text: 不影响
+      - id: c
+        text: 模型必须重新初始化
+      - id: d
+        text: tokenizer 失效
+    explanation: "RNG 是 reproducible run 的一部分；包括 numpy / torch / cuda RNG。"
+  - id: q3_optimizer
+    prompt: optimizer state 也属于 checkpoint 的原因？
+    options:
+      - id: a
+        text: AdamW 的 m/v 是历史的指数移动平均，不恢复就会"重启"动量
+        correct: true
+      - id: b
+        text: 它和 model 等价
+      - id: c
+        text: 仅为日志
+      - id: d
+        text: 不必恢复
+    explanation: "丢 optimizer state 等于 warm-up 重新开始。"
+  - id: q4_partial
+    prompt: 启动时检测到只有 `.tmp` 文件应该怎么做？
+    options:
+      - id: a
+        text: 删掉 tmp，回退到上一个 committed checkpoint
+        correct: true
+      - id: b
+        text: 把它当作正常 checkpoint 加载
+      - id: c
+        text: 报错退出
+      - id: d
+        text: 改名为正式 checkpoint
+    explanation: ".tmp 表示上次 save 没完成；必须丢弃。"
+  - id: q5_idempotent
+    prompt: 同 step 反复 save 应当？
+    options:
+      - id: a
+        text: 幂等：要么覆盖，要么 no-op；不能创建重复文件
+        correct: true
+      - id: b
+        text: 抛异常
+      - id: c
+        text: 文件越攒越多
+      - id: d
+        text: 改 step 编号
+    explanation: "save_checkpoint(step) 必须 idempotent，否则崩溃恢复期间会爆炸。"

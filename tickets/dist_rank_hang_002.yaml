@@ -1,0 +1,78 @@
+id: dist_rank_hang_002
+title: Collective 中 rank hang（all_reduce / barrier 卡住）
+mission: l05_distributed_primitives
+severity: high
+symptom: torchrun / DDP 启动后训练看似正常，在某次 `all_reduce` / `barrier` / `broadcast` 阶段所有 GPU 利用率掉到 0% 或只有部分 rank 的日志继续打印；nvidia-smi 显示 GPU 100% 或 0%，进程没退出也没报错，挂几十秒到几分钟后才 NCCL watchdog 触发。
+error_signatures:
+- "Watchdog caught collective operation timeout: WorkNCCL ... ran for Xms"
+- "[Rank 0] NCCL WARN Connect to ... failed 只出现在部分 rank"
+- rank0 的 log 停留在某个 step，rank1/2/... 的 log 停在**另一个** step
+- "`py-spy dump` 显示 rank 卡在 `torch.distributed.all_reduce` 或 `barrier`"
+- 设了 `NCCL_DEBUG=INFO` 后某些 rank 没有 "NCCL INFO Connected" 行
+classification_questions:
+- 所有 rank 是都 hang 在同一个 collective，还是**不同 rank 停在不同行**？——后者几乎一定是代码路径分叉。
+- 本次只改了什么：模型结构、loss（新增 if 分支）、batch 里某些 sample skip、launcher、NCCL 版本、`CUDA_VISIBLE_DEVICES`？
+- 单机能复现吗？把 `torchrun --nproc_per_node=2` 缩到 2 卡是否仍然 hang？
+- "`NCCL_DEBUG=INFO` 下每个 rank 是否都输出了 \\NCCL INFO Connected all rings\\\"？\""
+likely_causes:
+- 代码路径分叉：某个 rank 走进 `if loss is not None:` 分支多调用了一次 collective，其它 rank 少调一次 → 顺序/次数不一致。
+- Uneven data：DataLoader 在最后一个 batch 上某个 rank 是空 / drop_last 不一致，导致有的 rank 提前退出循环。
+- Forward 路径里有动态控制流（padded/unpadded、empty sample skip），不同 rank 模型结构不等价。
+- 某个 rank 上的 tensor shape / dtype 与别人不一致，NCCL 不报错直接 hang。
+- 网络/拓扑：IB/NVLink 不可用，fallback 到 IP socket，某一端口被占用（`NCCL_SOCKET_IFNAME` 配错）。
+- 多个 torchrun 进程抢同一 rendezvous / master port。
+minimal_checks:
+- 对所有 rank 同时 `py-spy dump --pid <pid>`；如果每个 rank 的栈**不在同一行**，就是代码路径分叉。
+- 在进入疑似 collective 前加 `print(f"[rank={rank}] step={step} before all_reduce")`，比较所有 rank 最后一行 → 哪个 rank 缺一次 collective 就是它。
+- "`NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET,COLL` 重跑；每个 rank 都该出现 \\NCCL INFO Connected all rings\\\"。没有的 rank 就是没完成 init。\""
+- 设 `TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_ASYNC_ERROR_HANDLING=1 TORCH_NCCL_BLOCKING_WAIT=1`，让 timeout 直接抛 exception 带 traceback。
+- "`ls /dev/infiniband` + `ibstat`；或临时 `NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=1` 强制 socket 路径排除硬件问题。"
+minimal_fixes:
+- 代码分叉：改成**所有 rank 每个 step 调同样次数的 collective**，空 batch 也要让所有 rank 都走完。
+- Uneven data：`DistributedSampler(drop_last=True)` 或在每个 epoch 末尾手动 pad 一个空 batch。
+- 锁 NCCL 版本：`pip list | grep nccl`；升降级 PyTorch 到与 driver/NCCL 匹配的组合。
+- 显式固定网卡：`NCCL_SOCKET_IFNAME=eth0`（或 `bond0`），确保所有 rank 走同一 interface。
+- Port 冲突：`torchrun --rdzv-endpoint=localhost:29501` 换一个端口。
+what_not_to_do:
+- 不要只看 rank0 日志。rank0 停在哪里只是结果，**拉开每个 rank 的最后一行 log** 才是根因。
+- 不要用 `time.sleep()` + 重试来掩盖 hang，hang 不会自愈，只会把假象累积到 watchdog。
+- 不要直接升级 NCCL / 换 launcher 来“试试看”，先做 py-spy dump 定位栈。
+- 不要把 uneven batch 的 rank 上的 collective `try/except` 忽略——对端 rank 会永久等待。
+hint_1: |
+  让每个 rank 都在每个 step 的**同一位置**打印：
+  ```python
+  import os
+  rank = int(os.environ["RANK"])
+  print(f"[rank={rank}] step={step} before_bwd", flush=True)
+  loss.backward()
+  print(f"[rank={rank}] step={step} after_bwd", flush=True)
+  dist.all_reduce(...)  # 如果有
+  print(f"[rank={rank}] step={step} after_allreduce", flush=True)
+  ```
+  收集所有 rank 的最后一行。
+  - 所有 rank 都停在同一行（比如 `after_bwd`）→ 是 collective/网络问题，看 hint_2。
+  - 不同 rank 停在**不同行** → 是代码路径分叉，直接看 solution 的「代码分叉」分支。
+hint_2: |
+  所有 rank 都停在同一个 collective 时，先排除网络：
+  ```
+  NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET \
+  TORCH_NCCL_BLOCKING_WAIT=1 TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  torchrun --nproc_per_node=2 your_script.py
+  ```
+  看日志：
+  - 某个 rank 没有 "NCCL INFO Connected all rings" → rendezvous / IB 问题。临时 `NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=1 NCCL_SOCKET_IFNAME=lo`（单机）验证是否网络问题。
+  - 所有 rank 都 Connected 了但仍 hang → shape/dtype mismatch。在 collective 前 `assert tensor.shape == expected_shape and tensor.dtype == expected_dtype`，发送前所有 rank `dist.all_gather` 一次 shape 做交叉验证。
+  - Watchdog timeout 消息里的 "ran for Xms" 很大（如 1800000）→ 可能是对端卡死在其它地方，回到 hint_1 查代码分叉。
+solution: |
+  Rank hang 的定位路径是固定的：**先 py-spy / per-rank log 定位是否路径分叉，再看网络连通，最后查 shape/dtype 一致性**。
+  1. 代码路径分叉（最常见）：
+     - 某个 rank 在 `if loss is not None` / `if len(batch) > 0` 分支里跳过了一次 `all_reduce` 或 `dist.barrier()`。
+     - 修复：把 collective 提到 if 外面，或让所有 rank 同样跳过；用 `DistributedSampler(drop_last=True)` 避免 uneven batch。
+  2. Shape/dtype 不一致：
+     - 动态 seq length 未 pad 到统一长度就 all_reduce；某个 rank 数据 fp16 别的 fp32。
+     - 修复：collective 前统一 shape/dtype；在模型入口加 `assert x.shape[1] == cfg.seq_len`。
+  3. 网络/NCCL：
+     - 多机间 `NCCL_SOCKET_IFNAME` 没对齐，或 IB 不可用，或端口被占。
+     - 修复：显式设 `NCCL_SOCKET_IFNAME`，换 rdzv 端口，或用 `NCCL_IB_DISABLE=1` 验证是否 IB 问题。
+  4. 最终报告里必须写清：栈 dump 在哪张截图、每个 rank 最后一行 log、修复前/后的 step time 对比。
+  参考：labs/l03_nccl_ddp_smoke、labs/l05_distributed_primitives、PyTorch NCCL debug 文档。

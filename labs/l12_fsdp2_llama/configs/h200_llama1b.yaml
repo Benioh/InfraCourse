@@ -1,0 +1,27 @@
+profile: h200_llama1b
+mode: train_smoke
+model:
+  hidden_size: 2048
+  num_layers: 22
+  num_attention_heads: 16
+  vocab_size: 32000
+  size_label: 1B
+training:
+  micro_batch_size: 2
+  global_batch_size: 16
+  seq_length: 1024
+  train_steps: 100
+  precision: bf16
+mp_policy:
+  param_dtype: bfloat16
+  reduce_dtype: float32
+reshard_after_forward: true
+optimizer:
+  name: adamw
+  lr: 3.0e-4
+acceptance:
+  loss_drop_first_50_steps: 0.5
+  peak_memory_gb_under: 35
+torchrun_command: >
+  torchrun --nproc_per_node=8 --standalone
+  scripts/run_fsdp2_smoke.py --config configs/h200_llama1b.yaml

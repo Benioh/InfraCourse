@@ -1,0 +1,50 @@
+id: l08_megatron_text_pretrain
+title: Cosine With Restarts LR Scheduler
+level: L04
+act: 第 1 章：训练框架
+role: Megatron 学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - Megatron-LM (对照)
+
+patch:
+  description: |
+    实现 CosineWithRestartsLR：在多段 cosine 衰减区间之间做"热重启"——
+    每个 restart_step 把 lr 重置回 max_lr。Megatron 没有内置这个，但 SDXL /
+    长训 LLM 经常需要。
+  task_md: labs/l08_megatron_text_pretrain/patch/task.md
+  starter_file: labs/l08_megatron_text_pretrain/patch/starter/lr_scheduler.py
+  reference_file: labs/l08_megatron_text_pretrain/patch/reference/lr_scheduler.py
+  test_command: make patch-test M=l08_megatron_text_pretrain
+  status_file: labs/l08_megatron_text_pretrain/patch/.last_run.json
+  test_count: 7
+  test_kind: 结果对比
+
+source_reading:
+  - title: Megatron optimizer_param_scheduler 源码
+    repo_path: github_repo/Megatron-LM/megatron/training/optimizer_param_scheduler.py
+    focus: 看 Megatron 的 LR scheduler 接口；linear / cosine / inverse_square_root 三种
+  - title: PyTorch CosineAnnealingWarmRestarts 源码
+    repo_path: docs/术语表.md
+    focus: 看 PyTorch 自带 warm restarts 与本关的差别
+
+mini_infra_targets:
+  - mini_infra/megatron/training/
+
+notebooks: []
+
+tickets:
+  - mgt_oom_001
+  - mgt_checkpoint_002
+  - mgt_tokenizer_003
+
+prereq: l06_torchtitan_training
+next_lab: l09_long_context_cp
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 完整 Megatron 训练验证（可选）

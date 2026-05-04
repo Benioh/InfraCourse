@@ -1,0 +1,46 @@
+id: l32_slime_rl_core
+title: SLiME Weight Sync Coordinator
+level: L11
+act: 第 4 章：RL 与对齐
+role: SLiME 学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - SLiME / OpenRLHF (对照)
+
+patch:
+  description: |
+    实现 WeightSyncCoordinator：从 train state_dict 读取 weights，按 shape+dtype
+    匹配后写入 inference state_dict。不匹配的 key 进 mismatched_keys，不抛错。
+    返回 sync 字节数 + tensor 数 + mismatched 列表。
+  task_md: labs/l32_slime_rl_core/patch/task.md
+  starter_file: labs/l32_slime_rl_core/patch/starter/weight_sync.py
+  reference_file: labs/l32_slime_rl_core/patch/reference/weight_sync.py
+  test_command: make patch-test M=l32_slime_rl_core
+  status_file: labs/l32_slime_rl_core/patch/.last_run.json
+  test_count: 5
+  test_kind: 行为契约 + 数值校验
+
+source_reading:
+  - title: SLiME / OpenRLHF weight sync 真实实现
+    repo_path: github_repo/
+
+mini_infra_targets:
+  - mini_infra/slime/
+
+notebooks: []
+
+tickets:
+  - slime_weight_sync_003
+  - slime_megatron_checkpoint_005
+  - slime_sglang_arg_004
+
+prereq: l31_rollout_only_smoke
+next_lab: l33_rl_rollout_freshness
+
+gpu_modes:
+  local: CPU OK
+  cluster: 真 NCCL P2P 跨集群验证（可选）

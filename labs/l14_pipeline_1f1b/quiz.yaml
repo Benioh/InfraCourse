@@ -1,0 +1,80 @@
+mission: l14_pipeline_1f1b
+title: L05.7 Quiz · PP / 1F1B
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能讲清 1F1B 为什么比 GPipe 内存友好。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l14_pipeline_1f1b/patch/task.md
+  - title: 读 Megatron schedules.py
+    kind: source
+    path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+
+questions:
+  - id: q1_bubble
+    prompt: 经典 1F1B pipeline bubble 总长度（以 stage time 为单位）？
+    options:
+      - id: a
+        text: 2(D-1)（warmup + cooldown 各 D-1）
+        correct: true
+      - id: b
+        text: D
+      - id: c
+        text: 0
+      - id: d
+        text: D²
+    explanation: "warmup 让前面 stage 把后面 stage 排空；cooldown 反之。"
+  - id: q2_memory
+    prompt: 1F1B 比 GPipe 省内存的关键？
+    options:
+      - id: a
+        text: 1F1B 让每个 stage 同时驻留的激活 ≈ pp_stage_count，而 GPipe 是 num_microbatches
+        correct: true
+      - id: b
+        text: 不需要存 activation
+      - id: c
+        text: 只用 fp16
+      - id: d
+        text: 不存 grad
+    explanation: "1F1B 在 steady 阶段把已 backward 的 microbatch activation 释放掉。"
+  - id: q3_microbatch
+    prompt: 增加 num_microbatches 对 bubble 比例的影响？
+    options:
+      - id: a
+        text: 比例下降（bubble 不变，总时间变长），但 micro batch 太大会反而损害收敛
+        correct: true
+      - id: b
+        text: bubble 比例反而上升
+      - id: c
+        text: 与吞吐无关
+      - id: d
+        text: 必须等于 stage 数
+    explanation: "工业经验：num_microbatches ≈ 4×D 起步即可，更多收益递减。"
+  - id: q4_constraint
+    prompt: 1F1B 要求 num_microbatches ≥ num_stages 的原因？
+    options:
+      - id: a
+        text: warmup 阶段每个 stage s 需要 D - s - 1 个未消化的 forward，否则不够 fill
+        correct: true
+      - id: b
+        text: 编译器要求
+      - id: c
+        text: 是任意约束
+      - id: d
+        text: 只有 transformer 才需要
+    explanation: "若 num_microbatches < num_stages，1F1B 无法填满 pipeline。"
+  - id: q5_interleaved
+    prompt: Megatron interleaved 1F1B 的优化点？
+    options:
+      - id: a
+        text: 把每个 device 拆成多个 virtual stage，warmup/cooldown 比例进一步下降
+        correct: true
+      - id: b
+        text: 不再需要 backward
+      - id: c
+        text: 只有 MoE 才能用
+      - id: d
+        text: 必须 fp8
+    explanation: "interleaved schedule 把 D 个真实 stage 切成 V·D virtual stage。"

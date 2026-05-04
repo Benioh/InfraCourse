@@ -1,0 +1,153 @@
+id: moe_capacity_overflow_002
+title: MoE capacity factor=1.0 时大量 token 被 drop，loss 抖动
+mission: l13_moe_ep
+severity: medium
+symptom: |
+  把 capacity_factor 设为 1.0 期望"显存最省"，结果：
+  (a) `capacity_overflow_rate > 5%`（5-30% token 被 drop）；
+  (b) loss 曲线明显抖动，比 cf=1.25 时方差大 3x+；
+  (c) eval acc 比 cf=1.25 低 1-3pp；
+  (d) 偶尔出现某个 batch 的 dropped > 50%（极端 imbalance）。
+error_signatures:
+- "capacity_overflow_rate > 0.05"
+- "loss std / loss mean > 0.3"
+- "训练 acc 周期性 spike up & down"
+- "tokens_per_expert_max == capacity 但还有 dropped token 存在"
+- "某个 batch 的 dropped_tokens > batch_size * top_k * 0.5"
+classification_questions:
+- 是固定一两个 expert 在打满 capacity，还是所有 expert 都接近 capacity？
+- aux_loss 是否健康（router_entropy > 0.85）？collapse 也会让 cf=1.0 大量 drop
+- 数据是否有 batch-level distribution shift（某些 batch 的 token 极度偏向某专家）？
+- top-k 是 1 还是 2？top-k=2 同样的 cf 实际容量需求是 2 倍
+- batch_size × top_k 是否远小于 num_experts？小 batch 时 imbalance 更明显
+likely_causes:
+- capacity_factor 太低：1.0 只够均匀分布；任何 imbalance 都会 overflow
+- top-k=2 的 capacity 算法用错了：cf 应该按 (tokens × top_k / experts × cf) 算，而不是 (tokens / experts × cf)
+- 配合 router collapse：collapse 把所有 token 推向一个 expert，那个 expert 立即 overflow
+- batch_size 太小：MoE 在小 batch 上 imbalance 概率高
+- 数据排序：相同主题的 token 聚在一个 batch（如 all-Chinese-batch + all-English-batch）
+minimal_checks:
+- 用 `mini_infra/megatron/core/transformer/moe/capacity.py:apply_capacity` 模拟：
+  ```python
+  from mini_infra.megatron.core.transformer.moe.router import route_tokens, synthetic_logits
+  from mini_infra.megatron.core.transformer.moe.capacity import apply_capacity
+  for cf in [1.0, 1.25, 1.5, 2.0]:
+      logits = synthetic_logits(64, 8, collapse=False)
+      routes = route_tokens(logits, top_k=2)
+      result = apply_capacity(routes, num_experts=8, capacity_factor=cf)
+      print(f'cf={cf}: kept={result["kept"]}, dropped={result["dropped"]}, '
+            f'overflow_rate={result["capacity_overflow_rate"]:.4f}')
+  ```
+- 监控 `dropped_tokens / total_tokens` 历史曲线，看是否周期性 spike
+- 同时跑 cf=1.0 / 1.25 / 1.5 三组训练，比 eval acc 与 step time
+- dump 几个高 overflow 的 batch 的 tokens_per_expert 直方图，看是哪几个 expert 打满
+- 检查 `apply_capacity` 是否正确处理 dropped token（drop 还是 reroute）
+minimal_fixes:
+- cf 提到 1.25-1.5：是工业界默认（GShard 1.0、Switch 1.25、Mixtral 2.0）
+- 修 capacity 公式：
+  ```python
+  capacity = ceil(num_tokens * top_k / num_experts * capacity_factor)
+  ```
+  注意 top_k 是分子！
+- 加 jitter / shuffle：在 batch 内 shuffle token 顺序，减少 batch-level imbalance
+- 增大 batch_size 或 grad_accum：单 batch 的 token 越多，imbalance 概率越低
+- 同步修 router collapse（看 `moe_router_collapse_001`），二者经常一起出现
+- dropped token 的处理：drop 还是 reroute 到次优 expert？Switch 默认 drop（用残差跳过）；GShard 可 reroute
+what_not_to_do:
+- 不要把 cf 拉到 4.0 以上"保险"——大量 padding/empty slot 浪费显存
+- 不要在 cf 调好之前就上 EP——EP 通信也会受 capacity 影响
+- 不要忽略 dropped 仍训练——dropped token 的 loss 信号丢失
+- 不要把 dropped 错误归因到 lr 或 optimizer——这是结构问题
+- 不要在 cf=1.0 上跑出"成功" run 然后说 \"capacity 优化完美\"——你只是没监控 overflow
+hint_1: |
+  3 分钟法：跑 cf 4 组对照看 overflow_rate：
+  ```python
+  from mini_infra.megatron.core.transformer.moe.router import route_tokens, synthetic_logits
+  from mini_infra.megatron.core.transformer.moe.capacity import apply_capacity, capacity_per_expert
+
+  num_tokens = 1024  # 模拟 batch_size × seq_len
+  num_experts = 8
+  top_k = 2
+
+  for cf in [0.8, 1.0, 1.25, 1.5, 2.0]:
+      cap = capacity_per_expert(num_tokens, num_experts, top_k, cf)
+      logits = synthetic_logits(num_tokens, num_experts, collapse=False)
+      routes = route_tokens(logits, top_k=top_k)
+      result = apply_capacity(routes, num_experts, capacity_factor=cf)
+      print(f'cf={cf:>4}  capacity={cap:>4}  '
+            f'overflow_rate={result["capacity_overflow_rate"]*100:>5.2f}%  '
+            f'kept={result["kept"]}/{num_tokens*top_k}')
+  ```
+  期待：
+  - cf=0.8: overflow > 10% （太低）
+  - cf=1.0: overflow 1-5% （边界）
+  - cf=1.25: overflow < 1% （甜区）
+  - cf=2.0: overflow ≈ 0 （浪费显存）
+
+  4090 显存紧的话 cf=1.25；H200 充裕可 cf=1.5-2.0。
+hint_2: |
+  cf=1.25 仍 overflow > 5% 时，问题是 router collapse 或 batch imbalance。
+
+  检查 collapse：
+  ```python
+  from mini_infra.megatron.core.transformer.moe.router import (
+      router_entropy, tokens_per_expert
+  )
+  logits = your_actual_router_output
+  routes = route_tokens(logits, top_k=2)
+  print('entropy:', router_entropy(routes, num_experts))   # > 0.85 健康
+  counts = tokens_per_expert(routes, num_experts)
+  print('p99/p50 ratio:', max(counts) / sorted(counts)[len(counts)//2])  # < 2 健康
+  ```
+  如果 entropy < 0.5 → 触发 ticket `moe_router_collapse_001` 流程。
+
+  检查 batch imbalance（数据问题）：
+  - 把 dataloader 的 shuffle 打开（很多人忘了）
+  - 加 batch-level token shuffle：在送入 MoE 前 randomly permute token 位置
+  - 用 group BatchNorm 或类似工具检查每 batch 的 token 主题分布
+
+  Reroute（GShard 风格）：把 dropped token 送到次优 expert。代码示意：
+  ```python
+  # primary expert 满了，try secondary
+  for token in dropped_tokens:
+      secondary = routes[token][1]  # top-k=2 的第二位
+      if used[secondary] < capacity:
+          used[secondary] += 1
+      else:
+          # 真 drop，用残差跳过 MoE 层
+          residual_only.append(token)
+  ```
+  Reroute 比 drop 好（保留 loss 信号），但增加 1 次 dispatch + reduce。
+solution: |
+  MoE capacity 调优的修复路径：**(1) 验证 capacity 公式正确 → (2) 选 cf 1.25-1.5 → (3) 防 collapse → (4) reroute 而不是 drop**。
+
+  推荐配置（按训练规模）：
+
+  | 场景 | num_experts | top_k | capacity_factor | 评价 |
+  |---|---|---|---|---|
+  | 学术 / 4090 tiny | 4-8 | 2 | 1.25 | 显存紧凑 |
+  | 标准 (Mixtral 风格) | 8 | 2 | 2.0 | 工业默认 |
+  | 大规模 (DeepSeek 风格) | 64+ | 6-8 | 1.5 | 大模型必须 |
+  | Switch 风格 | 16-128 | 1 | 1.25-1.5 | top-k=1 + 高 noise |
+
+  **Capacity 公式**（不要写错）：
+  ```python
+  capacity = ceil(num_tokens * top_k / num_experts * capacity_factor)
+  ```
+
+  **dropped token 处理两选一**：
+  - **Drop + 残差**（Switch 风格）：丢的 token 直接用 residual 跳过 MoE 层
+  - **Reroute 到次优 expert**（GShard 风格）：增加 1 步 dispatch，但保留 loss 信号
+
+  **必加监控**：
+  - `capacity_overflow_rate`：< 1% 健康
+  - `expert_utilization`：每 expert used / capacity 的均值与最大
+  - `dropped_token_count` 历史
+
+  **报告里必须写**：
+  - cf 5 组（0.8/1.0/1.25/1.5/2.0）的 overflow_rate 与 eval acc 表
+  - 你选的 cf + 理由（按硬件预算）
+  - dropped 处理策略（drop/reroute）+ 一段对比 ablation
+  - capacity 公式实现（贴代码）
+
+  参考：`mini_infra/megatron/core/transformer/moe/capacity.py`、`docs/术语表.md#capacity-factor`、L05.5 README。

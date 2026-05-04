@@ -1,0 +1,49 @@
+id: l11_megatron_scale_optimization
+title: Bucketed Manual DDP（grad 合并 all-reduce）
+level: L05
+act: 第 1 章：训练框架
+role: Megatron 扩展学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch Distributed
+  - Megatron-LM (对照)
+
+patch:
+  description: |
+    把 L01.5 ManualDDP 升级成 BucketedManualDDP：把 params 按字节数分桶，
+    每个桶用 _flatten_dense_tensors 拼接后一次 all-reduce，再 unflatten
+    回去。数值与 PyTorch DDP 完全一致。
+  task_md: labs/l11_megatron_scale_optimization/patch/task.md
+  starter_file: labs/l11_megatron_scale_optimization/patch/starter/bucketed_ddp.py
+  reference_file: labs/l11_megatron_scale_optimization/patch/reference/bucketed_ddp.py
+  test_command: make patch-test M=l11_megatron_scale_optimization
+  status_file: labs/l11_megatron_scale_optimization/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比（与 PyTorch DDP 等价）
+
+source_reading:
+  - title: Megatron distributed_data_parallel
+    repo_path: github_repo/Megatron-LM/megatron/core/distributed/
+    focus: 看 ParamAndGradBuffer 的 bucket 划分与 reduce-scatter
+  - title: PyTorch DDP reducer 的 bucket 与 overlap
+    repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+    focus: 看 ParallelDims 如何组合 DDP/TP/PP
+
+mini_infra_targets:
+  - mini_infra/distributed/
+
+notebooks: []
+
+tickets:
+  - mgt_low_mfu_005
+  - mgt_recompute_tradeoff_007
+
+prereq: l09_long_context_cp
+next_lab: l13_moe_ep
+
+gpu_modes:
+  local: CPU gloo 即可
+  cluster: 多卡 NCCL 测试 throughput

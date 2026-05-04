@@ -1,0 +1,23 @@
+profile: h200_qwen2_7b
+mode: train
+model:
+  hf_name: Qwen/Qwen2.5-7B-Instruct
+data:
+  source: alpaca
+  hf_name: tatsu-lab/alpaca
+  num_samples: 50000
+training:
+  lr: 1.0e-5
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  num_train_steps: 1000
+  warmup_steps: 50
+  precision: bf16
+  max_length: 2048
+  fsdp: full_shard
+acceptance:
+  loss_drop_ratio: 0.5
+  no_nan: true
+torchrun_command: >
+  torchrun --nproc_per_node=8 --standalone
+  scripts/run_sft.py --config configs/h200_qwen2_7b.yaml

@@ -1,0 +1,28 @@
+id: verl_reward_parse_001
+title: verl 奖励解析错误
+mission: l35_multimodal_capstone
+severity: medium
+symptom: verl 奖励解析错误：实验无法得到可信指标，或运行产物与预期不一致。
+classification_questions:
+- 失败发生在启动、数据准备、forward/backward、服务请求、还是指标解析阶段？
+- 最近一次只改变了哪个变量：版本、配置、数据、并行度、端口、还是 batch/sequence？
+- 同一个命令在 validation-only、本地 GPU、H200 三种模式下表现是否一致？
+likely_causes:
+- 配置语义与框架实际期望不一致。
+- 运行命令、环境变量或版本发生漂移。
+- 日志中已有更早的根因，但被后续错误覆盖。
+minimal_checks:
+- 先检查 `command.sh`、`config.resolved.yaml`、主日志和 `metrics.jsonl` 是否互相一致。
+- 只改一个变量，跑最小步数或最小请求数复现。
+- 把失败 run 与最近一次通过 run 的配置做 diff。
+minimal_fixes:
+- 恢复到已知可运行的最小配置，再逐步放大。
+- 补充一个能捕获该失败的 artifact 或 metrics 字段。
+- 在报告中写明验证边界，不把未验证路径当作成功。
+what_not_to_do:
+- 不要一次性修改多个配置来“碰运气”。
+- 不要删除断言、吞掉异常或伪造 metrics。
+- 不要忽略 checkpoint、tokenizer、rank/device、数据 schema 这类边界。
+hint_1: 先定位失败阶段：环境/数据/forward-backward/服务请求/RL rollout/指标解析；只看第一个异常前后的日志。
+hint_2: 对照 `command.sh`、`config.resolved.yaml`、主日志和 `metrics.jsonl`，确认最近一次只改变了一个变量。
+solution: 恢复到已知可运行的最小配置，补充一个能捕获该失败的 artifact 或 metrics 字段，再逐步放大并在报告中写明验证边界。

@@ -1,0 +1,12 @@
+profile: 4090_125m
+total_steps: 200
+crash_at_step: 100
+seed: 7
+model:
+  hidden: 768
+  layers: 12
+  vocab: 32000
+acceptance:
+  rel_loss_diff_max: 0.01
+torchrun_command: >
+  bash scripts/run_crash_drill.sh

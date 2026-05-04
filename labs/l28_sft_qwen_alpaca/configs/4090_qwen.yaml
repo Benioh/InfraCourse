@@ -1,0 +1,20 @@
+profile: 4090_qwen
+mode: train
+model:
+  hf_name: Qwen/Qwen2.5-0.5B-Instruct
+data:
+  source: alpaca
+  hf_name: tatsu-lab/alpaca
+  num_samples: 5000
+  jsonl_fallback: data/alpaca/alpaca_5k.jsonl
+training:
+  lr: 5.0e-5
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 2
+  num_train_steps: 100
+  warmup_steps: 10
+  precision: bf16
+  max_length: 1024
+acceptance:
+  loss_drop_ratio: 0.4    # tail < 0.6 × head
+  no_nan: true

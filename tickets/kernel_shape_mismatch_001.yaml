@@ -1,0 +1,109 @@
+id: kernel_shape_mismatch_001
+title: Triton kernel grid 与张量 shape 不一致（hang / 越界 / NaN）
+mission: l04_gpu_kernel
+severity: high
+symptom: |
+  Triton fused softmax 编译通过、kernel launch 也成功，但出现以下症状之一：
+  (a) 进程"假装在跑"——nvidia-smi GPU 利用率长期保持 0%；
+  (b) 跑完后 max_abs_err 远大于 1e-3（fp32）或 1e-2（fp16）；
+  (c) 输出最后几行全是 NaN，但前面行正确；
+  (d) `cuda::illegal memory access` 在某些 BLOCK_SIZE 下偶发。
+error_signatures:
+- "RuntimeError: CUDA error: an illegal memory access was encountered"
+- "max_abs_err > 0.01" 出现在 seq_len 不是 BLOCK_SIZE 整数倍时
+- "softmax 输出最后 N 个位置全是 NaN，N == seq_len % BLOCK_SIZE"
+- "compute-sanitizer 报 invalid global read of size 4"
+- "nvidia-smi GPU-Util = 0% 但进程占着显存（kernel 在死循环 grid 分支里）"
+classification_questions:
+- 错误是 IMA（illegal memory access）、还是数值错误，还是 hang？三者根因不同。
+- seq_len 是不是 BLOCK_SIZE 的整数倍？把 4096 → 4097 是否就触发？
+- grid 是怎么算的：`(triton.cdiv(n_rows, BLOCK_SIZE),)` 还是 `(n_rows,)`？
+- `tl.load(... mask=...)` 的 mask 写了吗？mask 表达式是否引用了正确的 program_id？
+- 把 `num_warps` 从 4 改到 8 或 1 后症状是否变化？
+likely_causes:
+- grid 函数用 `n_rows // BLOCK_SIZE` 而不是 `triton.cdiv`，最后一行被吃掉
+- 一个 program 处理一行（grid=(n_rows,)）但内部循环 `tl.arange(0, BLOCK_SIZE)` 没加 mask，越界读
+- mask 用 `cols < seq_len` 但 `cols` 是错的 program_id 偏移，导致部分行被算成 0
+- BLOCK_SIZE 不是 2 的幂——Triton 对一些 reduction 要求 BLOCK_SIZE 必须 power-of-2
+- `tl.store` 的 mask 与 `tl.load` 不匹配——load 进来 0 但 store 时把 0 写到本不该写的位置
+- 多维 grid（rows, cols）下，`pid_m` 与 `pid_n` 算偏移用错（行优先 vs 列优先）
+minimal_checks:
+- 最小复现：把 seq_len 从 4096 改成 4097，看是否立刻出错。如果是 → 100% 是 mask/越界
+- `print(f"grid={(triton.cdiv(n_rows, BLOCK_SIZE),)}")` 实际确认 grid 大小
+- 在 kernel 内 `tl.device_print("pid", pid, "offset", offset)` 看每个 program 实际处理的 offset
+- 把 BLOCK_SIZE 临时改成 seq_len（即只跑 1 个 program），如果数值正确 → 100% 是 grid/mask 问题
+- 用 `compute-sanitizer python bench_softmax.py` 跑一次，定位越界发生的 lane
+- 与 `mini_infra/gpu/triton_softmax.py:mask_needed(seq_len, block_size)` 的返回值对照——它告诉你应不应该有 mask
+minimal_fixes:
+- grid 一定用 `triton.cdiv`：`grid = lambda meta: (triton.cdiv(n_rows, meta['BLOCK_SIZE']),)`
+- `tl.load(ptrs, mask=col_offsets < n_cols, other=-float('inf'))` ——softmax 的 mask 必须填 -inf 不能填 0
+- `tl.store(ptrs, output, mask=col_offsets < n_cols)` ——store 同样要 mask
+- BLOCK_SIZE 用 `triton.next_power_of_2(n_cols)` 让它符合 Triton reduction 要求
+- 多维 grid：`offset = pid_m * stride_m + pid_n * stride_n`，对照 PyTorch tensor 的 `.stride()` 验证
+what_not_to_do:
+- 不要用 try/except 把 IMA 吞掉。CUDA 异步执行，except 抓到的不一定是真正的越界 kernel
+- 不要在出现 NaN 后只看 max_abs_err 平均值——NaN 应该是 0% 或 100%，没有"轻微 NaN"
+- 不要把 mask 的 `other` 填成 0——softmax 的 -inf 是正确填充值，0 会让 `exp(0)=1` 污染分母
+- 不要把 BLOCK_SIZE 调小来"绕过"——根因是 mask 缺失，不是 BLOCK 太大
+hint_1: |
+  90% 的 shape mismatch 是 mask 问题。先做这个 5 分钟检查：
+  ```python
+  from mini_infra.gpu.triton_softmax import mask_needed
+  assert not mask_needed(seq_len, block_size), \
+      f"seq_len={seq_len} 不是 BLOCK_SIZE={block_size} 的整数倍，必须在 tl.load/tl.store 上写 mask"
+  ```
+  如果 assertion fail → 你的 kernel 必须有：
+  ```python
+  col_offsets = tl.arange(0, BLOCK_SIZE)
+  mask = col_offsets < n_cols
+  row = tl.load(input_ptr + col_offsets, mask=mask, other=-float('inf'))
+  ```
+  记住 softmax 的 `other` 必须是 `-float('inf')`，不能是 0。
+hint_2: |
+  如果 seq_len 是 BLOCK_SIZE 整数倍但还是错，问题在 grid。
+  逐项确认：
+  ```python
+  print("n_rows =", n_rows)
+  print("BLOCK_SIZE =", BLOCK_SIZE)
+  print("grid =", (triton.cdiv(n_rows, BLOCK_SIZE),))
+  ```
+  在 kernel 内加 `tl.device_print`：
+  ```python
+  pid = tl.program_id(0)
+  row_start = pid * BLOCK_SIZE
+  tl.device_print("pid", pid, "row_start", row_start)
+  ```
+  期待看到 pid 从 0 到 grid-1 全部出现一次。如果某些 pid 的 row_start ≥ n_rows → grid 多了，
+  也要在 kernel 入口加 `if row_start >= n_rows: return`（早退）。
+
+  仍然不对就上 compute-sanitizer：
+  ```bash
+  compute-sanitizer --tool memcheck python labs/l04_gpu_kernel/scripts/bench_softmax.py \
+    --seq 4097 --block 1024
+  ```
+  它会精确告诉你越界发生在 kernel 第几行、哪个 lane。
+solution: |
+  Shape mismatch 的修复路径是固定的：**先用 `mask_needed` 自检 → 加 mask → 验 grid → 上 compute-sanitizer**。
+
+  1. **mask 是必修课**：任何 reduction kernel 都必须考虑 tail block。最小 fused softmax 模板：
+     ```python
+     @triton.jit
+     def softmax_kernel(out_ptr, in_ptr, n_cols, BLOCK_SIZE: tl.constexpr):
+         row = tl.program_id(0)
+         col = tl.arange(0, BLOCK_SIZE)
+         mask = col < n_cols
+         x = tl.load(in_ptr + row * n_cols + col, mask=mask, other=-float('inf'))
+         x_max = tl.max(x, axis=0)
+         e = tl.exp(x - x_max)
+         z = tl.sum(e, axis=0)
+         tl.store(out_ptr + row * n_cols + col, e / z, mask=mask)
+     grid = lambda meta: (n_rows,)
+     softmax_kernel[grid](out, x, n_cols, BLOCK_SIZE=triton.next_power_of_2(n_cols))
+     ```
+  2. **数值验证**：与 PyTorch eager 比对，要求 `max_abs_err < 1e-5` (fp32) 或 `< 1e-3` (fp16)。
+     用 `mini_infra.gpu.triton_softmax.simulate_softmax_kernel` 的结果作为 ground truth。
+  3. **报告里必须写**：你最初哪一步缺 mask；compute-sanitizer 的输出截图；修复后 max_abs_err
+     从多少降到多少；BLOCK_SIZE 是怎么选的（`next_power_of_2(n_cols)` 还是其他）。
+  4. **不要混淆**：grid 错是"hang/IMA"症状；mask 错是"NaN/数值偏大"症状。两个症状对应不同 fix。
+
+  参考：`mini_infra/gpu/triton_softmax.py`、Triton tutorial `02-fused-softmax.py`、L01.7 README 的 Stuck Checklist。

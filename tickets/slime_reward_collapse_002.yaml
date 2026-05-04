@@ -1,0 +1,102 @@
+id: slime_reward_collapse_002
+title: SLiME reward collapse（奖励全 0 / 崩塌到常数 / 训崩后不恢复）
+mission: l32_slime_rl_core
+severity: high
+severity_note: 这是 RL 训练里最难诊断的一类问题，80% 是 reward/parser/tokenizer 问题，而不是 actor 本身。
+symptom: |
+  RL 训练跑起来 metrics 看似正常，但：
+  - `reward_mean` 从一开始就接近 0 或很低，且不上升；或者
+  - `reward_mean` 上升几百步后突然崩到 0 / 负值 / 固定常数，KL 同时飙升；或者
+  - Reward 值正常但模型输出质量退化（rollout 样本看着更差了），policy 学歪了。
+error_signatures:
+- "metrics: reward_mean: 0.0000 持续几百 step"
+- "metrics: reward_mean: -12.8（某个固定负值，parser 失败 fallback）"
+- "WARNING: reward parser returned None for X / Y samples"
+- Rollout 样本里充斥着 `<|endoftext|>` 反复输出或空字符串
+- "KL divergence exploded: kl=X > threshold 伴随 reward 骤降"
+- Parse 成功率（如果 parser 写了）突然从 95% 掉到 20%
+classification_questions:
+- Reward 是**一直 0**，还是**训着训着崩**？前者是 parser/奖励函数问题，后者常常是 actor 策略崩了。
+- Rollout 的 `response` 样本人工看几条，是**看得出意图但 parser 提取不出**，还是**模型根本在输出乱码**？
+- Reward parser 是正则 / 模板 / LLM judge？parser 本身的单元测试覆盖率？
+- KL、entropy、log_prob_mean 这些 proxy metrics 在 collapse 前后的走势？
+- Reference model（KL anchor）与 actor 是同一 tokenizer 同一架构吗？
+likely_causes:
+- Reward parser 跟 rollout 实际输出格式不一致：训练早期 parser 能抓到部分样本给正奖励，policy 学到“输出更难被 parse 的文本” → parser 成功率暴跌 → reward 全 0。
+- Reward hack：parser 只看某个关键字，policy 学会滥发该关键字获得高分，其他能力崩了（经典 reward hack）。
+- KL constraint 太弱：policy 走得离 reference 很远，语言能力退化，输出乱码，parser 全失败。
+- Rollout tokenizer / chat template 和 actor 训练时不一致，生成的 token 反向编码回文本时已经坏了。
+- Reference model 加载错了（加载了旧 checkpoint / 不同规模），初始 KL 就很大，后面直接飞。
+- Reward 归一化 / whitening 把 signal 杀没了；或者 advantage normalization 在组内只有 1 个正样本时失效。
+- Weight sync 出错（见 slime_weight_sync_003）：actor 权重没真的同步到 rollout serving，收到的 reward 对应旧 policy，学不动。
+minimal_checks:
+- |
+  **先看样本**：从 rollout log 或 `runs/.../rollout_samples.jsonl` 里随机抽 20 条 `response`，人工过一遍：
+  ```bash
+  jq -r '.response' rollout_samples.jsonl | shuf -n 20 | head -200
+  ```
+  - 样本是「看得出意图但格式不标准」→ parser 问题。
+  - 样本是「乱码 / 疯狂重复 / 全空」→ policy 崩了，KL/lr/weight sync 问题。
+- "跑 parser 的独立 self-test：把这 20 条样本喂给 reward 函数，统计成功率。成功率应 > 90%，否则 parser 就是瓶颈。"
+- "看 `metrics.jsonl` 里的 `kl_mean`、`log_prob_mean`、`entropy_mean` 在 collapse 前 10 步的趋势。KL 一直涨 → policy 跑偏；entropy 骤降 → policy 退化到 mode collapse。"
+- "确认 reference model：`md5sum` reference checkpoint 路径；看启动日志里 reference 加载的参数量 / 架构是否与 actor 一致。"
+- "权重同步：看 SLiME 日志里 `weight sync completed at step X`，确认同步周期与观察到的 reward 变化吻合（见 slime_weight_sync_003）。"
+minimal_fixes:
+- Parser 问题：把 parser 改为更鲁棒的提取（JSON → 正则 fallback → LLM judge fallback），加单元测试 20+ 样例覆盖边界。
+- Reward hack：加正则惩罚（输出长度、重复度、非目标 token 比例），或换更难 hack 的 reward 模型。
+- KL 过大：`kl_coef` 加大（从 0.01 → 0.05），或用 adaptive KL controller；必要时直接 early stop 回滚到 collapse 前的 checkpoint。
+- 数据新鲜度：缩短 weight sync 周期；确认 rollout 用的是最新 actor 权重。
+- Reference model 要求：tokenizer、chat template、模型规模与 actor 完全一致；初始 KL 必须接近 0（< 0.01）。
+- 先用 SFT + DPO 热身，再进入 GRPO/PPO；冷启直接 RL 风险最高。
+what_not_to_do:
+- 不要在 reward 全 0 时立刻调 learning rate / 扩大 batch，根因九成九不在 actor。
+- 不要直接把 KL 阈值关掉，这会加速 collapse。
+- 不要只看 `reward_mean` 一个数字；必须同时看 `kl`、`entropy`、`parse_success_rate`、rollout 样本质量。
+- 不要用 collapse 后的 checkpoint 做任何下游评估，直接丢掉回滚。
+- 不要把 reward parser 的失败样本 default 成 0，这会 bias signal；改成 skip 或记录。
+hint_1: |
+  第一步永远是**看 rollout 样本**而不是看数字。跑：
+  ```bash
+  jq -r '.response' runs/<mission>/<run>/rollout_samples.jsonl \
+    | shuf -n 20 > /tmp/samples.txt
+  # 人工读一遍
+  ```
+  分三类：
+  ```
+  类 A: 样本格式合理，人类能看出答案，但 parser 抓不到
+    → Reward parser 问题。改 parser / 加 fallback。
+
+  类 B: 样本开头还合理，后面退化成重复、乱码、空字符串
+    → Policy collapse。KL 问题 + 检查 weight sync。
+
+  类 C: 样本看着很好，但 reward 依然 0
+    → Reward 函数本身 bug / reward model load 错 / tokenizer 不匹配。
+  ```
+hint_2: |
+  根据分类定位：
+  ```
+  类 A（parser 问题）
+    - 把 parser 抽出来单独跑：python -m slime.rewards.test_parser samples.txt
+    - 统计成功率；加正则 fallback 或 JSON 宽松解析
+    - Parser 改完先跑 validation-only smoke，证明 parse_success_rate > 95%
+
+  类 B（policy collapse）
+    - 看 KL/entropy 曲线：KL > 10 且单调上涨 → kl_coef 太小
+    - 回滚到 collapse 前 3-5 个 checkpoint 的 policy
+    - kl_coef × 3，或改 adaptive KL controller target_kl=6
+    - 确认 weight sync 正常（见 slime_weight_sync_003 ticket）
+
+  类 C（reward 本身）
+    - reference model md5 + 架构检查：与 actor 一致？
+    - tokenizer 双端一致（rollout serving 与 actor 训练用同一 tokenizer）
+    - reward scale / whitening：打印 raw reward 分布，看是否被 norm 压成 0
+  ```
+solution: |
+  Reward collapse 的诊断铁律：**先看样本，再看数字；先看 parser 成功率，再看 actor 指标**。
+  1. 从 rollout 样本人工分类（A/B/C），定方向。
+  2. 类 A：补 parser 单元测试（≥ 20 样例，覆盖边界），用 JSON + 正则 + LLM judge 三层 fallback。
+  3. 类 B：回滚 checkpoint，加 KL coefficient 或用 adaptive KL，检查 weight sync 周期。
+  4. 类 C：逐项对齐 reference / tokenizer / reward model，确保训练早期 KL ≈ 0、reward 分布不是常数。
+  5. 修复后跑 50-100 步验证：`reward_mean` 上升、`kl` 稳定在 target 附近、`parse_success_rate > 95%`、rollout 样本质量人工复核。
+  报告必须贴：分类依据的样本摘录、parser self-test 成功率、KL/entropy 曲线、修复前后 reward_mean 曲线。
+  参考：`github_repo/slime/slime/rollout/`、`github_repo/slime/slime/rewards/`、labs/l29_verl_rl_baseline、labs/l32_slime_rl_core、notebooks/n10_rl_kl_reward。相关 ticket：slime_weight_sync_003、verl_kl_explosion_002、verl_reward_parse_001。

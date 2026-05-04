@@ -1,0 +1,110 @@
+id: spec_draft_oom_002
+title: Spec decode draft 模型导致服务 OOM
+mission: l24_spec_decode
+severity: medium
+symptom: |
+  Target 模型单独启动正常（用 70% 显存）；启用 draft 后启动失败 CUDA OOM，
+  或 KV cache block 数被腰斩，max_concurrent_requests 从 64 降到 16。
+error_signatures:
+- "torch.cuda.OutOfMemoryError after loading draft model"
+- "log: KV cache blocks: 8192 -> 3072 (after draft load)"
+- "max_num_seqs reduced from 64 to 16 to fit draft + target"
+- "draft_gpu_mem_gb = 4.2, target_gpu_mem_gb = 30.5, total > 80GB H100"
+classification_questions:
+- draft 与 target 在同卡还是分卡？
+- draft 模型大小多少？1B / 7B？
+- gpu_memory_utilization 设了多少？默认 0.9
+- draft 量化了吗？（fp16 / awq / fp8）
+- 是否启用了 draft 的 KV cache？draft 也需要自己的 KV
+likely_causes:
+- draft 与 target 同卡：两份模型权重 + 两份 KV cache 共享一张卡
+- gpu_memory_utilization=0.9 + draft 模型 4GB → KV 可用空间被压缩
+- draft 没量化：1B fp16 draft 用 2GB；awq w4a16 仅 0.5GB
+- max_num_seqs 没降：原本设给 target 的 batch 配额，draft 也要分一杯羹
+- draft KV cache 没考虑：draft 也要存自己的 KV
+- num_speculative_tokens × batch 太大：spec 期间 draft 临时存 K×B 个候选
+minimal_checks:
+- 用 mini_infra 看 draft cost 估算：
+  ```python
+  from mini_infra.vllm.spec_decode.draft_runner import spec_decode_summary
+  result = spec_decode_summary(mode="draft_model", concurrency=64)
+  print(f"draft_gpu_mem_gb estimate = {result['draft_gpu_mem_gb']}")
+  ```
+- 单跑 target 看 KV blocks：`vllm.engine_args.max_model_len + log` 显示
+- 单跑 draft（独立 process）看占用
+- 计算总需求 = draft_weights + draft_kv + target_weights + target_kv
+- 看 max_num_seqs 与 max_num_batched_tokens 设置
+minimal_fixes:
+- draft 量化：用 awq w4a16 或 fp8，省 60-75% 权重显存
+- 降 gpu_memory_utilization 到 0.85（留更多 buffer）
+- 降 max_num_seqs（如 64 → 32）
+- 降 num_speculative_tokens（5 → 3）
+- 分卡：draft 在 GPU 1，target 在 GPU 0（牺牲一点延迟换显存）
+what_not_to_do:
+- 不要直接把 draft+target 同卡跑而不算账
+- 不要忽略 draft KV cache；draft 也要存自己的状态
+- 不要为塞下 draft 把 target KV blocks 砍到 < 1024；会让 max_seq 受限
+- 不要 num_speculative_tokens=10；spec 临时占用乘 K
+- 不要看 draft "只有 1B" 就觉得免费；fp16 1B = 2GB，且加 KV cache
+hint_1: |
+  最快定位：算 draft 显存账。
+  ```python
+  draft_param_bytes = 1_000_000_000 * 2  # 1B fp16
+  draft_kv_per_seq = (
+      draft_layers * 2 *  # K+V
+      draft_heads * draft_head_dim * 2  # fp16
+      * max_seq_len
+  )
+  draft_total_kv = draft_kv_per_seq * max_num_seqs
+  print(f"draft total = {(draft_param_bytes + draft_total_kv) / 1e9:.2f} GB")
+  ```
+  与 GPU 总显存 - target 占用对比。
+hint_2: |
+  确认 draft 显存账后，按"压缩优先级"调：
+
+  | 优先级 | 操作 | 节省 |
+  |---|---|---|
+  | 1 | draft 量化到 awq w4a16 | 75% draft weight |
+  | 2 | num_speculative_tokens 5 → 3 | spec 临时占用 -40% |
+  | 3 | max_num_seqs 64 → 32 | 所有 KV -50% |
+  | 4 | gpu_memory_utilization 0.9 → 0.85 | 留 buffer |
+  | 5 | draft 分卡 | 完全分离但加延迟 |
+
+  对照 mini_infra：
+  ```python
+  result = spec_decode_summary(mode="draft_model", concurrency=YOUR_BATCH)
+  print(f"expected draft_gpu_mem_gb = {result['draft_gpu_mem_gb']}")
+  ```
+  如果 expected < 你实测 50%，draft 可能没量化或 KV 超支。
+solution: |
+  Spec draft OOM 的修复路径：**先量化 draft > 降并发参数 > 调 mem util > 分卡兜底**。
+
+  1. **draft 量化**（首选）：
+     ```bash
+     vllm serve target_model \
+       --speculative-model draft_model_awq \
+       --quantization awq \
+       --num-speculative-tokens 4
+     ```
+
+  2. **降并发参数**：
+     - `--max-num-seqs 32`
+     - `--num-speculative-tokens 3`
+     - `--max-num-batched-tokens 4096`
+
+  3. **gpu_memory_utilization**：
+     - 默认 0.9，draft 配 OOM 时调 0.85
+
+  4. **分卡**（兜底）：
+     - draft on GPU 1, target on GPU 0
+     - 加约 1-2ms latency（cross-GPU sync）但完全分离显存
+
+  5. **报告必写**：
+     - draft + target 各自显存占用 + 总和
+     - max_num_seqs 调整前后对照
+     - 是否量化 draft + 量化方法
+     - mini_infra `spec_decode_summary` 的 draft_gpu_mem_gb 预算 vs 实测
+     - 修复前 / 后的 KV blocks 数与 max_concurrent_requests
+
+  参考：mini_infra/vllm/spec_decode/draft_runner.py；
+  github_repo/vllm/vllm/spec_decode/spec_decode_worker.py 的显存分配。

@@ -1,0 +1,16 @@
+{
+  "mission": "l04_gpu_kernel",
+  "passed": true,
+  "exit_code": 5,
+  "started_at": "2026-05-02T13:29:07.976660Z",
+  "finished_at": "2026-05-02T13:29:10.675026Z",
+  "duration_s": 2.7,
+  "summary": {
+    "passed": 0,
+    "failed": 0,
+    "total": 0
+  },
+  "output": "============================= test session starts ==============================\nplatform linux -- Python 3.12.3, pytest-8.1.1, pluggy-1.6.0 -- /usr/bin/python\ncachedir: .pytest_cache\nhypothesis profile 'default' -> database=DirectoryBasedExampleDatabase(PosixPath('/inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l04_gpu_kernel/patch/.hypothesis/examples'))\nrootdir: /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l04_gpu_kernel/patch\nconfigfile: pytest.ini\nplugins: anyio-4.9.0, hypothesis-6.130.8, flakefinder-1.1.0, rerunfailures-15.1, shard-0.1.2, xdist-3.7.0, xdoctest-1.0.2\ncollecting ... collected 5 items / 5 deselected / 0 selected\nRunning 0 items in this shard: \n\n============================ 5 deselected in 1.83s =============================\n",
+  "output_truncated": false,
+  "all_gpu_skipped": true
+}

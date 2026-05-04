@@ -1,0 +1,19 @@
+artifacts:
+  - env_report.md
+  - data_report.md
+  - megatron_training_report.md
+  - vllm_serving_report.md
+  - sglang_serving_report.md
+  - rl_verl_report.md
+  - rl_slime_report.md
+  - debug_report.md
+  - final_readme.md
+  - reproducibility_commands.sh
+  - evidence_index.json
+  - architecture.mmd
+  - risk_register.md
+  - stage_reports/env.md
+  - stage_reports/data.md
+  - stage_reports/training.md
+  - stage_reports/serving.md
+  - stage_reports/rl.md

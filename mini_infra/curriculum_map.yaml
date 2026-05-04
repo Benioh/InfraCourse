@@ -1,0 +1,446 @@
+project: MiniInfraLM
+principle: 每个 lab 都在同一个真实项目最小同构骨架上增加能力；MiniInfra 文件必须能映射到 github_repo 中的真实源码。
+real_stack:
+  smoke_command: make mini-infra-real-stack RUN_ID=<run_id>
+  alignment_file: mini_infra/source_alignment.yaml
+  main_roots:
+    megatron: mini_infra/megatron
+    vllm: mini_infra/vllm
+    sglang: mini_infra/sglang
+    slime: mini_infra/slime
+labs:
+  l01_env_conda_cuda:
+    mini_module: mini_infra/observability/evidence.py
+    real_stack_bridge: mini_infra/source_alignment.yaml
+    increment: 建立 command/config/metrics/report 的证据链规范，让后续每个真实同构栈 run 都可审计、可复现。
+    notebooks:
+    - notebooks/n00_env_warmup.ipynb
+    source_reading:
+    - mini_infra/observability/evidence.py
+    - scripts/env/collect_env.py
+    - scripts/env/check_cuda.py
+    - scripts/env/create_env.sh
+    mini_command: make mini-infra M=l01_env_conda_cuda RUN_ID=<run_id>
+  l02_pytorch_systems:
+    mini_module:
+    - mini_infra/training/trainer.py
+    - mini_infra/model/tiny_transformer.py
+    - mini_infra/megatron/training/training.py
+    real_stack_bridge: mini_infra/megatron/training/training.py
+    increment: 先在 tiny Trainer 中建立 forward/backward/optimizer/checkpoint 证据链，再映射到
+      Megatron training lifecycle。
+    notebooks:
+    - notebooks/n01_gpu_memory_anatomy.ipynb
+    - notebooks/n02_pytorch_profiler.ipynb
+    source_reading:
+    - mini_infra/training/trainer.py
+    - mini_infra/model/tiny_transformer.py
+    - mini_infra/megatron/training/training.py
+    - labs/l02_pytorch_systems/scripts/train_tiny_transformer.py
+    - github_repo/Megatron-LM/megatron/training/training.py
+    mini_command: make mini-infra M=l02_pytorch_systems RUN_ID=<run_id>
+  l03_nccl_ddp_smoke:
+    mini_module:
+    - mini_infra/distributed/collectives.py
+    - mini_infra/megatron/training/initialize.py
+    real_stack_bridge: mini_infra/megatron/training/initialize.py
+    increment: 把 rank/world_size/all_reduce/barrier 变成可记录证据，并对照 Megatron 初始化后的并行状态。
+    notebooks:
+    - notebooks/n03_ddp_collectives.ipynb
+    source_reading:
+    - mini_infra/distributed/collectives.py
+    - mini_infra/megatron/training/initialize.py
+    - labs/l03_nccl_ddp_smoke/scripts/ddp_hello.py
+    - labs/l03_nccl_ddp_smoke/scripts/run_smoke.py
+    mini_command: make mini-infra M=l03_nccl_ddp_smoke RUN_ID=<run_id>
+  l04_gpu_kernel:
+    mini_module:
+    - mini_infra/gpu/triton_softmax.py
+    - mini_infra/gpu/microbench.py
+    - mini_infra/gpu/memory_model.py
+    entry: python -m mini_infra.gpu.microbench --run-id ${RUN_ID}
+    notebooks:
+    - notebooks/n11_gpu_memory_hierarchy.ipynb
+    - notebooks/n12_triton_softmax_walkthrough.ipynb
+    validation_only_when: cuda_unavailable
+    source_reading:
+    - mini_infra/gpu/memory_model.py
+    - mini_infra/gpu/triton_softmax.py
+    - github_repo/triton/python/tutorials/02-fused-softmax.py
+    mini_command: make mini-infra M=l04_gpu_kernel RUN_ID=<run_id>
+    increment: 新增 GPU 内存层级、online softmax 与 roofline microbench。
+  l05_distributed_primitives:
+    mini_module:
+    - mini_infra/megatron/core/tensor_parallel/layers.py
+    - mini_infra/megatron/core/pipeline_parallel/schedules.py
+    real_stack_bridge: github_repo/Megatron-LM/megatron/core
+    increment: 用 Megatron 同构 TP/PP 文件学习 Column/Row parallel、1F1B schedule 与 bubble，而不是只停留在
+      toy 张量切分。
+    notebooks:
+    - notebooks/n04_tensor_parallel_linear.ipynb
+    - notebooks/n05_pipeline_parallel_bubble.ipynb
+    source_reading:
+    - mini_infra/megatron/core/tensor_parallel/layers.py
+    - mini_infra/megatron/core/pipeline_parallel/schedules.py
+    - github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
+    - github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+    mini_command: make mini-infra M=l05_distributed_primitives RUN_ID=<run_id>
+  l06_torchtitan_training:
+    mini_module:
+    - mini_infra/training/trainer.py
+    - mini_infra/megatron/training/checkpointing.py
+    real_stack_bridge: mini_infra/megatron/training/checkpointing.py
+    increment: 把训练循环抽象为 Trainer/Config/Checkpoint，并用 Megatron-shaped checkpoint 边界对照
+      TorchTitan。
+    notebooks:
+    - notebooks/n06_activation_recompute.ipynb
+    source_reading:
+    - mini_infra/training/trainer.py
+    - mini_infra/megatron/training/checkpointing.py
+    - github_repo/torchtitan/torchtitan/train.py
+    - github_repo/torchtitan/torchtitan/components/checkpoint.py
+    mini_command: make mini-infra M=l06_torchtitan_training RUN_ID=<run_id>
+  l08_megatron_text_pretrain:
+    mini_module:
+    - mini_infra/megatron/pretrain_gpt.py
+    - mini_infra/megatron/training/training.py
+    - mini_infra/megatron/core/datasets/indexed_dataset.py
+    - mini_infra/megatron/training/checkpointing.py
+    real_stack_bridge: github_repo/Megatron-LM/pretrain_gpt.py
+    increment: 跑通 Megatron-shaped pretrain、indexed dataset、training_log 和 distributed
+      checkpoint，形成训练主线第一个完整闭环。
+    notebooks:
+    - notebooks/n04_tensor_parallel_linear.ipynb
+    - notebooks/n06_activation_recompute.ipynb
+    source_reading:
+    - mini_infra/megatron/pretrain_gpt.py
+    - mini_infra/megatron/training/training.py
+    - mini_infra/megatron/core/datasets/indexed_dataset.py
+    - mini_infra/megatron/training/checkpointing.py
+    - github_repo/Megatron-LM/pretrain_gpt.py
+    - github_repo/Megatron-LM/megatron/training/training.py
+    - github_repo/Megatron-LM/megatron/core/datasets/indexed_dataset.py
+    - github_repo/Megatron-LM/megatron/training/checkpointing.py
+    mini_command: make mini-infra M=l08_megatron_text_pretrain RUN_ID=<run_id>
+  l10_megatron_pretrain_lifecycle:
+    mini_module:
+    - mini_infra/megatron/pretrain_gpt.py
+    - mini_infra/megatron/training/training.py
+    - mini_infra/megatron/training/checkpointing.py
+    real_stack_bridge: github_repo/Megatron-LM/megatron/training/training.py
+    increment: 把 L04 的局部 scheduler patch 放回 Megatron-shaped train_step，显式实现 zero_grad、forward_backward、optimizer.step、scheduler.step 和 metrics。
+    notebooks:
+    - notebooks/n06_activation_recompute.ipynb
+    source_reading:
+    - mini_infra/megatron/pretrain_gpt.py
+    - mini_infra/megatron/training/training.py
+    - mini_infra/megatron/training/checkpointing.py
+    - github_repo/Megatron-LM/pretrain_gpt.py
+    - github_repo/Megatron-LM/megatron/training/training.py
+    - github_repo/Megatron-LM/megatron/training/checkpointing.py
+    mini_command: make mini-infra M=l10_megatron_pretrain_lifecycle RUN_ID=<run_id>
+  l09_long_context_cp:
+    mini_module:
+    - mini_infra/megatron/core/context_parallel/ring_attention.py
+    - mini_infra/megatron/core/context_parallel/rope.py
+    - mini_infra/megatron/core/context_parallel/yarn.py
+    entry: python -m mini_infra.megatron.run_pretrain --run-id ${RUN_ID} --cp 2 --seq
+      16384 --yarn-scale 1.0
+    notebooks:
+    - notebooks/n13_rope_yarn_math.ipynb
+    - notebooks/n14_context_parallel_ringattn.ipynb
+    validation_only_when: gpu_count<2
+    source_reading:
+    - mini_infra/megatron/core/context_parallel/ring_attention.py
+    - mini_infra/megatron/core/context_parallel/rope.py
+    - mini_infra/megatron/core/context_parallel/yarn.py
+    - github_repo/Megatron-LM/megatron/core/transformer/attention.py
+    mini_command: make mini-infra M=l09_long_context_cp RUN_ID=<run_id>
+    increment: 新增 RoPE/YaRN 数学与 CP ring attention 证据。
+  l11_megatron_scale_optimization:
+    mini_module:
+    - mini_infra/megatron/core/optimizer/distrib_optimizer.py
+    - mini_infra/megatron/core/pipeline_parallel/schedules.py
+    - mini_infra/megatron/core/tensor_parallel/layers.py
+    real_stack_bridge: github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
+    increment: 对照 TP/PP/DP/recompute 和 distributed optimizer 的内存、通信、checkpoint 语义，输出可迁移的扩展方案评审。
+    notebooks:
+    - notebooks/n04_tensor_parallel_linear.ipynb
+    - notebooks/n05_pipeline_parallel_bubble.ipynb
+    - notebooks/n06_activation_recompute.ipynb
+    source_reading:
+    - mini_infra/megatron/core/optimizer/distrib_optimizer.py
+    - mini_infra/megatron/core/pipeline_parallel/schedules.py
+    - mini_infra/megatron/core/tensor_parallel/layers.py
+    - github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
+    - github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+    - github_repo/Megatron-LM/tools/report_theoretical_memory.py
+    mini_command: make mini-infra M=l11_megatron_scale_optimization RUN_ID=<run_id>
+  l15_megatron_parallel_checkpoint:
+    mini_module:
+    - mini_infra/megatron/core/optimizer/distrib_optimizer.py
+    - mini_infra/megatron/core/pipeline_parallel/schedules.py
+    - mini_infra/megatron/training/checkpointing.py
+    real_stack_bridge: github_repo/Megatron-LM/megatron/core/parallel_state.py
+    increment: 实现 Megatron-shaped checkpoint save/load，保存 scheduler_state 与 parallel_state，并在 resume 时校验并行状态。
+    notebooks:
+    - notebooks/n04_tensor_parallel_linear.ipynb
+    - notebooks/n05_pipeline_parallel_bubble.ipynb
+    source_reading:
+    - mini_infra/megatron/core/optimizer/distrib_optimizer.py
+    - mini_infra/megatron/training/checkpointing.py
+    - github_repo/Megatron-LM/megatron/core/parallel_state.py
+    - github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
+    - github_repo/Megatron-LM/megatron/training/checkpointing.py
+    mini_command: make mini-infra M=l15_megatron_parallel_checkpoint RUN_ID=<run_id>
+  l13_moe_ep:
+    mini_module:
+    - mini_infra/megatron/core/transformer/moe/router.py
+    - mini_infra/megatron/core/transformer/moe/experts.py
+    - mini_infra/megatron/core/transformer/moe/alltoall.py
+    - mini_infra/megatron/core/transformer/moe/capacity.py
+    entry: python -m mini_infra.megatron.run_pretrain --run-id ${RUN_ID} --moe-experts
+      8 --moe-topk 2 --ep 2
+    notebooks:
+    - notebooks/n15_moe_router_capacity.ipynb
+    validation_only_when: gpu_count<2
+    source_reading:
+    - mini_infra/megatron/core/transformer/moe/router.py
+    - mini_infra/megatron/core/transformer/moe/capacity.py
+    - mini_infra/megatron/core/transformer/moe/alltoall.py
+    - github_repo/Megatron-LM/megatron/core/transformer/moe/router.py
+    mini_command: make mini-infra M=l13_moe_ep RUN_ID=<run_id>
+    increment: 新增 top-k router、capacity、all-to-all 与 expert dispatch。
+  l17_megatron_multimodal_data:
+    mini_module:
+    - mini_infra/data/manifest.py
+    - mini_infra/megatron/core/datasets/indexed_dataset.py
+    real_stack_bridge: mini_infra/megatron/core/datasets/indexed_dataset.py
+    increment: 在 MiniInfra 数据层加多模态 manifest/schema check，并对照 Megatron indexed/WebDataset
+      数据边界。
+    notebooks:
+    - notebooks/n01_gpu_memory_anatomy.ipynb
+    source_reading:
+    - mini_infra/data/manifest.py
+    - mini_infra/megatron/core/datasets/indexed_dataset.py
+    - github_repo/Megatron-LM/tools/preprocess_mmdata.py
+    - github_repo/Megatron-LM/examples/multimodal/dataloader_provider.py
+    mini_command: make mini-infra M=l17_megatron_multimodal_data RUN_ID=<run_id>
+  l18_data_engineering:
+    mini_module:
+    - mini_infra/data/wds_pipeline.py
+    - mini_infra/data/minhash_dedup.py
+    - mini_infra/data/shard_resume.py
+    entry: python -m mini_infra.data.wds_pipeline --run-id ${RUN_ID} --shards data/shards/*.tar
+    notebooks:
+    - notebooks/n16_minhash_dedup.ipynb
+    source_reading:
+    - mini_infra/data/wds_pipeline.py
+    - mini_infra/data/minhash_dedup.py
+    - mini_infra/data/shard_resume.py
+    - github_repo/webdataset/webdataset/dataset.py
+    mini_command: make mini-infra M=l18_data_engineering RUN_ID=<run_id>
+    increment: 新增 WebDataset shard、MinHash 去重与 shard resume。
+  l19_vllm_serving_baseline:
+    mini_module:
+    - mini_infra/vllm/entrypoints/openai/api_server.py
+    - mini_infra/vllm/v1/engine/llm_engine.py
+    - mini_infra/vllm/v1/core/sched/scheduler.py
+    - mini_infra/vllm/v1/core/kv_cache_manager.py
+    real_stack_bridge: github_repo/vllm/vllm/v1
+    increment: 把 OpenAI-compatible 请求接入 LLMEngine、Scheduler 与 KV block manager，观察
+      TTFT/ITL 的正确系统边界。
+    notebooks:
+    - notebooks/n07_kv_cache.ipynb
+    - notebooks/n08_prefill_decode.ipynb
+    source_reading:
+    - mini_infra/vllm/entrypoints/openai/api_server.py
+    - mini_infra/vllm/v1/engine/llm_engine.py
+    - mini_infra/vllm/v1/core/sched/scheduler.py
+    - mini_infra/vllm/v1/core/kv_cache_manager.py
+    - github_repo/vllm/vllm/entrypoints/openai/api_server.py
+    - github_repo/vllm/vllm/v1/engine/llm_engine.py
+    - github_repo/vllm/vllm/v1/core/sched/scheduler.py
+    - github_repo/vllm/vllm/v1/core/kv_cache_manager.py
+    mini_command: make mini-infra M=l19_vllm_serving_baseline RUN_ID=<run_id>
+  l20_vllm_scheduler_kv:
+    mini_module:
+    - mini_infra/vllm/entrypoints/openai/api_server.py
+    - mini_infra/vllm/v1/engine/llm_engine.py
+    - mini_infra/vllm/v1/core/sched/scheduler.py
+    - mini_infra/vllm/v1/core/kv_cache_manager.py
+    real_stack_bridge: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+    increment: 建模 waiting/running、token budget、KV block allocate/free，让 L07 的采样 patch 接回 vLLM request lifecycle。
+    notebooks:
+    - notebooks/n07_kv_cache.ipynb
+    - notebooks/n08_prefill_decode.ipynb
+    source_reading:
+    - mini_infra/vllm/v1/engine/llm_engine.py
+    - mini_infra/vllm/v1/core/sched/scheduler.py
+    - mini_infra/vllm/v1/core/kv_cache_manager.py
+    - github_repo/vllm/vllm/v1/engine/llm_engine.py
+    - github_repo/vllm/vllm/v1/core/sched/scheduler.py
+    - github_repo/vllm/vllm/v1/core/kv_cache_manager.py
+    mini_command: make mini-infra M=l20_vllm_scheduler_kv RUN_ID=<run_id>
+  l21_sglang_serving_core:
+    mini_module:
+    - mini_infra/sglang/srt/managers/scheduler.py
+    - mini_infra/sglang/srt/mem_cache/radix_cache.py
+    real_stack_bridge: github_repo/sglang/python/sglang/srt
+    increment: 用 SGLang 同构 Scheduler/RadixCache 学习 repeated-prefix workload、namespace
+      与 cache hit/miss。
+    notebooks:
+    - notebooks/n07_kv_cache.ipynb
+    - notebooks/n09_prefix_cache.ipynb
+    source_reading:
+    - mini_infra/sglang/srt/managers/scheduler.py
+    - mini_infra/sglang/srt/mem_cache/radix_cache.py
+    - github_repo/sglang/python/sglang/srt/managers/scheduler.py
+    - github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+    mini_command: make mini-infra M=l21_sglang_serving_core RUN_ID=<run_id>
+  l23_quant_serving:
+    mini_module:
+    - mini_infra/vllm/quant/awq_loader.py
+    - mini_infra/vllm/quant/fp8_kv.py
+    - mini_infra/vllm/quant/calibrator.py
+    - mini_infra/sglang/quant/kv_int8.py
+    entry: python -m mini_infra.vllm.run_engine --run-id ${RUN_ID} --quant awq
+    notebooks:
+    - notebooks/n17_quant_calibration.ipynb
+    validation_only_when: cuda_unavailable
+    source_reading:
+    - mini_infra/vllm/quant/awq_loader.py
+    - mini_infra/vllm/quant/fp8_kv.py
+    - mini_infra/vllm/quant/calibrator.py
+    - mini_infra/sglang/quant/kv_int8.py
+    mini_command: make mini-infra M=l23_quant_serving RUN_ID=<run_id>
+    increment: 新增 AWQ、FP8、SmoothQuant calibration 与 KV INT8。
+  l24_spec_decode:
+    mini_module:
+    - mini_infra/vllm/spec_decode/draft_runner.py
+    - mini_infra/vllm/spec_decode/ngram.py
+    - mini_infra/vllm/spec_decode/acceptance_tracker.py
+    entry: python -m mini_infra.vllm.run_engine --run-id ${RUN_ID} --spec ngram
+    notebooks:
+    - notebooks/n18_spec_decode_acceptance.ipynb
+    source_reading:
+    - mini_infra/vllm/spec_decode/draft_runner.py
+    - mini_infra/vllm/spec_decode/ngram.py
+    - mini_infra/vllm/spec_decode/acceptance_tracker.py
+    - github_repo/vllm/vllm/spec_decode/spec_decode_worker.py
+    mini_command: make mini-infra M=l24_spec_decode RUN_ID=<run_id>
+    increment: 新增 draft/n-gram/acceptance tracking 与 KV rollback 边界。
+  l26_sglang_pd_observability:
+    mini_module:
+    - mini_infra/sglang/srt/managers/disagg_service.py
+    - mini_infra/sglang/srt/managers/scheduler.py
+    real_stack_bridge: github_repo/sglang/python/sglang/srt/managers/disagg_service.py
+    increment: 加入 prefill/decode 分离与 KV transfer 指标，把 TTFT/ITL 拆到 SGLang PD 的正确边界。
+    notebooks:
+    - notebooks/n08_prefill_decode.ipynb
+    - notebooks/n09_prefix_cache.ipynb
+    source_reading:
+    - mini_infra/sglang/srt/managers/disagg_service.py
+    - mini_infra/sglang/srt/managers/scheduler.py
+    - github_repo/sglang/python/sglang/srt/managers/disagg_service.py
+    - github_repo/sglang/python/sglang/srt/observability/metrics_collector.py
+    - github_repo/sglang/python/sglang/srt/managers/scheduler.py
+    mini_command: make mini-infra M=l26_sglang_pd_observability RUN_ID=<run_id>
+  l27_sglang_pd_cache:
+    mini_module:
+    - mini_infra/sglang/srt/mem_cache/radix_cache.py
+    - mini_infra/sglang/srt/managers/scheduler.py
+    - mini_infra/sglang/srt/managers/disagg_service.py
+    real_stack_bridge: github_repo/sglang/python/sglang/srt/managers/disagg_service.py
+    increment: 实现 SGLang-shaped DisaggregationService，连接 route request、cached-prefix 后的 prefill 工作量、prefill→decode KV transfer 和 worker load 指标。
+    notebooks:
+    - notebooks/n08_prefill_decode.ipynb
+    - notebooks/n09_prefix_cache.ipynb
+    source_reading:
+    - mini_infra/sglang/srt/mem_cache/radix_cache.py
+    - mini_infra/sglang/srt/managers/scheduler.py
+    - mini_infra/sglang/srt/managers/disagg_service.py
+    - github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+    - github_repo/sglang/python/sglang/srt/managers/scheduler.py
+    - github_repo/sglang/python/sglang/srt/managers/disagg_service.py
+    mini_command: make mini-infra M=l27_sglang_pd_cache RUN_ID=<run_id>
+  l29_verl_rl_baseline:
+    mini_module:
+    - mini_infra/rl/reward.py
+    - mini_infra/slime/ray/rollout.py
+    real_stack_bridge: mini_infra/slime/ray/rollout.py
+    increment: 加 reward parser、response schema 和失败样例，为 SLiME rollout 数据闭环做前置验证。
+    notebooks:
+    - notebooks/n10_rl_kl_reward.ipynb
+    source_reading:
+    - mini_infra/rl/reward.py
+    - mini_infra/slime/ray/rollout.py
+    - labs/l29_verl_rl_baseline/scripts/reward_math.py
+    - github_repo/slime/slime/utils/ppo_utils.py
+    mini_command: make mini-infra M=l29_verl_rl_baseline RUN_ID=<run_id>
+  l31_rollout_only_smoke:
+    mini_module:
+    - mini_infra/slime/ray/rollout.py
+    - mini_infra/sglang/srt/managers/scheduler.py
+    real_stack_bridge: github_repo/slime/slime/ray/rollout.py
+    increment: 用 RolloutManager/RolloutServer 形态连接 SGLang scheduler，验证 rollout response
+      与 meta_info schema。
+    notebooks:
+    - notebooks/n10_rl_kl_reward.ipynb
+    source_reading:
+    - mini_infra/slime/ray/rollout.py
+    - mini_infra/sglang/srt/managers/scheduler.py
+    - github_repo/slime/slime/ray/rollout.py
+    - github_repo/slime/slime/rollout/sglang_rollout.py
+    mini_command: make mini-infra M=l31_rollout_only_smoke RUN_ID=<run_id>
+  l32_slime_rl_core:
+    mini_module:
+    - mini_infra/slime/train.py
+    - mini_infra/slime/ray/rollout.py
+    - mini_infra/slime/ray/train_actor.py
+    real_stack_bridge: github_repo/slime/train.py
+    increment: 跑通 generate → TrainRayActor.train → update_weights 的 SLiME-shaped 同步
+      RL 闭环，并解释 rollout freshness。
+    notebooks:
+    - notebooks/n10_rl_kl_reward.ipynb
+    source_reading:
+    - mini_infra/slime/train.py
+    - mini_infra/slime/ray/rollout.py
+    - mini_infra/slime/ray/train_actor.py
+    - github_repo/slime/train.py
+    - github_repo/slime/slime/ray/rollout.py
+    - github_repo/slime/slime/ray/train_actor.py
+    mini_command: make mini-infra M=l32_slime_rl_core RUN_ID=<run_id>
+  l33_rl_rollout_freshness:
+    mini_module:
+    - mini_infra/slime/train.py
+    - mini_infra/slime/ray/rollout.py
+    - mini_infra/slime/ray/train_actor.py
+    real_stack_bridge: github_repo/slime/slime/ray/rollout.py
+    increment: 实现带 weight_version 的 SLiME-shaped RolloutManager，让 L11 的 weight sync 接回 rollout 生成路径。
+    notebooks:
+    - notebooks/n10_rl_kl_reward.ipynb
+    source_reading:
+    - mini_infra/slime/train.py
+    - mini_infra/slime/ray/rollout.py
+    - mini_infra/slime/ray/train_actor.py
+    - github_repo/slime/train.py
+    - github_repo/slime/slime/ray/rollout.py
+    - github_repo/slime/slime/ray/train_actor.py
+    mini_command: make mini-infra M=l33_rl_rollout_freshness RUN_ID=<run_id>
+  l35_multimodal_capstone:
+    mini_module:
+    - mini_infra/reports/build_delivery.py
+    - mini_infra/source_alignment.yaml
+    - mini_infra/curriculum_map.yaml
+    real_stack_bridge: runs/mini_infra/real_stack
+    increment: 聚合 MiniInfra 同构栈与所有 lab run 的 evidence index、风险登记和交付包，形成可接手项目。
+    notebooks:
+    - notebooks/README.md
+    source_reading:
+    - mini_infra/reports/build_delivery.py
+    - mini_infra/source_alignment.yaml
+    - mini_infra/curriculum_map.yaml
+    - final_artifacts/
+    - runs/mini_infra/real_stack
+    mini_command: make mini-infra M=l35_multimodal_capstone RUN_ID=<run_id>

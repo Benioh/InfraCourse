@@ -1,0 +1,46 @@
+id: l31_rollout_only_smoke
+title: Async Rollout Pool（带并发上限）
+level: L10.5
+act: 第 4 章：RL 与对齐
+role: RL 系统学徒
+priority: 核心
+estimated_minutes: 60
+no_gpu_friendly: true
+
+frameworks:
+  - asyncio
+  - vLLM async engine / SGLang (对照)
+
+patch:
+  description: |
+    实现 RolloutPool：用 asyncio.Semaphore 限制 generate_fn 并发数；
+    asyncio.gather 保证输出顺序与输入一致；空列表与异常透传。
+  task_md: labs/l31_rollout_only_smoke/patch/task.md
+  starter_file: labs/l31_rollout_only_smoke/patch/starter/rollout_pool.py
+  reference_file: labs/l31_rollout_only_smoke/patch/reference/rollout_pool.py
+  test_command: make patch-test M=l31_rollout_only_smoke
+  status_file: labs/l31_rollout_only_smoke/patch/.last_run.json
+  test_count: 5
+  test_kind: 行为契约 + 并发约束
+
+source_reading:
+  - title: SLiME RolloutController 源码
+    repo_path: github_repo/
+  - title: vLLM async engine
+    repo_path: github_repo/vllm/
+
+mini_infra_targets:
+  - mini_infra/rl/
+
+notebooks: []
+
+tickets:
+  - slime_rollout_bottleneck_001
+  - slime_reward_collapse_002
+
+prereq: l29_verl_rl_baseline
+next_lab: l32_slime_rl_core
+
+gpu_modes:
+  local: CPU OK
+  cluster: 真 vLLM async endpoint 验证（可选）

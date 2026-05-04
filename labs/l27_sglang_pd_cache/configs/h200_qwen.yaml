@@ -1,0 +1,30 @@
+profile: h200_qwen
+service:
+  prefill_workers: [prefill-0, prefill-1, prefill-2, prefill-3]
+  decode_workers: [decode-0, decode-1, decode-2, decode-3]
+workload:
+  num_requests: 256
+  prompt_tokens_range: [256, 8192]
+  cache_hit_rate: 0.4
+  cached_prefix_ratio_when_hit: 0.7
+  seed: 13
+acceptance:
+  min_prefill_saving_ratio: 0.25
+  one_transfer_per_request: true
+sglang_prefill_command: >
+  python -m sglang.launch_server
+  --model Qwen/Qwen2.5-7B-Instruct
+  --tp 4 --port 30000
+  --disaggregation-mode prefill
+  --enable-radix-cache
+sglang_decode_command: >
+  python -m sglang.launch_server
+  --model Qwen/Qwen2.5-7B-Instruct
+  --tp 4 --port 30001
+  --disaggregation-mode decode
+  --enable-radix-cache
+sglang_router_command: >
+  python -m sglang.srt.disaggregation.router
+  --prefill-base http://localhost:30000
+  --decode-base http://localhost:30001
+  --port 30002

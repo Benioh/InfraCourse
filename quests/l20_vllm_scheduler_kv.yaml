@@ -1,0 +1,56 @@
+id: l20_vllm_scheduler_kv
+title: vLLM Scheduler 与 KV Block Manager
+level: L07.5
+act: 第 3 章：推理服务
+role: vLLM 调度学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+
+frameworks:
+  - vLLM
+  - MiniInfra
+
+patch:
+  description: |
+    实现 vLLM-shaped Scheduler 与 KVCacheManager 的最小同构切片，
+    明确 waiting/running/finished 和 KV block admission 的系统边界。
+  task_md: labs/l20_vllm_scheduler_kv/patch/task.md
+  starter_file: labs/l20_vllm_scheduler_kv/patch/starter/scheduler.py
+  reference_file: labs/l20_vllm_scheduler_kv/patch/reference/scheduler.py
+  test_command: make patch-test M=l20_vllm_scheduler_kv
+  status_file: labs/l20_vllm_scheduler_kv/patch/.last_run.json
+  test_count: 5
+  test_kind: 调度资源语义验证
+
+source_reading:
+  - title: vLLM LLMEngine
+    repo_path: github_repo/vllm/vllm/v1/engine/llm_engine.py
+    focus: add_request、step、RequestOutput 生命周期
+  - title: vLLM Scheduler
+    repo_path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+    focus: waiting/running、token budget 和调度输出
+  - title: vLLM KV Cache Manager
+    repo_path: github_repo/vllm/vllm/v1/core/kv_cache_manager.py
+    focus: allocate/free KV blocks 与内存压力
+
+mini_infra_targets:
+  - mini_infra/vllm/v1/engine/llm_engine.py
+  - mini_infra/vllm/v1/core/sched/scheduler.py
+  - mini_infra/vllm/v1/core/kv_cache_manager.py
+
+notebooks:
+  - notebooks/n07_kv_cache.ipynb
+  - notebooks/n08_prefill_decode.ipynb
+
+tickets:
+  - vllm_memory_pressure_001
+  - sglang_high_ttft_001
+  - vllm_port_conflict_003
+
+prereq: l19_vllm_serving_baseline
+next_lab: l21_sglang_serving_core
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 可对照 vLLM benchmark

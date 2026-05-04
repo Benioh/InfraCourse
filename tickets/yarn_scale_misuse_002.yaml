@@ -1,0 +1,132 @@
+id: yarn_scale_misuse_002
+title: YaRN scale 在训练/推理两边不一致，长上下文输出胡乱
+mission: l09_long_context_cp
+severity: high
+symptom: |
+  推理把上下文从训练时的 4K 拉到 16K/32K 后，输出文本：
+  (a) 完全胡言乱语（重复、乱码、长串相同 token）；
+  (b) 前 4K 内正常，超过 4K 后逐渐崩塌；
+  (c) eval ppl 在 4K 上 1.5，在 16K 上跳到 50+；
+  (d) attention 注意力分布过度集中在 prompt 头部或尾部，中间被忽略。
+error_signatures:
+- "perplexity at extended ctx >> perplexity at trained ctx (e.g., 50 vs 1.5)"
+- "推理输出 'the the the the the' 这类重复 token"
+- "logits.argmax 集中在词表前 100 个 token（high-frequency 偏好）"
+- "rope_freq_max × max_position 超过训练时的最大相位 × 8 倍以上"
+- "需要外推 ctx 时 attention 分数集中在 first/last few tokens"
+classification_questions:
+- 训练时 ctx_train 是多少？推理时 ctx_target 是多少？比例是多少？
+- 训练时是否启了 YaRN（或 PI / NTK-aware RoPE）？base 是多少？
+- 推理 YaRN scale 怎么算的？是按 ctx_target / ctx_train 直接代入吗？
+- attention temperature 是否同步调整了？
+- 是 RoPE 频率超出训练范围，还是 attention 注意力分布异常？
+likely_causes:
+- 训练用 base=10000 + 无 YaRN，推理用 YaRN scale=4 → 推理与训练不一致
+- 推理用 YaRN 但忘了 attention temperature——logits scale 不对
+- YaRN scale 公式套错：本应该是 `1 + log(ratio) / log(beta)`，写成了直接乘
+- base 没改：fancy 的做法是训练时就调大 base（如 1000000）作为 NTK-aware
+- 训练 ckpt 是别人的，外面没说清是否做过 long-ctx finetune
+- 推理代码用了 PI（Position Interpolation）但配置说 YaRN
+minimal_checks:
+- 用 `mini_infra/megatron/core/context_parallel/yarn.py:yarn_summary` 看你想要的 scale 数值：
+  ```python
+  yarn_summary(train_seq_len=4096, target_seq_len=32768)
+  # → {'yarn_scale': 1.6678..., 'attention_temperature': 1.0668...}
+  ```
+- 拿同一 ckpt 不开 YaRN 在 4K 上跑：ppl 应该正常。再在 8K 上跑：ppl 应该恶化（这是 baseline）
+- 开 YaRN scale=2 在 8K 上跑：ppl 应该回到接近 4K
+- 检查训练 config：搜索 `yarn` `rope_scaling` `ntk` 等关键词
+- 推理与训练用同一 RoPE 实现源代码（不要训练时用 HuggingFace、推理时用 vLLM 实现而且 scaling 配置不同）
+minimal_fixes:
+- 训练与推理 YaRN 配置必须一致：要么都开同 scale，要么都不开
+- 推理代码 init RoPE 时显式传 scale：`RoPE(base=10000, scaling='yarn', scale=2.0)`
+- 同时调 attention temperature：YaRN 论文要求 `attn_scale = 1 + 0.1 * log(scale)`
+- 如果训练时 base 已经是 1000000（NTK-aware）→ 推理也用相同 base，不要再额外加 YaRN
+- 如果不允许重训：用更保守的方法——short-ctx 推理 + sliding window，不外推
+what_not_to_do:
+- 不要"试一下"把 scale 调到 8、16 看是否更好——scale 不能任意线性放大
+- 不要把 YaRN 与 PI 混用——它们对低/高频位的处理思路不同
+- 不要在不知道训练 ckpt 配置的情况下盲调推理 RoPE——必须先复现训练 ppl baseline
+- 不要把 attention temperature 与 logits temperature 混淆——前者影响 attention 分数，后者影响 sampling
+- 不要在推理时改 base 而不重训——base 改变意味着所有位置 embedding 漂移
+hint_1: |
+  最快的判断：先建 baseline 再开 YaRN。
+  ```python
+  from mini_infra.megatron.core.context_parallel.yarn import yarn_summary, yarn_scale, yarn_temperature
+
+  # baseline: 训练 ctx 4K，推理也 4K
+  print('4K eval baseline ppl:', '<run me>')
+
+  # 退化: 推理 8K 但不开 YaRN
+  print('8K no-YaRN ppl:', '<run me, expect significantly higher>')
+
+  # YaRN scale=2 推理 8K
+  scale = yarn_scale(4096, 8192)
+  temp = yarn_temperature(scale)
+  print(f'should use scale={scale}, attention_temperature={temp}')
+  print('8K with YaRN scale ppl:', '<run me, expect close to 4K baseline>')
+  ```
+  如果 8K + YaRN 仍然差 → YaRN 配置/实现没对。如果 8K + YaRN ≈ 4K → 配置对了，可以 push to 16K。
+hint_2: |
+  YaRN 数学要点（对照 `mini_infra/.../yarn.py`）：
+
+  ```python
+  # mini_infra simplified:
+  scale = 1.0 + log(target / train) / log(beta_fast)   # ≈ 1.67 for 4K→32K
+  temperature = 1.0 + 0.1 * (scale - 1.0)              # ≈ 1.067
+  ```
+
+  常见错误对应修复：
+
+  | 错误 | 现象 | 修复 |
+  |---|---|---|
+  | scale 直接 = target/train | scale=8 时输出胡乱 | 用 log 缩放公式 |
+  | 漏 attention_temperature | 输出偏向 high-freq token | 同步乘 logits 前的 attn_scale |
+  | base 改了又开 YaRN | 双重缩放 | 选其中一个：要么大 base + 不开 YaRN，要么小 base + YaRN |
+  | 推理与训练 base 不同 | 输出杂乱无章 | 严格保持一致 |
+
+  推理代码示意（HuggingFace 风格）：
+  ```python
+  config.rope_scaling = {'type': 'yarn', 'factor': 2.0, 'original_max_position_embeddings': 4096}
+  model = AutoModelForCausalLM.from_pretrained(..., config=config)
+  ```
+  确认 vLLM/SGLang 推理 server 也读了这个配置。
+
+  如果训练 ckpt 是别人给的且不知道 RoPE 配置 → 用 `transformers.AutoConfig.from_pretrained(ckpt)` 看
+  `rope_scaling` 字段。如果是 None → 训练时未做 long-ctx；任何超 ctx_train 的推理都不可信。
+solution: |
+  YaRN 漂移的根因永远是"训练与推理 RoPE 配置不一致"。修复路径：
+
+  1. **先复现训练 ppl baseline**：在 ctx_train 上跑 eval，确认 ckpt 与推理代码兼容。
+
+  2. **决定外推策略**（三选一，不要混用）：
+     - **YaRN**: 训练时也用 YaRN（推荐用于 long-ctx finetune 后的 ckpt）
+     - **PI**: 简单线性插值，效果较差但实现简单
+     - **大 base**: 训练时 base=1000000，无需 YaRN
+
+     选定后，训练与推理必须用相同的策略与参数。
+
+  3. **YaRN 公式**（按 `mini_infra/.../yarn.py`）：
+     - `scale = 1 + log(ctx_target / ctx_train) / log(beta_fast)`，beta_fast 默认 32
+     - `attention_temperature = 1 + 0.1 * (scale - 1)`
+     - 把 `attn_scale` 应用到 attention logits（在 softmax 之前）
+
+  4. **推理 server 配置**：
+     - HuggingFace: `config.rope_scaling = {'type': 'yarn', 'factor': scale, 'original_max_position_embeddings': ctx_train}`
+     - vLLM: `--rope-scaling '{"type": "yarn", "factor": <scale>}'`
+     - SGLang: 同 vLLM
+
+  5. **数值验证**：
+     ```
+     ppl(ctx_train, no-yarn) = baseline
+     ppl(2*ctx_train, no-yarn) = (大幅恶化)
+     ppl(2*ctx_train, yarn=correct) ≈ baseline ± 10%
+     ```
+
+  6. **报告里必须写**：
+     - 训练 ckpt 的 RoPE 配置（base, scaling type, factor）
+     - 推理使用的 YaRN scale 与 attention temperature 的具体数字
+     - 三个 ppl baseline 的对比表
+     - rope_freq_max × ctx_target 不超过训练时 max_angle 的多少倍
+
+  参考：`mini_infra/megatron/core/context_parallel/yarn.py`、`docs/术语表.md#yarn`、L04.5 README。

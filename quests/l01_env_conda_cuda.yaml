@@ -1,0 +1,88 @@
+id: l01_env_conda_cuda
+title: 环境、Conda、CUDA 与 Git 生存课（源码研读 + 项目实战）
+act: 第 0 章：入门与环境
+level: L00
+role: Infra 新兵
+priority: 核心
+frameworks:
+- MiniInfra
+- PyTorch
+- CUDA/NCCL
+gpu_modes:
+  local: 1×RTX 4090 调试
+  cluster: 8×H200 单节点验证
+datasets: []
+learning_goals:
+- 先在 MiniInfra 主线模块完成 L00 增量，再用 notebook、真实源码和 lab artifact 交叉验证。
+- 读懂关键源码路径，并画出 环境、Conda、CUDA 与 Git 生存课 的入口到指标/artifact 调用链。
+- 用 notebook 或最小脚本建立预测，再用真实运行验证 同一段 PyTorch 代码为什么会在 import、CUDA、NCCL、rank/device 映射四个层面分别失败？
+- 完成真实项目：Environment Flight Recorder：一键环境审计器，留下可复现 artifacts。
+- 掌握本关 debug ticket 的最小排查路径，不用猜测替代证据。
+success_criteria:
+- 报告必须包含 MiniInfra 同构文件、对应真实源码、lab artifact/metrics 的三方对照，不能只提交 toy demo 结论。
+- 报告包含至少 3 个源码节点、关键不变量和失败边界。
+- metrics.jsonl、日志和 artifacts 能支撑实验矩阵中的结论。
+- 完成项目交付物：artifacts/check_cuda.json、check_torch.json、check_nccl.json、collect_env.json。; artifacts/torchrun_hello.log，含每个 rank 的 hostname、rank、local_rank、device。
+- 清楚区分本地 smoke、H200 真实运行与 validation-only。
+source_reading:
+- title: MiniInfra 主线：mini_infra/observability/evidence.py
+  repo_path: mini_infra/observability/evidence.py
+  focus: 阅读 MiniInfra 主线模块，明确它保留的真实项目生命周期、系统边界和最小不变量。
+  questions:
+  - 这个 MiniInfra 文件对应真实项目中的哪个入口、类或生命周期？
+  - 它保留了哪些系统不变量，删掉了哪些生产复杂度？
+  - 本关 lab 的 metrics/artifacts 如何验证这个不变量，而不是只验证 toy 行为？
+- title: Conda 环境创建入口
+  repo_path: scripts/env/create_env.sh
+  focus: 梳理 env 名称、yaml 文件、conda/mamba fallback、失败退出路径。
+  questions:
+  - ENV 参数如何映射到 envs/*.yaml？
+  - 脚本如何避免静默创建错误环境？
+  - 如果 learner 在已有环境中运行，应该记录哪些漂移？
+- title: CUDA 与 PyTorch wheel 体检
+  repo_path: scripts/env/check_cuda.py
+  focus: 区分 driver、runtime、device_count、torch wheel CUDA ABI。
+  questions:
+  - torch.cuda.is_available 为 false 时有哪些可定位字段？
+  - 为什么 driver 正常不代表 PyTorch wheel 可用？
+  - 哪些字段必须写入 artifacts 才能复现？
+- title: NCCL 与 torchrun rank 语义
+  repo_path: labs/l01_env_conda_cuda/scripts/torchrun_hello.py
+  focus: 读取 RANK、LOCAL_RANK、WORLD_SIZE，并验证每个进程绑定的 device。
+  questions:
+  - LOCAL_RANK 与 CUDA_VISIBLE_DEVICES 的关系是什么？
+  - 单机多进程和多机多进程的最小差异是什么？
+  - 哪一类 rank/device mismatch 不能靠重启解决？
+notebooks: []
+notebook_bridge: []
+project:
+  name: Environment Flight Recorder：一键环境审计器
+  scenario: 你接手一台陌生 4090/H200 机器，必须在 10 分钟内判断它能否安全运行后续训练/推理/RL lab，并留下别人可复现的环境证据。
+  milestones:
+  - 先运行 `make mini-infra M=l01_env_conda_cuda RUN_ID=<run_id>`，记录 MiniInfra 输出并标注 validation-only 边界。
+  - 生成 driver / CUDA runtime / PyTorch wheel / NCCL / torchrun 五段式报告。
+  - 构造一个故意错误的 PYTHONPATH 或 CUDA_VISIBLE_DEVICES 场景，并用最小证据定位。
+  - 把 4090 本地模式与 H200 单节点模式的差异写入 config.resolved.yaml。
+  - 产出一份给后来者运行的 env_report.md 和 command.sh。
+  deliverables:
+  - artifacts/check_cuda.json、check_torch.json、check_nccl.json、collect_env.json。
+  - artifacts/torchrun_hello.log，含每个 rank 的 hostname、rank、local_rank、device。
+  - report.md 中必须包含一次环境漂移诊断。
+  - report.md 必须包含 MiniInfra 同构模块 → 真实源码 → lab metrics/artifacts 的证据链。
+  stretch:
+  - 把 collect_env 的 JSON 转成 Markdown 表格。
+  - 为 ticket/env_rank_device_mismatch_003 写一个最小复现命令。
+commands:
+  setup: make env ENV=base
+  smoke: make smoke M=l01_env_conda_cuda
+  run_4090: make run-4090 M=l01_env_conda_cuda
+  run_h200: make run-h200 M=l01_env_conda_cuda
+  grade: make grade M=l01_env_conda_cuda
+  mini_infra: make mini-infra M=l01_env_conda_cuda RUN_ID=<run_id>
+tickets:
+- env_import_error_001
+- env_cuda_unavailable_002
+- env_rank_device_mismatch_003
+badge:
+  name: 环境生存者
+  pass_score: 80

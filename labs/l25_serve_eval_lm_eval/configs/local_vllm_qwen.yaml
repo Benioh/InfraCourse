@@ -1,0 +1,13 @@
+profile: local_vllm_qwen
+mode: openai
+endpoint: http://localhost:8000/v1
+model: Qwen/Qwen2.5-0.5B-Instruct
+n_shots: 8
+n_eval: 100
+acceptance:
+  must_complete: true
+  first_number_match_min: 0.05
+prerequisite_command: >
+  python -m vllm.entrypoints.openai.api_server
+  --model Qwen/Qwen2.5-0.5B-Instruct
+  --port 8000 --max-model-len 4096

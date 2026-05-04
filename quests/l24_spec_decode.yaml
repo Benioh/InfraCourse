@@ -1,0 +1,48 @@
+id: l24_spec_decode
+title: Speculative Decoding · Greedy Verify
+level: L08.7
+act: 第 3 章：推理服务
+role: 推理加速学徒
+priority: 核心
+estimated_minutes: 60
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - vLLM / SGLang spec decode (对照)
+
+patch:
+  description: |
+    实现 greedy spec decode 的 verify 步骤：target 一次 forward 算出每个位置的
+    argmax，与 draft 比对；首个 mismatch 之后用 target argmax 当 bonus token。
+  task_md: labs/l24_spec_decode/patch/task.md
+  starter_file: labs/l24_spec_decode/patch/starter/spec_decode.py
+  reference_file: labs/l24_spec_decode/patch/reference/spec_decode.py
+  test_command: make patch-test M=l24_spec_decode
+  status_file: labs/l24_spec_decode/patch/.last_run.json
+  test_count: 5
+  test_kind: 行为契约（边界情况完备）
+
+source_reading:
+  - title: vLLM speculative decoding
+    repo_path: github_repo/vllm/
+  - title: Medusa / EAGLE paper
+    repo_path: docs/术语表.md
+
+mini_infra_targets:
+  - mini_infra/serving/
+
+notebooks:
+  - notebooks/n18_spec_decode_acceptance.ipynb
+
+tickets:
+  - spec_low_acceptance_001
+  - spec_draft_oom_002
+  - spec_unstable_p99_003
+
+prereq: l23_quant_serving
+next_lab: l26_sglang_pd_observability
+
+gpu_modes:
+  local: CPU OK
+  cluster: 实测 acceptance + speedup（可选）

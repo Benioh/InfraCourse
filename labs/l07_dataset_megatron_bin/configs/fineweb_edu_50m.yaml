@@ -1,0 +1,22 @@
+profile: fineweb_edu_50m
+input:
+  jsonl_path: data/fineweb_edu/train.jsonl
+  generate_demo_if_missing: false
+output:
+  prefix: data/fineweb_edu/indexed/fineweb_text_document
+tokenizer:
+  kind: hf
+  hf_name: meta-llama/Llama-2-7b-hf
+dtype: int32
+acceptance:
+  min_samples: 100000
+  min_total_tokens: 50000000
+megatron_command_template: >
+  torchrun --nproc_per_node=8 github_repo/Megatron-LM/pretrain_gpt.py
+  --data-path {prefix}
+  --tokenizer-type Llama2Tokenizer
+  --tokenizer-model /path/to/llama2/tokenizer.model
+  --num-layers 12 --hidden-size 768 --num-attention-heads 12
+  --seq-length 2048 --max-position-embeddings 2048
+  --micro-batch-size 4 --global-batch-size 256 --train-iters 1000
+  --lr 3e-4 --bf16

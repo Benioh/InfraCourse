@@ -1,0 +1,3 @@
+mission: l13_moe_ep
+mode: smoke
+hardware_boundary: validation-only by default

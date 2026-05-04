@@ -1,0 +1,49 @@
+id: pt_oom_001
+title: 长序列导致 CUDA OOM
+mission: l02_pytorch_systems
+severity: high
+symptom: 单卡 PyTorch 训练跑到 forward 或 backward 时报 CUDA out of memory；把 batch 开小一点又 OK。参数量明明不大，显存却像被“吃掉一大块”。
+error_signatures:
+- "RuntimeError: CUDA out of memory. Tried to allocate X MiB"
+- "torch.cuda.OutOfMemoryError"
+- nvidia-smi 显示 process 显存 > 预期，但 torch.cuda.memory_allocated() 与 reserved 差距很大
+classification_questions:
+- OOM 在哪一步抛出：`model.to(device)`、forward、backward、还是 optimizer.step？
+- "`micro_batch × seq_len × hidden` 的激活估算 vs 参数量占用，哪个更大？"
+- 是否开了 gradient checkpointing、amp/bf16、fused optimizer？有没有 `torch.cuda.empty_cache()` 假装解决？
+likely_causes:
+- 激活显存被低估：激活随 batch×seq_len×hidden×layers 线性放大，长序列下常数倍超过参数量。
+- Optimizer state 翻倍：Adam/AdamW 额外占 2× 参数（m, v），fp32 master weights 再 +1×。
+- 梯度累积未配合 `zero_grad(set_to_none=True)`，旧梯度残留。
+- DataLoader pin_memory + 过大的 batch 导致 host 侧峰值抖动到 device。
+minimal_checks:
+- 跑一次 `torch.cuda.memory_summary(abbreviated=True)`，把 forward 前 / backward 前 / step 后三点的 allocated 打印出来对比。
+- 用 `torch.cuda.max_memory_allocated()` 看峰值，而不是只看稳态。
+- 临时把 `seq_len` 减半，看峰值是否下降 ~4×（激活主导）；减 `batch` 一半，看是否下降 ~2×。
+- 用 `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` 确认没有僵尸进程占卡。
+minimal_fixes:
+- 先把 `micro_batch_size` 折半、`grad_accum` 翻倍，吞吐不变但峰值下降。
+- 打开 `torch.utils.checkpoint` 对 transformer block 做 activation recompute，激活换算力。
+- 使用 bf16/fp16 autocast，激活直接减半；optimizer 仍 fp32 master。
+- 如果是 Adam：改 AdamW + `foreach=True`；必要时换 8bit / paged optimizer。
+what_not_to_do:
+- 不要只 `torch.cuda.empty_cache()` 然后假装问题消失——它不回收活跃 tensor。
+- 不要在 OOM 点直接 `try/except` 吞异常继续训练，梯度状态已被污染。
+- 不要上来就换 FSDP/DeepSpeed——先确认是激活、optimizer 还是梯度主导。
+hint_1: |
+  在脚本开头插入 `torch.cuda.reset_peak_memory_stats()`，每个阶段打印 `torch.cuda.max_memory_allocated() / 1024**3`：
+  `model.to(device)` 之后、`loss = model(x)` 之后、`loss.backward()` 之后、`optimizer.step()` 之后各一次。
+  对照激活估算 `micro_batch × seq_len × hidden × layers × 2 × bytes_per_elem`。
+  如果 backward 前后峰值跳很大，是激活主导；如果 step 后才跳，是 optimizer state 主导。
+hint_2: |
+  把 `seq_len` 折半重跑，观察峰值下降比例。
+  - 下降接近 4×（激活 ∝ seq² 或 ∝ seq×hidden）→ 激活主导，打开 activation recompute 或 bf16 autocast。
+  - 下降 < 2× → optimizer/gradient 主导，切 8bit Adam 或 fused optimizer，或上 FSDP shard。
+  - 几乎不下降 → 看是不是数据 pipeline / pin_memory 峰值，临时 `pin_memory=False` 测一遍。
+solution: |
+  OOM 几乎永远不是“显卡不够大”这么简单，而是**哪一类显存占用主导**没诊断清。
+  1. 先用 `max_memory_allocated()` 把 forward/backward/step 三段的峰值列出来。
+  2. 改一个变量：折半 `seq_len` 定激活上限，折半 `batch` 定 forward 常数项，关掉 optimizer 看梯度占用。
+  3. 根据主导项对症下药：激活 → recompute + bf16；optimizer → 8bit/fused/paged 或 FSDP shard；梯度累积 → `set_to_none=True`。
+  4. 最后在报告里写清楚「峰值从 X GB 降到 Y GB，代价是 Z% 吞吐或 W ms/step」。
+  参考：labs/l02_pytorch_systems 的 profiler 产物、notebooks/n01_gpu_memory_anatomy、notebooks/n06_activation_recompute。

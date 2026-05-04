@@ -1,0 +1,147 @@
+id: wds_slow_io_001
+title: WebDataset 吞吐远低于磁盘带宽，GPU 空等数据
+mission: l18_data_engineering
+severity: medium
+symptom: |
+  本地 NVMe 磁盘读速可达 5 GB/s，但 WebDataset pipeline 实测吞吐只有 30-200 MB/s，
+  导致：
+  (a) GPU 利用率 < 30%，长时间 idle 等数据；
+  (b) `time python -c "for batch in dl: pass"` 跑出来比 `time tar -tf shard.tar` 慢 10x+；
+  (c) `iostat` 显示磁盘 utilization < 20%；
+  (d) Increase num_workers 几乎没改善。
+error_signatures:
+- "wds_throughput_mbs < disk_bandwidth_mbs * 0.3"
+- "p99_batch_latency_ms > 1000"
+- "iostat -x 1 显示 device %util < 20%"
+- "py-spy dump 显示 main thread 在 PIL.Image.open 或 json.loads"
+- "GPU 'data fetch' 占总 step time > 50%"
+classification_questions:
+- decode（PIL/json/numpy）在主线程还是 worker？
+- num_workers 是多少？prefetch_factor 是多少？
+- 单 shard 大小？太小（<10MB）会让 ShardList overhead 主导
+- 数据是否要 transform（resize/crop）？这些通常 CPU bound
+- pin_memory 开了吗？persistent_workers 开了吗？
+likely_causes:
+- decode 留在主线程：`Dataset.__getitem__` 中调 PIL/json，worker 只 yield 原始 bytes
+- num_workers=0 或 1：单进程必然慢
+- prefetch_factor=2（默认）太小：worker 处理完一批就闲着等
+- shard 太小：每个 shard 几百 KB → ShardList 切换开销 dominant
+- 没用 pin_memory：CPU→GPU 传输慢
+- transform 重（如 RandomResizedCrop + Normalize 在 PIL）
+- 文件系统：NFS / object storage 比 NVMe 慢 50x+
+minimal_checks:
+- 直接测磁盘带宽：`dd if=shard.tar of=/dev/null bs=4M iflag=direct`
+  对比 `python labs/l18_data_engineering/scripts/bench_wds.py --workers 4`
+  得到 wds_throughput / disk_bandwidth 比例
+- 用 py-spy 看 main thread 在哪：
+  ```bash
+  py-spy dump --pid <pid>
+  ```
+  如果在 PIL.Image / json.loads / numpy 这类 → decode 没去 worker
+- num_workers sweep：1/2/4/8/16，看吞吐曲线，找 plateau
+- prefetch_factor sweep：2/4/8/16
+- 单 shard 大小检查：`ls -lh data/shards/*.tar | awk '{sum+=$5; n++} END {print sum/n/1024/1024 "MB avg"}'`
+  期望 50-500MB
+- iostat 看磁盘：`iostat -x 1` 看 %util，应当 60%+
+minimal_fixes:
+- decode 必须在 worker：用 `wds.decode(handler)` 而不是 `__getitem__` 内 PIL
+- num_workers = CPU 核数 / 2（如 8 或 16）
+- prefetch_factor = 4 或 8
+- shard size 50-500MB（用 `tar` 重新合并小 shard）
+- pin_memory=True 与 GPU 训练配合
+- persistent_workers=True 避免每 epoch 重启 worker
+- 重 transform 用 GPU augmentation（torchvision.transforms.v2 + GPU 后端）
+what_not_to_do:
+- 不要把 decode 留在主线程然后责怪 dataloader 慢
+- 不要 num_workers=64 期望线性加速——超过 CPU 核数会反而慢
+- 不要直接拿 NFS / object storage 的吞吐与本地 NVMe 比
+- 不要在 transform 链里塞 Python 循环（用 vectorized PIL/numpy）
+- 不要把单 shard 切到 <1MB 然后说 "我有很多 shard 应该并行"
+hint_1: |
+  3 分钟法：先确认瓶颈在 IO 还是 CPU。
+  ```bash
+  # 1. 磁盘带宽天花板
+  dd if=data/shards/shard-000.tar of=/dev/null bs=4M iflag=direct count=256
+
+  # 2. WebDataset 吞吐
+  time python -c "
+  import webdataset as wds
+  ds = wds.WebDataset('data/shards/shard-{000..099}.tar').decode()
+  for i, sample in enumerate(ds):
+      if i >= 1000: break
+  print('1000 samples done')
+  "
+
+  # 3. 同样测但 num_workers=8
+  time python -c "
+  import webdataset as wds
+  from torch.utils.data import DataLoader
+  ds = wds.WebDataset('data/shards/shard-{000..099}.tar').decode().to_tuple('jpg', 'cls')
+  dl = DataLoader(ds, batch_size=64, num_workers=8, prefetch_factor=4)
+  for i, _ in enumerate(dl):
+      if i >= 100: break
+  "
+  ```
+  比较 1 vs 2 vs 3 的吞吐：
+  - 1 >> 2 → IO 不是瓶颈，decode 慢
+  - 1 ≈ 2 ≈ 3 → 真 IO 慢，看磁盘 / 文件系统
+  - 1 >> 2 但 1 ≈ 3 → 单 worker 慢，num_workers 已 fix
+
+  **一定先做这一步**，否则后续优化很可能优化错地方。
+hint_2: |
+  确认 decode 在主线程的 fix：
+
+  错的（decode 在主线程）：
+  ```python
+  class MyDataset(IterableDataset):
+      def __iter__(self):
+          for sample in tar_iter:
+              # ❌ 这一行在主线程
+              img = PIL.Image.open(sample['jpg'])
+              yield img, sample['cls']
+  ```
+
+  对的（decode 在 worker）：
+  ```python
+  ds = wds.WebDataset(urls)\
+      .shuffle(1000)\
+      .decode('pil')      # ✓ 在 worker 里
+      .to_tuple('jpg;png', 'cls')\
+      .map_tuple(transform, identity)
+  dl = DataLoader(ds, batch_size=64, num_workers=8, prefetch_factor=4, pin_memory=True)
+  ```
+
+  Sweep 找甜区：
+  ```python
+  import time
+  from torch.utils.data import DataLoader
+
+  for workers in [1, 2, 4, 8, 16]:
+      for prefetch in [2, 4, 8]:
+          dl = DataLoader(ds, batch_size=64, num_workers=workers,
+                          prefetch_factor=prefetch, pin_memory=True,
+                          persistent_workers=True)
+          start = time.perf_counter()
+          for i, _ in enumerate(dl):
+              if i >= 100: break
+          elapsed = time.perf_counter() - start
+          print(f'workers={workers}, prefetch={prefetch}: {100*64/elapsed:.0f} samples/s')
+  ```
+
+  典型 4090 + NVMe + ImageNet 风格：
+  - workers=4, prefetch=2: ~2000 samples/s
+  - workers=8, prefetch=4: ~5000 samples/s（典型甜区）
+  - workers=16, prefetch=8: ~5500 samples/s（边际收益小）
+
+  GPU augmentation 选项：
+  ```python
+  # 把 resize/normalize 搬到 GPU
+  import torchvision.transforms.v2 as T
+  gpu_transform = T.Compose([T.Resize(224), T.Normalize(mean, std)]).cuda()
+  ```
+solution: |
+  WebDataset 慢的修复路径：**(1) 算磁盘 vs WDS 比例 → (2) decode 进 worker → (3) sweep workers/prefetch → (4) shard 大小 50-500MB → (5) GPU augmentation**。
+
+  **黄金配置**（典型场景）：
+  ```python
+  ds = wds.WebDataset(\n      urls=['data/shards/shard-{000..999}.tar'],\n      shardshuffle=100,        # 打乱 shard 顺序\n      cache_dir=None,          # NVMe 不需要 cache\n      handler=wds.warn_and_continue,\n  )\\\n  .shuffle(buffer_size=1000)   # sample 级 shuffle buffer\n  .decode('pil')               # decode 在 worker\n  .to_tuple('jpg;png;jpeg', 'cls')\\\n  .map_tuple(transform, identity)\\\n  .batched(64)\n\n  dl = DataLoader(ds, batch_size=None, num_workers=8, prefetch_factor=4,\n                  pin_memory=True, persistent_workers=True)\n  ```\n\n  **Shard size 推荐**：\n  - 50-500MB 是甜区\n  - <10MB: ShardList overhead dominant\n  - >2GB: 单 shard 太久才完成，影响 shuffle 与 worker 平衡\n\n  **必做 checklist**：\n  1. ✓ decode 在 worker（用 `.decode()` 而不是 `__getitem__` 内 PIL）\n  2. ✓ num_workers ≈ CPU 核数 / 2（不要超）\n  3. ✓ prefetch_factor ≥ 4\n  4. ✓ pin_memory=True（GPU 训练）\n  5. ✓ persistent_workers=True\n  6. ✓ shard size 50-500MB\n  7. ✓ 重 transform 上 GPU\n\n  **报告里必须写**：\n  - 磁盘 dd 带宽 vs WDS 实测吞吐的比例（应 > 0.5）\n  - workers × prefetch sweep 表（≥ 9 组）\n  - 你选的最终配置 + p99_batch_latency_ms\n  - 是否触发过主线程 decode bug + py-spy dump 截图\n\n  参考：`mini_infra/data/wds_pipeline.py`、`labs/l18_data_engineering/scripts/bench_wds.py`、L06.3 README、WebDataset docs。"

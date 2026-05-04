@@ -1,0 +1,48 @@
+id: l26_sglang_pd_observability
+title: Prometheus Metrics Exporter
+level: L09
+act: 第 3 章：推理服务
+role: 可观测性学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - Python stdlib
+  - SGLang / Prometheus (对照)
+
+patch:
+  description: |
+    实现支持 gauge / counter / hit-rate 的 Prometheus exposition 文本生成器。
+    输出符合 Prometheus 格式，支持 labels（字母序排列）。0 events 时 hit-rate=0.0。
+  task_md: labs/l26_sglang_pd_observability/patch/task.md
+  starter_file: labs/l26_sglang_pd_observability/patch/starter/metrics_exporter.py
+  reference_file: labs/l26_sglang_pd_observability/patch/reference/metrics_exporter.py
+  test_command: make patch-test M=l26_sglang_pd_observability
+  status_file: labs/l26_sglang_pd_observability/patch/.last_run.json
+  test_count: 5
+  test_kind: 行为契约 + 格式校验
+
+source_reading:
+  - title: SGLang scheduler / PD 实现
+    repo_path: github_repo/sglang/python/sglang/srt/managers/
+  - title: Mooncake PD disaggregation paper
+    repo_path: docs/术语表.md
+
+mini_infra_targets:
+  - mini_infra/sglang/
+  - mini_infra/observability/
+
+notebooks: []
+
+tickets:
+  - sglang_pd_misroute_003
+  - sglang_pd_decode_starve_004
+  - sglang_metrics_missing_005
+
+prereq: l24_spec_decode
+next_lab: l27_sglang_pd_cache
+
+gpu_modes:
+  local: CPU OK
+  cluster: 配合真 SGLang Prometheus + Grafana

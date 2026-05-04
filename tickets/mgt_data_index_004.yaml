@@ -1,0 +1,80 @@
+id: mgt_data_index_004
+title: Megatron indexed dataset 路径错误（.bin/.idx prefix 不对）
+mission: l08_megatron_text_pretrain
+severity: medium
+symptom: "`pretrain_gpt.py` 能加载模型和 tokenizer，但在构建 dataset 阶段报 FileNotFoundError 或 data prefix not found；或者 sample count=0，loop 立即退出；或者训出来的 loss 是 random chance（ln(vocab_size) 左右）。"
+error_signatures:
+- "FileNotFoundError: [Errno 2] No such file or directory: '.../my_dataset_text_document.bin'"
+- "Exception: data prefix {path} not found"
+- "number of documents: 0 在 dataset build 日志里"
+- 训练一开始 loss ≈ 10.8（vocab~50k 的 ln(50000)），之后不下降
+- 日志里 "building BlendableDataset for a total of 0 documents"
+classification_questions:
+- 你传给 `--data-path` 的是 `.jsonl` / `.txt` 原始文件，还是 `preprocess_data.py` 产出的 prefix（末尾带 `_text_document`）？
+- 跑 `preprocess_data.py` 了吗？产出目录里有没有**成对**的 `.bin` 和 `.idx`？
+- "`--tokenizer-type` / `--vocab-file` / `--merge-file` 和预处理时用的一致吗？不一致时解码出来是垃圾。"
+- 是单文件还是 blend 多数据集？`--data-path` 的权重+路径格式写对了吗？
+likely_causes:
+- "`--data-path` 指向了 `.bin` 文件本身而不是 prefix；Megatron 期待**不带 `.bin/.idx` 后缀的路径前缀**。"
+- 预处理从未跑过，目录里只有 `.jsonl`；Megatron 不会自动预处理。
+- 预处理用的 tokenizer 和训练配置不一致（例如 preprocess 用 GPT2 BPE，训练用 SentencePiece）。
+- 预处理时 `--json-keys` 写错（JSONL 是 `{"text":...}` 但传了 `--json-keys content`），产出文档数=0。
+- blend 路径格式错：正确是 `0.7 path1 0.3 path2` 而不是 `path1,path2`。
+minimal_checks:
+- "`ls -la <prefix>.bin <prefix>.idx` 两文件都存在且 size > 0。"
+- |
+  用 3 行 Python 查看：
+  ```python
+  from megatron.core.datasets.indexed_dataset import IndexedDataset
+  ds = IndexedDataset("<prefix>")
+  print("docs:", len(ds), "first:", ds[0][:20])
+  ```
+  docs 应 > 0，first 应是合理 token id。
+- 用训练时相同 tokenizer 解码 `ds[0]`，看文本是否和源 JSONL 对应；对不上就是 tokenizer 漂移。
+- 用 `--mock-data` 或 MiniInfra 的 fallback 跑通 smoke，排除代码问题只是数据问题。
+minimal_fixes:
+- "路径：`--data-path 0.7 /path/to/wiki_text_document 0.3 /path/to/books_text_document`，不带 `.bin/.idx` 后缀。"
+- |
+  预处理：
+  ```bash
+  python tools/preprocess_data.py \
+    --input raw.jsonl --output-prefix wiki \
+    --tokenizer-type GPT2BPETokenizer \
+    --vocab-file gpt2-vocab.json --merge-file gpt2-merges.txt \
+    --workers 32 --append-eod --json-keys text
+  ```
+  产出 `wiki_text_document.bin/.idx`。
+- 保证 preprocess 和 train 用**同一套** tokenizer 文件（md5sum 对比）。
+- blend 写法：`--data-path 0.5 /a 0.5 /b` 成对出现。
+what_not_to_do:
+- 不要把原始 JSONL 直接传给 `--data-path`——Megatron 不会临时预处理。
+- 不要只保留 `.bin` 不要 `.idx`，`.idx` 是文档边界索引，必须成对。
+- 不要预处理后换 tokenizer 文件而不重跑 preprocess；token id 会漂移，学到的是垃圾。
+- 不要在 preprocess 和 train 之间改 `--json-keys` 或 `--append-eod`。
+hint_1: |
+  先肉眼确认产物：
+  ```bash
+  ls -la /path/to/prefix*
+  # 应当看到：
+  #   prefix_text_document.bin   几百 MB 以上
+  #   prefix_text_document.idx   几 MB
+  ```
+  传给 `--data-path` 的应该是 `/path/to/prefix_text_document`（不带后缀）。
+  如果只有 `.jsonl`：还没预处理，先跑 `tools/preprocess_data.py`。
+hint_2: |
+  产物都在却仍报错 / 文档数=0：
+  ```python
+  from megatron.core.datasets.indexed_dataset import IndexedDataset
+  ds = IndexedDataset("/path/to/prefix_text_document")
+  print("n_docs =", len(ds))
+  print("sample =", ds[0][:32])
+  ```
+  - n_docs == 0 → 预处理 `--json-keys` 写错。重跑 preprocess 并对齐源文件真实 key。
+  - sample 是合理 token id 但训练 loss 不降 → tokenizer 对不上。用训练 tokenizer `tok.decode(ds[0][:32])`，乱码就说明 tokenizer 漂移，重新 preprocess。
+solution: |
+  Megatron data pipeline 的不变量是「prefix + 配对的 `.bin/.idx` + 预处理与训练用同一套 tokenizer」。诊断三步：
+  1. 产物检查：`.bin` 和 `.idx` 都在、非空、成对。
+  2. 可读性检查：`IndexedDataset` 加载后 `len > 0`、`ds[0]` 是合理 token id 序列。
+  3. Tokenizer 等同性：`md5sum` vocab/merges，和训练 config 里路径对得上；训练 tokenizer 能解码回源文本。
+  修复后重跑最小 smoke，loss 应从 ~10.8 降到 ~7 以下；不降就还是数据/tokenizer 问题。
+  参考：`github_repo/Megatron-LM/tools/preprocess_data.py`、`megatron/core/datasets/indexed_dataset.py`、labs/l08_megatron_text_pretrain 的数据准备段。

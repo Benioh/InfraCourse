@@ -1,0 +1,166 @@
+id: moe_router_collapse_001
+title: MoE router collapse：训练几百步后某专家拿走 90% token
+mission: l13_moe_ep
+severity: high
+symptom: |
+  MoE 训练初期看似正常，loss 平稳下降，但跑到几百到几千步后：
+  (a) `tokens_per_expert_p99 / tokens_per_expert_p50` 比值从 1.5 飙到 5+；
+  (b) `router_entropy` 单调下降到 0；
+  (c) 某个 expert 拿走 80-90% 的 token，其他 expert 几乎"死掉"；
+  (d) eval acc 看起来还行（因为大 expert 在做大部分活），但 active params 实际只有 1 个 expert 的容量；
+  (e) 训练后期 loss 卡住不再下降。
+error_signatures:
+- "tokens_per_expert ratio p99/p50 > 5.0"
+- "router_entropy decreases monotonically toward 0"
+- "某个 expert tokens_per_expert > 0.5 * total_tokens"
+- "aux_loss 随训练单调上升（说明 imbalance 越来越严重）"
+- "validation acc plateaued early; perplexity 接近 dense baseline 但 inference cost 与 MoE 同"
+classification_questions:
+- 训练初期 router 输出是否近似均匀（softmax 后每 expert ≈ 1/N）？还是初始就偏向某个 expert？
+- aux_loss 的系数是多少？0、0.001、0.01、0.1 各一个量级？
+- router 用了 jitter / noise 吗？
+- 有 top-k=1（Switch）还是 top-k=2（GShard）？
+- 数据是否有强 distribution shift（如某种 token 突然变多）？
+likely_causes:
+- aux_loss 系数 = 0 或太小（< 0.0001）：没有平衡约束，router 自由收敛到偏好某个 expert
+- router 初始化偏：某个 expert 的初始 logit 略高 → 它收到更多 token → 训练得更"通用" → 收到更多 token（正反馈）
+- 没用 jitter / noise：router 是确定性的，无法跳出局部最优
+- top-k=1 比 top-k=2 更容易 collapse（没有"次优 expert" 兜底）
+- learning rate 太高：router 权重更新太激进
+- gating temperature 太低：softmax 过陡，routing 决策几乎是 hard
+minimal_checks:
+- 用 `mini_infra/megatron/core/transformer/moe/router.py` 的 `synthetic_logits(collapse=True)` 模拟：
+  ```python
+  from mini_infra.megatron.core.transformer.moe.router import (
+      route_tokens, router_entropy, tokens_per_expert, synthetic_logits
+  )
+  logits = synthetic_logits(num_tokens=64, num_experts=8, collapse=True)
+  routes = route_tokens(logits, top_k=2)
+  print('tokens_per_expert:', tokens_per_expert(routes, 8))
+  print('router_entropy:', router_entropy(routes, 8))
+  ```
+- 在训练 step 0、100、500、2000 各 dump router_entropy 与 tokens_per_expert 直方图
+- 算 `aux_loss / total_loss` 比例：如果 < 0.001 → aux_loss 实际上没起作用
+- 把 router 输出 logits 直接 dump：std 是否过小（softmax 过陡）
+- 关 collapse 后再训：把 dropout 关、把 lr 降一半，看 collapse 是否推迟
+minimal_fixes:
+- aux_loss 系数从 0 → 0.01：这是最直接的 fix
+  ```python
+  total_loss = ce_loss + 0.01 * aux_loss
+  ```
+- 加 router noise：训练时给 logits 加 Gumbel(0, 1) 或 Normal(0, 0.1)
+- 用 top-k=2 替代 top-k=1：更难 collapse，因为每个 token 有"备选 expert"
+- router 初始化：用 Xavier 而不是默认初始化；让所有 expert 的 logit 起点接近
+- 降 router lr：scheduler 让 router 比 transformer 主体小 10x lr
+- gating temperature: softmax 前除一个 temperature（如 1.2），让 routing 更软
+what_not_to_do:
+- 不要看到 loss 下降就以为没问题——MoE collapse 时 loss 仍能降，但 active params 已退化为 dense
+- 不要"试一下"把 aux_loss 拉到 1.0——过大反而让 router 完全忽略 token 内容，强行均匀
+- 不要在 collapse 已经发生后只调 lr——一旦 expert 间能力差距形成，调超参很难逆转
+- 不要把死掉的 expert 直接 prune——这等于自废 MoE 容量
+- 不要在没 router_entropy / tokens_per_expert 监控的情况下训 MoE
+hint_1: |
+  90% 的 collapse 是 aux_loss 没起作用。先做这个 5 分钟检查：
+  ```python
+  from mini_infra.megatron.core.transformer.moe.router import (
+      route_tokens, router_entropy, auxiliary_load_balance_loss, synthetic_logits
+  )
+
+  # 模拟 normal vs collapse
+  for collapse in [False, True]:
+      logits = synthetic_logits(num_tokens=64, num_experts=8, collapse=collapse)
+      routes = route_tokens(logits, top_k=2)
+      ent = router_entropy(routes, 8)
+      aux = auxiliary_load_balance_loss(routes, 8)
+      print(f'collapse={collapse}: entropy={ent:.4f}, aux_loss={aux:.6f}')
+  ```
+  正常 entropy ≈ 0.95+，collapse entropy ≈ 0.3。aux_loss 在 collapse 时高 10x+。
+
+  检查你训练代码：
+  ```python
+  # 找这一行
+  total_loss = ce_loss + aux_loss_coef * aux_loss
+  print('aux_loss_coef =', aux_loss_coef)
+  print('aux_loss / ce_loss =', (aux_loss_coef * aux_loss).item() / ce_loss.item())
+  ```
+  如果 `aux_loss_coef < 0.001` 或 `比例 < 1%` → 提到 0.01-0.05。
+hint_2: |
+  aux_loss 已 ≥ 0.01 仍然 collapse，问题在 router 设计。
+
+  按这个顺序 fix：
+
+  1. **加 router noise**（训练时）：
+     ```python
+     if self.training:
+         noise = torch.randn_like(router_logits) * 0.1
+         router_logits = router_logits + noise
+     probs = router_logits.softmax(dim=-1)
+     ```
+     训练时加 0.1-0.3 std 的噪声，推理时关闭。
+
+  2. **top-k=2 而不是 top-k=1**：
+     即使主 expert collapse 了，token 的 \"备选 expert\" 仍能拿到训练信号。
+
+  3. **降 router lr**：
+     ```python
+     # 给 router params 单独 param group
+     {'params': router_params, 'lr': base_lr * 0.1}
+     ```
+
+  4. **检查初始化**：
+     - 用 `nn.Linear(hidden, num_experts)` 默认初始化时各 expert 起点相近
+     - 不要在 router 后面接 BatchNorm/LayerNorm（会破坏 routing 含义）
+
+  5. **加 z-loss**（可选，DeepSeek-MoE 用）：
+     ```python
+     z_loss = (router_logits.logsumexp(dim=-1) ** 2).mean()
+     total_loss += 0.001 * z_loss
+     ```
+     防止 router logits 数值爆炸。
+
+  Sanity check 监控（每 100 步打印）：
+  - tokens_per_expert 直方图
+  - router_entropy
+  - aux_loss / ce_loss
+  - tokens_per_expert_p99 / tokens_per_expert_p50
+
+  任何一项异常 → 触发 alert。
+solution: |
+  MoE router collapse 的修复路径：**(1) aux_loss 必开 → (2) noise 必加 → (3) top-k=2 优于 1 → (4) 监控必上**。
+
+  推荐配置（GShard / Mixtral 风格）：
+  ```yaml
+  moe:
+    num_experts: 8
+    top_k: 2
+    aux_loss_coef: 0.01      # 关键：必 > 0
+    z_loss_coef: 0.001       # 可选，防数值爆炸
+    capacity_factor: 1.25
+    router_jitter_noise: 0.1 # 训练时加噪
+    router_init_std: 0.02
+  ```
+
+  Switch 风格（top-k=1）需更多防 collapse：
+  ```yaml
+  moe:
+    num_experts: 16
+    top_k: 1
+    aux_loss_coef: 0.05      # 比 top-k=2 更高
+    capacity_factor: 1.5
+    router_jitter_noise: 0.3
+    z_loss_coef: 0.001
+  ```
+
+  **必加监控指标**（写入 metrics.jsonl）：
+  - `router_entropy`：> 0.85 健康；< 0.5 已 collapse
+  - `tokens_per_expert_max / tokens_per_expert_mean`：< 2 健康；> 5 已 collapse
+  - `aux_loss`：单调上升说明问题
+  - `expert_active_rate`：连续 N 步收 0 token 的 expert 数
+
+  **报告里必须写**：
+  - 三组对照：(aux=0, aux=0.001, aux=0.01) 在 1k step 后的 tokens_per_expert 直方图
+  - router_entropy 曲线（横轴 step，纵轴 entropy）
+  - 你最终选择的 aux_loss_coef 与理由
+  - 是否触发过 collapse + 是怎么 detect 的（哪个指标先报警）
+
+  参考：`mini_infra/megatron/core/transformer/moe/router.py`、L05.5 README、Switch Transformers paper、Mixtral paper。

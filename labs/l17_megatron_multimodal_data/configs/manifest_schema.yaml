@@ -1,0 +1,4 @@
+tasks:
+  - image_text_caption
+  - audio_text_asr
+  - audio_label

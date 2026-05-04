@@ -1,0 +1,14 @@
+profile: cpu_smoke
+service:
+  prefill_workers: [prefill-0, prefill-1]
+  decode_workers: [decode-0, decode-1]
+workload:
+  num_requests: 20
+  prompt_tokens_range: [128, 1024]
+  cache_hit_rate: 0.5
+  cached_prefix_ratio_when_hit: 0.6
+  seed: 0
+acceptance:
+  min_prefill_saving_ratio: 0.20
+  one_transfer_per_request: true
+  workers_must_drain_on_complete: true

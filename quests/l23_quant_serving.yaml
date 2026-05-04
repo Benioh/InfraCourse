@@ -1,0 +1,49 @@
+id: l23_quant_serving
+title: AWQ-lite W8 per-channel 量化
+level: L08.5
+act: 第 3 章：推理服务
+role: 量化学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - AWQ / SmoothQuant (对照)
+
+patch:
+  description: |
+    实现 compute_awq_scale + quantize_w8_per_channel + dequantize：
+    用 activation amax 计算 per-channel scale，再做对称 INT8 weight 量化。
+    AWQ 思路的简化版。
+  task_md: labs/l23_quant_serving/patch/task.md
+  starter_file: labs/l23_quant_serving/patch/starter/awq_calibrate.py
+  reference_file: labs/l23_quant_serving/patch/reference/awq_calibrate.py
+  test_command: make patch-test M=l23_quant_serving
+  status_file: labs/l23_quant_serving/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比 + 误差门槛
+
+source_reading:
+  - title: AWQ paper / SmoothQuant
+    repo_path: docs/术语表.md
+  - title: vLLM AWQ kernel 实现
+    repo_path: github_repo/vllm/
+
+mini_infra_targets:
+  - mini_infra/serving/
+
+notebooks:
+  - notebooks/n17_quant_calibration.ipynb
+
+tickets:
+  - awq_load_fail_001
+  - fp8_calibration_002
+  - kv_int8_acc_drift_003
+
+prereq: l21_sglang_serving_core
+next_lab: l24_spec_decode
+
+gpu_modes:
+  local: CPU 完整
+  cluster: 实测加速度（可选）

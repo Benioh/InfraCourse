@@ -1,0 +1,2 @@
+batch_size: 4
+response_len: 64

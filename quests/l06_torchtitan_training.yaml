@@ -1,0 +1,51 @@
+id: l06_torchtitan_training
+title: Selective activation checkpoint wrapper
+level: L03
+act: 第 1 章：训练框架
+role: TorchTitan 学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - TorchTitan (对照)
+
+patch:
+  description: |
+    实现一个 selective_checkpoint_wrap(model, policy_fn)：让 policy 决定哪些
+    子模块用 torch.utils.checkpoint，哪些不用。再实现 attention_only_policy
+    展示典型用法（只 ckpt attention 层）。
+  task_md: labs/l06_torchtitan_training/patch/task.md
+  starter_file: labs/l06_torchtitan_training/patch/starter/selective_ckpt.py
+  reference_file: labs/l06_torchtitan_training/patch/reference/selective_ckpt.py
+  test_command: make patch-test M=l06_torchtitan_training
+  status_file: labs/l06_torchtitan_training/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比 + 行为契约
+
+source_reading:
+  - title: TorchTitan parallelize_llama / apply_ac
+    repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+    focus: 看 TorchTitan 真实 ckpt policy 接口（ParallelDims 与 apply_ac 的位置）
+  - title: PyTorch torch.utils.checkpoint 实现
+    repo_path: docs/术语表.md
+    focus: 理解 use_reentrant=True/False 的差别
+
+mini_infra_targets:
+  - mini_infra/training/
+
+notebooks:
+  - notebooks/n06_activation_recompute.ipynb
+
+tickets:
+  - tt_config_001
+  - tt_checkpoint_002
+  - tt_fsdp_memory_003
+
+prereq: l05_distributed_primitives
+next_lab: l08_megatron_text_pretrain
+
+gpu_modes:
+  local: CPU 4 个测试通过，1×4090 跑显存对比测试
+  cluster: 1×H200 完整 perf

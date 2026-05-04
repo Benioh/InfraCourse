@@ -1,0 +1,123 @@
+id: spec_unstable_p99_003
+title: Spec decode 平均 ITL 改善但 p99 显著恶化
+mission: l24_spec_decode
+severity: high
+symptom: |
+  开 spec 后 mean ITL 从 18ms → 12ms（改善 33%），但 p99 ITL 从 32ms →
+  48ms（恶化 50%）。高并发（batch ≥ 32）时尤其显著。tail latency 上升
+  让 SLO 不达标。
+error_signatures:
+- "ITL p50: 12ms (baseline 18ms), p99: 48ms (baseline 32ms)"
+- "batch=64: mean speedup 1.4x, p99 latency = 1.5x baseline"
+- "histogram: ITL bimodal, peak at 8ms (accept all) and 35ms (reject all)"
+- "logs: rollback bursts every ~50 requests"
+classification_questions:
+- p99 退化在 batch 多大时出现？1 / 16 / 64 / 128？
+- ITL 分布是单峰还是双峰？
+- accept 失败的 burst 有规律吗（比如周期性、按 prompt 类型）？
+- batch composition 是否同质（同长度、同 domain）？
+- num_speculative_tokens 多少？K 越大 reject 时损失越大
+likely_causes:
+- accept 失败的"回滚成本"：reject 时要重发 target step，且 K-1 个 KV
+  block 要释放
+- batch 内 mixed acceptance：同 batch 中部分 sample 高 accept、部分低，
+  调度器无法区分
+- 高并发下 draft 排队：draft GPU 时间被多 sample 分摊，单 sample 的
+  draft latency 反升
+- num_speculative_tokens 太大：reject 时 K-1 个 token 都白算
+- prefix cache 与 spec 交互：prefix cache 命中时 prompt 短，acceptance 高；
+  miss 时 acceptance 低，p99 拉满
+- bimodal workload：50% in-domain（高 accept）+ 50% OOD（低 accept）
+minimal_checks:
+- 看 ITL 分布：histogram 是单峰还是双峰
+  ```python
+  import numpy as np
+  np.percentile(itl_samples, [50, 75, 90, 95, 99, 99.9])
+  ```
+- 用 mini_infra：
+  ```python
+  from mini_infra.vllm.spec_decode.draft_runner import spec_decode_summary
+  for c in [1, 16, 64, 128]:
+      r = spec_decode_summary(mode="draft_model", concurrency=c)
+      print(f"concurrency={c} itl_p50={r['itl_ms_p50']} itl_p99={r['itl_ms_p99']}")
+  ```
+  对照 1.8x 倍数（concurrency≥64 公式）
+- 按 batch composition 分组打 acceptance：同 batch 内 acceptance 方差大说明
+  mixed
+- accept 失败的 request 单独打 ITL：是不是它们拉了 p99
+- 看是否 prefix cache miss 与 reject 共现
+minimal_fixes:
+- 限 num_speculative_tokens 到 3-4：reject 损失上限低
+- batch 内按 acceptance 分组：高 accept 与低 accept 分两个 batch
+- 动态 spec：accept rate 滑动窗口 < 0.3 时关 spec
+- 高并发场景关 spec：batch ≥ 64 时收益已被排队/回滚吃掉
+- 对 OOD workload 路由到无 spec server：mixed workload 分流
+what_not_to_do:
+- 不要看 mean ITL 改善就部署；SLO 通常按 p99
+- 不要忽略 reject burst；它们直接决定 p99
+- 不要让 spec 与 prefix cache 单独优化而不评估交互
+- 不要 num_speculative_tokens=10 期望"多猜多省"；reject 损失乘 K
+- 不要 mixed batch 全开 spec；高 acc 与低 acc 互相拖累
+hint_1: |
+  最快定位：把 ITL 按 accept_count 分组打 histogram。
+  ```python
+  buckets = {0: [], 1: [], 2: [], 3: [], 4: []}
+  for req in completed_requests:
+      buckets[req.accept_count].append(req.itl_ms)
+  for k, v in buckets.items():
+      print(f"accept={k} count={len(v)} mean={np.mean(v):.1f} p99={np.percentile(v, 99):.1f}")
+  ```
+  - accept=0 (reject all) 的 ITL 应远高于 accept=K
+  - 如果 accept=0 占比 > 20%，p99 必崩
+  - 如果 accept 分布双峰（多 0 多 K），是 mixed workload
+hint_2: |
+  确认是 reject burst + mixed batch 后，按这个矩阵选：
+
+  | 场景 | 推荐策略 |
+  |---|---|
+  | 同质 in-domain，低并发 | spec on，K=4 |
+  | 同质 in-domain，高并发 | spec on，K=3，限 batch ≤ 32 |
+  | mixed in-domain + OOD | 路由分流：OOD 走无 spec server |
+  | OOD 主导 | spec off |
+  | 短 prompt 多 | ngram 模式 + max_n 小 |
+
+  对照 mini_infra `spec_decode_summary(concurrency=64)` 的 itl_ms_p99：
+  - 公式中 1.8x at concurrency≥64 是教学预算
+  - 你实测 p99 / baseline_p99 > 1.5x → 与公式一致，只能限并发
+  - > 2.0x → 配置严重不当（K 太大或 batch 严重 mixed）
+solution: |
+  Spec p99 退化的修复路径：**理解 bimodal 本质 > 限 K > 分流 mixed > 动态关 spec**。
+
+  1. **理解 ITL 分布**：
+     - spec 让 ITL 天然 bimodal：accept 时 K+1 token / step；reject 时
+       1 token / step + 浪费 draft latency
+     - 优化 mean 容易，优化 p99 难
+
+  2. **限 K**（首选）：
+     - K = 3-4 是好默认
+     - K = 8+ 几乎一定 p99 退化
+
+  3. **batch 分流**（mixed workload）：
+     - 路由层按 prompt 特征（domain / 长度）分流
+     - in-domain 流走 spec server
+     - OOD 流走 baseline server
+
+  4. **动态 spec**：
+     ```python
+     # 滑动窗口 acceptance < 0.3 关 spec
+     if tracker.rate() < 0.3:
+         disable_spec()
+     elif tracker.rate() > 0.5:
+         enable_spec()
+     ```
+
+  5. **报告必写**：
+     - ITL 完整分布（p50/p75/p90/p95/p99/p99.9）
+     - 按 accept_count 分组的 ITL 表
+     - batch sweep 的 (mean, p99, throughput) 表
+     - 修复前 / 后的 SLO 达标率
+     - mini_infra `spec_decode_summary` 公式与实测对照
+     - 明确边界：什么 batch 上限内 spec 仍是净收益
+
+  参考：mini_infra/vllm/spec_decode/draft_runner.py 的 itl_ms_p99 公式；
+  github_repo/vllm/vllm/spec_decode/metrics.py 的延迟统计。

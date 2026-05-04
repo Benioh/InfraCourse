@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk -F'repo_path: ' '{print $2}')",
+      "Bash(npm install *)",
+      "Bash(python -c 'from app.backend.repository import source_payload, source_tree_payload; import json *)",
+      "Bash(npx --no-install tsc --noEmit)",
+      "Bash(npx --no-install next build)"
+    ]
+  }
+}

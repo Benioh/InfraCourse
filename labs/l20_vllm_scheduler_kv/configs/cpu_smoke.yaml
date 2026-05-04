@@ -1,0 +1,15 @@
+profile: cpu_smoke
+scheduler:
+  num_blocks: 8
+  max_num_running_reqs: 3
+workload:
+  - {request_id: r0, prompt_tokens: 32, max_tokens: 4}
+  - {request_id: r1, prompt_tokens: 64, max_tokens: 8}
+  - {request_id: r2, prompt_tokens: 16, max_tokens: 4}
+  - {request_id: r3, prompt_tokens: 96, max_tokens: 12}
+  - {request_id: r4, prompt_tokens: 24, max_tokens: 6}
+  - {request_id: r5, prompt_tokens: 48, max_tokens: 8}
+acceptance:
+  min_p50_kv_usage: 0.30
+  must_terminate: true
+  waiting_must_grow_under_pressure: true

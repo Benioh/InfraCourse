@@ -1,0 +1,13 @@
+profile: h200_llama3
+mode: openai
+endpoint: http://localhost:8000/v1
+model: meta-llama/Meta-Llama-3-8B-Instruct
+n_shots: 8
+n_eval: 1000
+acceptance:
+  must_complete: true
+  first_number_match_min: 0.6
+prerequisite_command: >
+  python -m vllm.entrypoints.openai.api_server
+  --model meta-llama/Meta-Llama-3-8B-Instruct
+  --tensor-parallel-size 4 --port 8000 --max-model-len 8192

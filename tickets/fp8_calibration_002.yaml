@@ -1,0 +1,199 @@
+id: fp8_calibration_002
+title: FP8 server 跑通但 acc 大跌（GSM8K 从 60% → 30%）
+mission: l23_quant_serving
+severity: high
+symptom: |
+  在 H200 上启 fp8 server 成功，TTFT/ITL 比 fp16 改善 30%+，但：
+  (a) GSM8K acc 从 fp16 baseline 60% 跌到 30%；
+  (b) MMLU acc 跌 5-10pp；
+  (c) 长 prompt（1K+）输出明显劣化，短 prompt 还能用；
+  (d) 数学/代码题特别糟，常识题还行。
+error_signatures:
+- "fp8 acc_drop_pp > 5.0"
+- "GSM8K pass_rate < 0.5 * fp16_baseline"
+- "fp8 输出含'I'm not sure'/'I cannot'比 fp16 多"
+- "fp8 logits std 比 fp16 小一半（输出过 confident 但错）"
+- "long prompt (>2K) 时 acc 退化更严重"
+classification_questions:
+- calibration set 是什么？大小？覆盖目标 domain 吗？
+- fp8 是 e4m3 还是 e5m2？weights 哪个，act 哪个？
+- scale 是 per-tensor 还是 per-channel？
+- 用了 SmoothQuant 一阶平滑吗？α 多少？
+- 哪些层量化了？所有 linear 还是只 attention？
+likely_causes:
+- calibration set 太小（< 128 sample）：scales 估不准
+- calibration set 与目标 domain 不匹配（量化用 wikitext，推理跑代码）
+- 没用 SmoothQuant：激活异常值（outlier）让 fp8 严重 clip
+- 用 e5m2 做 weights（精度太低，应该 weights=e4m3 act=e5m2）
+- per-tensor scale 而不是 per-channel：单通道激活异常 dominant 整 tensor scale
+- LayerNorm / RMSNorm / Embedding 也量化了（不应该）
+- KV-cache 也量化但 calibration 没覆盖长 prompt
+minimal_checks:
+- 用 `mini_infra/vllm/quant/calibrator.py:calibration_summary` 看 scale 求解：
+  ```python
+  from mini_infra.vllm.quant.calibrator import (
+      channel_absmax, smoothquant_scales, calibration_summary
+  )
+  s = calibration_summary()
+  print(s)
+  ```
+- 用 `fp8_summary` 看量化-反量化的数值精度损失：
+  ```python
+  from mini_infra.vllm.quant.fp8_kv import fp8_summary
+  print(fp8_summary())
+  ```
+- 跑 dummy fp8: weights=fp8 act=fp16 vs weights=fp8 act=fp8，比 acc 看哪步崩
+- 加大 calibration set 到 1024+ 重量化看 acc 改善
+- dump 各 layer 激活 max 直方图：找 outlier
+- 跑 same calibration on 50 题 GSM8K 看 acc，如果未 fp8 baseline 也低 → 量化框架坏
+minimal_fixes:
+- calibration set ≥ 512 sample，覆盖目标 domain（GSM8K calibration 跑 GSM8K）
+- 用 SmoothQuant α=0.5 平滑激活异常：
+  ```python
+  scales = smoothquant_scales(activation_samples, alpha=0.5)
+  weight_new = weight * scales
+  activation_new = activation / scales
+  ```
+- weights=e4m3, act=e5m2：weights 精度优先，act 范围优先
+- per-channel scale（每 output channel 单独 scale）：
+  ```python
+  scale = act.abs().max(dim=0)  # per channel
+  ```
+- 不量化 LayerNorm / RMSNorm / Embedding / lm_head（这些精度敏感）
+- KV-cache 单独量化，calibration 用真实长度的 prompt
+- 极端情况退到 fp8 weights only（act 仍 fp16）
+what_not_to_do:
+- 不要用 small calibration set 跑出"acc 看着还行"——后续 long prompt 一定崩
+- 不要全模型量化——LayerNorm / Embedding 量化得不偿失
+- 不要 weights/act 都用 e5m2——weights 精度需要 e4m3
+- 不要在 calibration 没改前一直调 lr 或 prompt——这是量化错，不是模型错
+- 不要在 acc_drop_pp > 5 时仍上线——退到 awq w4a16 或 fp16
+hint_1: |
+  3 分钟法：先验证不是 calibration 数据问题。
+  ```python
+  # 重量化用大 calibration set（512 sample）
+  from datasets import load_dataset
+  cal_data = load_dataset('gsm8k', 'main', split='train').select(range(512))
+  cal_texts = [ex['question'] for ex in cal_data]
+
+  # 自己的量化代码
+  model = quantize_to_fp8(
+      model,
+      calibration_data=cal_texts,
+      smoothquant_alpha=0.5,
+      weights_dtype='e4m3',
+      activation_dtype='e5m2',
+  )
+
+  # 跑 GSM8K test set 50 题
+  acc = eval_gsm8k(model, num_samples=50)
+  print(f'acc with 512-sample SmoothQuant calibration: {acc}')
+  ```
+  如果 acc 显著改善（从 30% 回到 50%+）→ 原因是 calibration set 不够 / 没 SmoothQuant。
+  如果仍 30% → 量化路径本身有 bug，看 hint_2。
+
+  **关键参数**：
+  - calibration size ≥ 512（GSM8K test 集 1.3k，留 800+ 给 calibration）
+  - SmoothQuant α=0.5 是默认；α=0.0 不平滑（仅权重量化），α=1.0 全平滑（仅激活量化）
+  - cal data 必须覆盖目标 domain（数学题用数学 calibration，代码用代码 calibration）
+hint_2: |
+  Calibration 加大但仍崩，问题在量化 scope 或 dtype 选择。
+
+  按这个顺序：
+
+  1. **缩小量化 scope**：暂时只量化 attention QKV（不量化 MLP），看 acc 是否回。
+     如果 acc 大幅回升 → MLP 量化是问题，进一步排查 SiLU 后激活异常值。
+
+  2. **dtype 矩阵**：
+     ```
+     | weights | activations | KV cache | 适用 |
+     |---|---|---|---|
+     | e4m3    | fp16        | fp16     | 最稳，速度收益小 |
+     | e4m3    | e5m2        | fp16     | 工业默认 |
+     | e4m3    | e5m2        | e4m3     | KV 也压，长 ctx 收益 |
+     | e5m2    | e5m2        | e5m2     | ❌ 几乎一定崩 |
+     ```
+
+  3. **per-channel vs per-tensor**：
+     ```python
+     # per-tensor: 单 scalar，简单
+     scale_pt = act.abs().max()
+     # per-channel: 每 output 一个 scale
+     scale_pc = act.abs().max(dim=0).values  # shape (out_channels,)
+     ```
+     per-channel 几乎一定优于 per-tensor，尤其有激活异常值时。
+
+  4. **检查不该量化的层**：
+     ```python
+     skip_layers = [
+         'embed_tokens', 'lm_head',
+         'input_layernorm', 'post_attention_layernorm', 'norm',
+         'rotary_emb',
+     ]
+     ```
+     这些层精度敏感，量化后 acc 崩。
+
+  5. **激活异常值检测**：
+     ```python
+     for name, act in collect_activations(model, calibration_data):
+         max_abs = act.abs().max()
+         std = act.std()
+         outlier_ratio = (act.abs() > 6 * std).float().mean()
+         if outlier_ratio > 0.001:
+             print(f'{name}: outlier > 0.1%, must use SmoothQuant')
+     ```
+     outlier > 0.1% → SmoothQuant α 升到 0.7-0.8。
+
+  6. **极端 fallback**: 如 acc 仍崩 > 5pp → 退回 awq w4a16 或 fp16。fp8 不是万灵药。
+solution: |
+  FP8 acc 漂移的修复路径：**(1) 加大 calibration set → (2) SmoothQuant 平滑 → (3) 选对 dtype 组合 → (4) 缩量化 scope → (5) per-channel scale**。
+
+  **黄金配置**（H200 LLaMA-style 模型）：
+  ```yaml
+  fp8_quant:
+    weights:
+      dtype: e4m3
+      scale_strategy: per-channel
+      smoothquant_alpha: 0.5
+    activations:
+      dtype: e5m2
+      scale_strategy: per-channel
+      static_scale: false  # dynamic 通常更安全
+    kv_cache:
+      dtype: e4m3      # 或保持 fp16
+      scale_strategy: per-token
+    skip_modules:
+      - embed_tokens
+      - lm_head
+      - .*layernorm.*
+      - rotary_emb
+    calibration:
+      dataset: target_domain  # GSM8K → GSM8K calib, code → code calib
+      num_samples: 512
+      seq_len: 2048
+  ```
+
+  **必做 checklist**：
+  1. ✓ calibration set ≥ 512，覆盖目标 domain
+  2. ✓ SmoothQuant α=0.5 默认开（异常值多时升到 0.7）
+  3. ✓ weights=e4m3, act=e5m2（不要全 e5m2）
+  4. ✓ per-channel scale
+  5. ✓ skip LayerNorm / Embedding / lm_head
+  6. ✓ KV-cache 单独 calibrate（用真实长度 prompt）
+  7. ✓ 量化后 acc_drop_pp < 1.5（GSM8K 等敏感任务）
+
+  **acc 漂移决策树**：
+  - drop ≤ 1pp: 可上线
+  - drop 1-3pp: 上 SmoothQuant + 加大 calibration
+  - drop 3-5pp: 退到 weights=fp8 + act=fp16
+  - drop > 5pp: 不要 fp8，退到 awq 或 fp16
+
+  **报告里必须写**：
+  - calibration set 来源 / 大小 / domain
+  - dtype 矩阵选择 + 理由
+  - SmoothQuant α 值
+  - skip_modules 列表
+  - acc 5 组对照：fp16 / e4m3w-fp16a / e4m3w-e5m2a / e4m3w-e5m2a+SQ / + KV-fp8
+  - long prompt (>2K) 单独 acc 测量
+
+  参考：`mini_infra/vllm/quant/calibrator.py`、`mini_infra/vllm/quant/fp8_kv.py`、L08.5 README、SmoothQuant paper、vLLM fp8 docs。

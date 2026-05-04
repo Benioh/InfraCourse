@@ -1,0 +1,3 @@
+world_size: 2
+backend: gloo_or_nccl
+microbatches: 4

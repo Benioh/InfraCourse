@@ -1,0 +1,218 @@
+mission: l18_data_engineering
+title: L06.3 Quiz · MinHash / LSH / 数据去重
+pass_threshold: 1.0
+description: |
+  这 5 题打中 MinHash + LSH 在数据 pipeline 里最容易混淆的点：shingling 的选择、
+  签名长度的 trade-off、LSH band/row 的物理意义、为什么大模型训练数据要去重。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l18_data_engineering/patch/task.md
+  - title: 跑 notebook n16 · MinHash dedup
+    kind: notebook
+    path: notebooks/n16_minhash_dedup.ipynb
+  - title: 读 RedPajama / Dolma 数据 pipeline 论文
+    kind: source
+    path: docs/术语表.md
+
+questions:
+  - id: q1_shingling_choice
+    prompt: |
+      做文本去重时 char-level n-gram (n=3) vs word-level shingle (k 个连续单词)，
+      各适合什么场景？
+    options:
+      - id: a
+        text: char-level 总是更好，更细粒度
+      - id: b
+        text: char-level 对短文本 / 多语言更鲁棒（不依赖 tokenizer）；
+              word-level 对长文档主题级近似更稳，但需要分词且对错别字敏感
+        correct: true
+      - id: c
+        text: word-level 总是更好，更语义化
+      - id: d
+        text: 没区别，看实现简单度
+    explanation: |
+      Shingle 选择的本质是："多大的窗口算一个 unit"。
+
+      **char-level (n=3-5)**：
+        - 优点：不需要 tokenizer，跨语言通用（中文 / 英文 / 代码都行）
+        - 优点：对错别字鲁棒（"hello" vs "helo" 仍有大量重叠）
+        - 缺点：对短文本（< 50 字符）召回率高但精度低（很多文本都看着像近重复）
+        - 用于：大规模爬虫数据 dedup（CommonCrawl / RedPajama 用 5-gram char）
+
+      **word-level (k=2-5)**：
+        - 优点：捕捉短语级语义，长文档（> 100 词）精度高
+        - 缺点：依赖分词；中文 / 日文需要先 tokenize
+        - 缺点：对错别字、变形敏感（"is/was" 被算成不同 unit）
+        - 用于：文档级 dedup（论文、新闻文章）
+
+      实际生产做法（Dolma / RedPajama-V2）：
+        - 第一阶段：char 5-gram + MinHash 大规模粗筛
+        - 第二阶段：word 5-gram + cosine 精筛保留近重复
+        - 第三阶段：精确 SHA-256 删完全相同
+
+      Capstone 给 image-caption 去重时，caption 通常很短（1-2 句），用 char 3-gram 最合适。
+
+  - id: q2_num_perm_tradeoff
+    prompt: |
+      MinHash 的 num_perm 参数（签名长度）越大越好吗？
+    options:
+      - id: a
+        text: 越大越好，无副作用
+      - id: b
+        text: 越大估计越准（标准误差 ∝ 1/sqrt(num_perm)），但内存和计算成本线性增长；
+              通常 64-256 就足够
+        correct: true
+      - id: c
+        text: 越小越好，省内存
+      - id: d
+        text: 必须是 2 的幂
+    explanation: |
+      MinHash 估计 Jaccard 的标准误差：
+        SE ≈ sqrt(J × (1 - J) / num_perm)
+
+      具体数字：
+        - num_perm = 64, true J = 0.5 → SE ≈ 0.0625
+        - num_perm = 128, J = 0.5 → SE ≈ 0.044
+        - num_perm = 256, J = 0.5 → SE ≈ 0.031
+        - num_perm = 1024, J = 0.5 → SE ≈ 0.016
+
+      边际收益递减：精度提升按 1/sqrt(N)。从 64 到 256 精度仅翻倍。
+
+      内存代价：每个文档存 num_perm 个 64-bit int。
+        - 10 亿文档 × 64 perm × 8B = 512 GB（一般集群存得下）
+        - 10 亿文档 × 1024 perm × 8B = 8 TB（开始麻烦）
+
+      实践默认：
+        - 通用：128
+        - 严格去重（医学 / 法律）：256
+        - 海量预训练（>10B 文档）：64 配 LSH banding
+
+      面试金句："MinHash num_perm 选 128 是经验值——再加只是花钱，再减开始失真。"
+
+  - id: q3_lsh_banding
+    prompt: |
+      MinHash 单纯的 dedup 是 O(N²)。LSH banding 把它优化成接近 O(N) 的关键 idea 是？
+    options:
+      - id: a
+        text: 用 GPU 并行算 jaccard
+      - id: b
+        text: 把 num_perm 个 hash 分成 b 个 band（每 band 有 r=num_perm/b 个 hash）；
+              两文档至少在一个 band 完全一致才算"候选近重复"，再精确算 jaccard
+        correct: true
+      - id: c
+        text: 用 hash table 而不是 list 存签名
+      - id: d
+        text: 把签名压缩成 8-bit 整数
+    explanation: |
+      LSH banding 是经典加速：
+
+      **算法**：
+        1. 把 128-perm 签名分成 b 个 band，每 band r 个 hash（128 = b × r）
+        2. 每个 band 用一个 hash table，key 是 band 内 r 个 hash 的 tuple
+        3. 两文档若至少在一个 band 完全一致 → 候选近重复
+        4. 候选对再算 jaccard 精确判断
+
+      **数学**：
+        Pr(两文档至少一个 band 一致) = 1 - (1 - J^r)^b
+        - r 大 → 单 band 一致难，jaccard 阈值高
+        - b 大 → 多次抽奖，召回率高
+
+      **常见配置**：
+        - num_perm=128, b=20, r=6.4 → 不行（必须整数）
+        - num_perm=128, b=16, r=8 → 阈值 ≈ 0.7
+        - num_perm=128, b=32, r=4 → 阈值 ≈ 0.5（更宽松）
+
+      **复杂度**：
+        - 建表：O(N × b)
+        - 查询：每文档 O(b)，期望 O(1) 候选数
+        - 总：O(N × b)，远比 O(N²) 好
+
+      面试金句："LSH banding = 把签名做 b 次哈希分桶；任何一个桶撞上就是候选——
+      用空间换 quadratic 时间。"
+
+  - id: q4_train_eval_leak
+    prompt: |
+      为什么大模型预训练数据集（如 RedPajama）必须去重？
+    options:
+      - id: a
+        text: 节省存储空间
+      - id: b
+        text: 重复样本让 LLM 训练吞吐 / 记忆某些 sample 过强；更重要的是避免
+              **训练集污染 eval set**——eval 上看似 "强 generalization" 其实是 memorization
+        correct: true
+      - id: c
+        text: 加速训练（重复样本计算浪费）
+      - id: d
+        text: 重复样本会让 loss 不稳定
+    explanation: |
+      去重的三个动机（按重要性）：
+
+      1. **Eval 污染**（最关键）：
+         - 训练集里有 "Q: 巴黎是哪国首都? A: 法国"
+         - eval 集 MMLU 里也有同样问题
+         - 模型在 eval 上"答对" = 实际是 memorization 不是 reasoning
+         - LLaMA / Gemini / GPT-4 各家都有这种 leak 丑闻
+
+      2. **训练效率**：
+         - 重复样本占 token budget，等于减少了真实 unique 样本量
+         - GPT-3 paper 提到 "filtered out 17% of CommonCrawl due to overlap"
+         - DeepSeek-V3 报告 dedup 后 unique tokens 比原数据集少 ~30%
+
+      3. **过拟合**：
+         - Carlini 2022 证明 LLM 会精确背诵训练集中重复 ≥ 5 次的样本
+         - 重复 patient note 训出来的医疗 LLM 会泄漏患者隐私
+
+      实际做法（Dolma / RedPajama-V2）：
+        a. URL dedup（域名+path 完全相同删）
+        b. char SHA dedup（完全相同字符序列）
+        c. MinHash near-dup（jaccard >= 0.8 删）
+        d. eval 集反向 dedup（训练集里删任何与 eval 集 jaccard >= 0.7 的样本）
+
+      Capstone：你训练 projector 时务必先把 image-caption 数据集与 eval 用的 MM-VQA
+      做 dedup，否则 eval 数字虚高。
+
+      面试金句："大模型 dedup 不是为了省存储，是为了 eval 数字不打脸。"
+
+  - id: q5_image_dedup
+    prompt: |
+      MinHash 适合做"图像-caption 对"的 caption 文本去重，但不适合**图像本身**去重。
+      为什么？
+    options:
+      - id: a
+        text: 图像 byte 不是文本，没法 hash
+      - id: b
+        text: MinHash 假设输入是有意义 token 集合；图像 byte hash 对 1 像素噪声 / 旋转 1° / 重压缩
+              都会产生完全不同的签名。图像应该用 perceptual hash（pHash / dhash / CLIP embedding）
+        correct: true
+      - id: c
+        text: 图像太大，shingle 内存爆炸
+      - id: d
+        text: 图像不需要去重
+    explanation: |
+      MinHash 适合**离散 token set**（文字、URL、HTML tag），相似度被 Jaccard 良好定义。
+
+      图像不行：
+        - 同一张图压缩成 jpg vs png 字节序列完全不同
+        - JPEG quality 95 vs 90 字节序列完全不同
+        - 旋转 1° 字节序列完全不同
+        - 加 1 个像素 noise 字节序列完全不同
+
+      图像去重需要 **perceptual hash**：
+        - **pHash**：DCT 后取低频 64-bit；对压缩 / 缩放 / 轻微编辑稳定
+        - **dHash**：相邻像素差分；速度极快，鲁棒性中等
+        - **CLIP embedding + cosine**：语义级相似（同物体不同角度算重复）；
+          最强但贵
+        - **NeuralHash**（Apple 风格）：训练专门 NN 输出感知哈希
+
+      LAION / DataComp-1B 等大规模图文数据集的去重 pipeline：
+        1. URL exact dedup
+        2. pHash + Hamming distance < 5 删（解决重压缩 / 缩放）
+        3. CLIP embedding + cosine > 0.95 删（解决语义重复）
+        4. 文本 caption MinHash 80% 删（caption 重复但图不同的 case）
+
+      Capstone：你的 image-caption 数据集去重应该 caption 用 MinHash，图像用 pHash 或
+      CLIP，**两者各做一次**——光去重 caption 会留下 "同图不同 caption" 的脏样本。
+
+      面试金句："文本去重 MinHash，图像去重 pHash 或 CLIP——别把图像 byte 当文本。"

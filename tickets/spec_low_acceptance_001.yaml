@@ -1,0 +1,120 @@
+id: spec_low_acceptance_001
+title: Speculative decoding 跑通但 speedup < 1（acceptance 太低）
+mission: l24_spec_decode
+severity: high
+symptom: |
+  开 spec decode 后 server 正常响应，但实测 throughput 比 baseline 低 5-10%。
+  acceptance_rate 仅 10-20%，draft 成本超过节省的 target step。
+error_signatures:
+- "acceptance_rate: 0.18 (期望 ≥ 0.5)"
+- "throughput baseline=1820 tps, with_spec=1640 tps (slower!)"
+- "draft_latency_ms = 8.2, target_step_saved = 4.1"
+- "OOD prompt acceptance: 0.05 (in-domain prompt acceptance: 0.62)"
+classification_questions:
+- spec mode 是 ngram / draft_model / EAGLE / Medusa 哪种？
+- 用的 draft 与 target 是否同 tokenizer？vocab 一致吗？
+- workload 是 in-domain（与 target 训练 domain 同）还是 OOD？
+- num_speculative_tokens（K）设了多少？
+- temperature / top_p 与 baseline 是否一致？高温会显著降 acceptance
+likely_causes:
+- draft 与 target 模型差太大（如 0.5B draft + 70B target）：draft 预测分布
+  偏离 target，acceptance 低
+- tokenizer 不一致：draft 的 token 与 target 的 token id 不能直接 verify
+- workload 是 OOD：draft 没在该 domain 训练过
+- temperature 太高（> 0.7）：随机采样让 acceptance 永远不会高
+- ngram 模式 + 短 prompt：n-gram 在 prompt 内根本找不到匹配
+- num_speculative_tokens 太大（> 8）：长 chain 被一处错误打断，acceptance
+  曲线快速衰减
+- draft 占了大量 GPU 时间，吞掉收益
+minimal_checks:
+- 用 mini_infra 验证 acceptance vs speedup 关系：
+  ```python
+  from mini_infra.vllm.spec_decode.acceptance_tracker import AcceptanceTracker
+  tracker = AcceptanceTracker(window=8)
+  for accept_count in [3, 2, 4, 1, 3, 0, 2, 3]:
+      tracker.add(accept_count, proposed=4)
+  print(f"rate={tracker.rate()}, speedup_at_draft_25%={tracker.expected_speedup(0.25)}")
+  ```
+  speedup < 1 时说明 (1 - rate) + draft_cost > 1，必须加 rate 或减 cost
+- 对照 in-domain vs OOD：
+  ```python
+  from mini_infra.vllm.spec_decode.draft_runner import spec_decode_summary
+  in_dom = spec_decode_summary(mode="ngram", domain="in_domain")
+  out_dom = spec_decode_summary(mode="ngram", domain="out_of_domain")
+  print(f"in={in_dom['acceptance_rate']}, out={out_dom['acceptance_rate']}")
+  ```
+- 检查 draft / target tokenizer：`draft_tokenizer.vocab == target_tokenizer.vocab`
+- 用 greedy（temperature=0）测；如果 acceptance 大幅上升，说明高温是主因
+- 看 num_speculative_tokens 影响：K=2 vs K=8 的 acceptance 差距
+minimal_fixes:
+- draft / target 同家族（如 Llama-1B + Llama-7B），vocab 必须一致
+- num_speculative_tokens 调到 4-6（不要 > 8）
+- ngram 模式：max_n 调小（5 → 3），prompt 长度 < 100 的关 spec
+- in-domain 时开 spec，OOD 时关（或动态根据 acceptance 关）
+- temperature 高（> 0.7）时关 spec：spec 几乎没用
+what_not_to_do:
+- 不要拿不同家族的模型做 draft+target；vocab 不一致 verify 全错
+- 不要 K=10 想"多猜多省"；长 chain 衰减太快
+- 不要在 OOD workload 上仍开 spec；纯亏
+- 不要忽略 temperature 影响；高温下 spec 无效
+- 不要看 acceptance > 0.5 就觉得"开 spec 总是赢"；要算完整 speedup
+hint_1: |
+  最快定位：用 mini_infra 公式算理论 speedup：
+  ```python
+  rate = your_measured_acceptance  # 比如 0.18
+  draft_cost = your_draft_latency / your_target_step_latency  # 比如 0.5
+  expected_speedup = 1.0 / ((1 - rate) + draft_cost)
+  print(f"expected speedup = {expected_speedup}")
+  ```
+  - rate=0.18, draft_cost=0.5 → speedup ≈ 1 / 1.32 = 0.76（确实变慢）
+  - 要 speedup > 1，必须 rate > draft_cost
+  - 你的 draft_cost 应是 target_step 的 0.1-0.3 才合理
+hint_2: |
+  确认 acceptance 太低后，按这个 sweep 找：
+
+  | 配置 | acceptance | speedup |
+  |---|---|---|
+  | ngram, in-domain prompt | 0.4-0.6 | 1.5-1.8 |
+  | ngram, OOD prompt | 0.05-0.15 | 0.8-1.0（亏） |
+  | draft 同家族小模型, in-domain | 0.5-0.7 | 1.7-2.0 |
+  | draft 不同家族 | 0.0-0.1 | 0.7（巨亏） |
+  | EAGLE / Medusa head | 0.7-0.85 | 2.0-2.5 |
+
+  对照 mini_infra `spec_decode_summary(mode, domain)` 输出：
+  - in_domain + ngram acceptance ≈ 0.5
+  - out_of_domain acceptance ≈ 0.0-0.1
+  你的实测应在这个范围；偏低说明配置错。
+solution: |
+  Spec decode acceptance 太低的修复路径：**workload 分桶 > draft 选型 > num_spec > 关 spec on OOD**。
+
+  1. **workload 诊断**：
+     - 跑 5 个不同 domain 的 prompt，记录各自 acceptance
+     - in-domain rate > 0.4 才考虑开 spec
+
+  2. **draft 选型**：
+     - ngram：零 GPU 占用，适合长 prompt + in-domain
+     - 同家族小模型：精度高但占 GPU
+     - EAGLE / Medusa：训练专门 head，acceptance 最高
+
+  3. **num_speculative_tokens**：
+     - 默认 4-5
+     - 高 acceptance（> 0.7）可到 6-8
+     - 低 acceptance（< 0.3）反而要降到 2-3
+
+  4. **动态 spec**：
+     ```python
+     # 用 AcceptanceTracker 滑动窗口
+     # 当 rate < threshold 时自动关 spec
+     if tracker.rate() < 0.3:
+         disable_spec_for_request(req)
+     ```
+
+  5. **报告必写**：
+     - in-domain vs OOD 的 acceptance 表
+     - num_speculative_tokens sweep
+     - draft 选型对比（ngram / draft_model / EAGLE）
+     - 修复前 / 后的 throughput + acceptance + speedup
+     - mini_infra `expected_speedup` 公式与实测对照
+
+  参考：mini_infra/vllm/spec_decode/acceptance_tracker.py 的 expected_speedup；
+  github_repo/vllm/vllm/spec_decode/spec_decode_worker.py。

@@ -1,0 +1,159 @@
+id: moe_alltoall_slow_003
+title: MoE EP=8 比 EP=4 还慢，all-to-all 占据 step time 50%+
+mission: l13_moe_ep
+severity: high
+symptom: |
+  把 EP（expert parallel）从 4 升到 8 期望线性加速或至少不变，结果：
+  (a) step_time_ms 反而上升 30%+；
+  (b) `alltoall_ms / step_time_ms` 占比从 EP=4 的 15% 飙到 EP=8 的 50%+；
+  (c) profiler 显示 NCCL all-to-all 时间随 EP 超线性增长；
+  (d) GPU 利用率（compute）下降，多数时间在等通信。
+error_signatures:
+- "alltoall_ms / step_time_ms > 0.4"
+- "EP=8 step_time > EP=4 step_time"（无加速）
+- "NCCL all_to_all_single 时间随 ep_size 超线性"
+- "ncu / nsys: %SM Active < 30%"
+- "permute / unpermute 出现在 host 时间线（CPU bound）"
+classification_questions:
+- 是 token-imbalance 导致某些 rank 收到比平均多得多的 token，拖慢 all-to-all？
+- permute / unpermute 是 GPU 上做还是 host 上做？
+- NCCL group 是 EP group 还是和 DP group 混了？
+- 是 EP=8 太大（不必要）还是 EP=4 已经够？模型小时 EP=2 可能就最优
+- 网络拓扑：EP group 是单机内（NVLink）还是跨机（IB）？
+likely_causes:
+- token imbalance：某 expert 收到 batch 的 80% token → 其 rank 的 all-to-all payload 远大于均值，整 group 等它
+- permute 在 host 上（torch.scatter on CPU）：GPU 等 host
+- EP group 跨机：用了 IB 而不是 NVLink，带宽差 10x
+- 同时开了 TP+EP 但没搭配 SP，导致 KV/MLP 重复通信
+- ep_size 与 expert 数不整除：负载更不均
+- alltoall payload 太小（< 1MB）：launch overhead > 实际传输
+minimal_checks:
+- 用 `mini_infra/megatron/core/transformer/moe/alltoall.py:alltoall_cost_ms` 算预算：
+  ```python
+  from mini_infra.megatron.core.transformer.moe.alltoall import alltoall_cost_ms
+  for ep in [2, 4, 8, 16]:
+      ms = alltoall_cost_ms(token_count=4096, hidden_size=4096, ep_size=ep)
+      print(f'EP={ep}: alltoall_ms={ms:.4f}')
+  ```
+- profiler：`torch.profiler` 记录每步的 nccl/permute/expert_forward 时间分配
+- 看 `tokens_per_expert_p99 / p50`：> 3 说明 imbalance 严重
+- 用 `nvidia-smi nvlink --status` 确认 EP group 内是 NVLink 而不是 PCIe
+- 检查 `permute_for_experts` 实现：torch.gather + scatter 在 GPU 还是 CPU
+- 关 EP（ep_size=1）跑 baseline，看 alltoall 时间是否真的主导
+minimal_fixes:
+- ep_size 选小一点：tiny model 用 2，normal 用 4，只有 LLaMA-MoE-7×8B 这种规模才 EP=8+
+- token imbalance 修：先解决 router collapse / capacity overflow（前两个 ticket）
+- permute 全 GPU：用 `torch.gather` + advanced indexing，不要回 CPU
+- 单机内 EP：确保 EP group 不跨机（在 parallel_state 配置时）
+- 配合 SP：sequence parallel 让 MLP 也按 seq 切，减少与 EP 重叠的通信
+- 增大 batch_size：alltoall 在 payload 大时效率更高（amortize launch overhead）
+what_not_to_do:
+- 不要"试一下" EP=16 看是否快——通信代价超线性，模型小时几乎一定更慢
+- 不要忽略 token imbalance 单独调 NCCL config——根因在 router
+- 不要把 permute 留在 host："为了简单"是 30% 性能损失
+- 不要跨机 EP 而不评估 NVLink/IB 带宽差
+- 不要在 EP 慢的同时也调 TP/PP/DP——一次只改一个
+hint_1: |
+  3 分钟法：用预算与实测对照：
+  ```python
+  from mini_infra.megatron.core.transformer.moe.alltoall import (
+      alltoall_cost_ms, dispatch_plan
+  )
+  from mini_infra.megatron.core.transformer.moe.router import (
+      route_tokens, synthetic_logits
+  )
+
+  for ep in [2, 4, 8]:
+      logits = synthetic_logits(num_tokens=1024, num_experts=8, collapse=False)
+      routes = route_tokens(logits, top_k=2)
+      plan = dispatch_plan(routes, num_experts=8, hidden_size=4096, ep_size=ep)
+      print(f'EP={ep}: predicted alltoall_ms={plan["alltoall_ms"]:.4f}, '
+            f'tokens_per_expert={plan["tokens_per_expert"]}')
+  ```
+  对比你 profiler 的实测 alltoall_ms。如果 实测 / 预算 > 3x → 可能是 imbalance 或 host permute。
+
+  Profiler 跑：
+  ```bash
+  nsys profile -o moe_trace python labs/l13_moe_ep/scripts/run_moe.py \
+    --experts 8 --top-k 2 --ep 8 --steps 10
+  nsys-ui moe_trace.nsys-rep
+  ```
+  在 GPU 时间线上看 `ncclAllToAll` block 长度。
+hint_2: |
+  实测 alltoall 远超预算时，按这个顺序：
+
+  1. **token imbalance**：
+     ```python
+     from mini_infra.megatron.core.transformer.moe.router import tokens_per_expert
+     counts = tokens_per_expert(routes, num_experts)
+     imbalance = max(counts) / (sum(counts) / len(counts))
+     print('imbalance ratio (max/mean):', imbalance)
+     ```
+     > 2 → 触发 `moe_router_collapse_001` 流程。
+
+  2. **permute 上 GPU**：
+     ```python
+     # 错的：CPU
+     permuted = torch.zeros_like(tokens)
+     for i, exp_id in enumerate(routes_cpu):
+         permuted[buckets[exp_id]] = tokens[i]
+
+     # 对的：GPU advanced indexing
+     idx = compute_permutation_indices(routes)  # GPU tensor
+     permuted = tokens[idx]
+     ```
+
+  3. **跨机 vs 单机 EP**：
+     ```bash
+     nvidia-smi topo -m   # 看 GPU pair 是 NV/PIX/SYS
+     ```
+     EP group 应该全是 NV（NVLink）；任何 SYS 都意味着跨机/PCIe。
+     调整 process group 创建顺序让 EP group 内是 NV。
+
+  4. **payload 太小**：
+     如果 token_count × hidden_size × dtype < 1MB，alltoall launch overhead 占大头。
+     增大 micro_batch_size（如果显存允许）。
+
+  5. **配合 SP**：
+     如果 TP > 1，必开 sequence_parallel；不然 MLP 通信也会和 alltoall 互相阻塞。
+
+  ep 选择 rule of thumb：
+  - 1B 模型：EP ≤ 4
+  - 7B 模型：EP = 4-8
+  - 70B+ MoE（如 Mixtral）：EP = 8
+solution: |
+  MoE all-to-all 慢的修复路径：**(1) 量预算与实测差 → (2) 修 imbalance → (3) permute 全 GPU → (4) 单机内 EP → (5) 选合适 ep_size**。
+
+  **黄金法则**：EP 不是越大越好。EP 大 → alltoall payload 总量增（O(N × token × hidden)）但每 rank 的 expert 数减。在小模型 / 小 batch 上，EP=2 或 EP=4 通常最优。
+
+  **配置示例**（H200 8 卡，Mixtral 8×7B 风格）：
+  ```yaml
+  moe:
+    num_experts: 8
+    top_k: 2
+    ep_size: 4              # 不要直接上 8
+    capacity_factor: 1.25
+  parallel:
+    tp_size: 2
+    pp_size: 1
+    dp_size: 1
+    sequence_parallel: true # 必开
+    expert_parallel: true
+  ```
+
+  **必做 checklist**：
+  1. ✓ alltoall_cost_ms 预算与实测对比（差 < 3x）
+  2. ✓ tokens_per_expert imbalance ratio < 2
+  3. ✓ permute / unpermute 全在 GPU
+  4. ✓ EP group 内全 NVLink（`nvidia-smi topo -m`）
+  5. ✓ 配合 sequence_parallel（如果 TP > 1）
+  6. ✓ payload > 1MB（增 micro_batch 验证）
+
+  **报告里必须写**：
+  - EP=2/4/8 三组对照：step_time_ms / alltoall_ms / GPU 利用率
+  - 你选的 ep_size + 理由
+  - 是否触发 imbalance（放 router_entropy 曲线）
+  - permute 实现（GPU 还是 host，贴代码段）
+  - GPU topology 截图（`nvidia-smi topo -m`）
+
+  参考：`mini_infra/megatron/core/transformer/moe/alltoall.py`、L05.5 README、Mixtral / DeepSeek-MoE paper。

@@ -1,0 +1,16 @@
+{
+  "mission": "l18_data_engineering",
+  "passed": true,
+  "exit_code": 0,
+  "started_at": "2026-05-02T13:29:59.155011Z",
+  "finished_at": "2026-05-02T13:29:59.753816Z",
+  "duration_s": 0.6,
+  "summary": {
+    "passed": 5,
+    "failed": 0,
+    "total": 5
+  },
+  "output": "============================= test session starts ==============================\nplatform linux -- Python 3.12.3, pytest-8.1.1, pluggy-1.6.0 -- /usr/bin/python\ncachedir: .pytest_cache\nhypothesis profile 'default' -> database=DirectoryBasedExampleDatabase(PosixPath('/inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l18_data_engineering/patch/.hypothesis/examples'))\nrootdir: /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l18_data_engineering/patch\nconfigfile: pytest.ini\nplugins: anyio-4.9.0, hypothesis-6.130.8, flakefinder-1.1.0, rerunfailures-15.1, shard-0.1.2, xdist-3.7.0, xdoctest-1.0.2\ncollecting ... collected 5 items\nRunning 5 items in this shard: tests/test_patch.py::test_signature_size, tests/test_patch.py::test_identical_text_same_signature, tests/test_patch.py::test_jaccard_estimate_high_for_near_duplicates, tests/test_patch.py::test_dedup_removes_exact_duplicates, tests/test_patch.py::test_dedup_preserves_distinct\n\ntests/test_patch.py::test_signature_size PASSED                          [ 20%]\ntests/test_patch.py::test_identical_text_same_signature PASSED           [ 40%]\ntests/test_patch.py::test_jaccard_estimate_high_for_near_duplicates PASSED [ 60%]\ntests/test_patch.py::test_dedup_removes_exact_duplicates PASSED          [ 80%]\ntests/test_patch.py::test_dedup_preserves_distinct PASSED                [100%]\n\n============================== 5 passed in 0.23s ===============================\n",
+  "output_truncated": false,
+  "all_gpu_skipped": false
+}

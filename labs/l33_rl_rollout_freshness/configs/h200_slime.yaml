@@ -1,0 +1,25 @@
+profile: h200_slime
+servers: [s0, s1, s2, s3, s4, s5, s6, s7]
+max_staleness: 2
+total_steps: 200
+update_rate: 0.4
+update_subset_size: 4
+prompts: ["math-001", "math-002", "code-001", "code-002"]
+seed: 13
+acceptance:
+  no_runtime_error_when_update_rate_geq: 0.4
+  must_raise_when_update_rate: 0.0
+  p99_staleness_max: 4
+slime_train_command: >
+  ray job submit --address auto --
+  python -m slime.scripts.train_actor
+  --actor-model Qwen/Qwen2.5-7B-Instruct
+  --rollout-engine sglang
+  --num-rollout-engines 8
+  --max-staleness 2
+slime_rollout_command: >
+  ray job submit --address auto --
+  python -m slime.scripts.run_rollout
+  --rollout-engine sglang
+  --num-engines 8
+  --update-from actor

@@ -1,0 +1,13 @@
+name: base
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.11
+  - pip
+  - pyyaml
+  - fastapi
+  - uvicorn
+  - jupyterlab
+  - pip:
+      - streamlit

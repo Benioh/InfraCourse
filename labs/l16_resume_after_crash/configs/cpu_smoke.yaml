@@ -1,0 +1,6 @@
+profile: cpu_smoke
+total_steps: 100
+crash_at_step: 50
+seed: 0
+acceptance:
+  rel_loss_diff_max: 0.01

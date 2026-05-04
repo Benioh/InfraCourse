@@ -1,0 +1,79 @@
+id: sglang_high_ttft_001
+title: SGLang TTFT 偏高（prefill 阻塞 / tokenizer 同步 / 调度延迟）
+mission: l35_multimodal_capstone
+severity: medium
+symptom: SGLang 服务在中等并发下 TTFT（time-to-first-token）p50 > 数百毫秒、p99 抖到几秒；吞吐并不差，但用户端首 token 感受明显变慢；decode 阶段 ITL（inter-token latency）反而还好。
+error_signatures:
+- "server metrics: time_to_first_token_ms p50=800 p99=3200 （或 benchmark 脚本输出类似数字）"
+- "WARN: scheduler overloaded, queue depth N 周期性出现"
+- "prefill batch tokens: 32768 / 32768（prefill batch 每次塞满，说明排队严重）"
+- 请求 trace 里 `queued_for_ms` 远大于 `prefill_ms`
+- CPU（尤其 tokenizer 线程）利用率长期 100%，GPU 周期性闲置
+classification_questions:
+- TTFT 瓶颈在哪段：`queue → tokenize → prefill → forward → 首 token 返回`？
+- Prompt 长度分布：短（< 512）、中（512-4k）、长（> 4k），当前并发下各段占比？
+- 是**每个请求**都慢，还是**p99 才慢**？p99 慢通常是被 long prompt 的 prefill 阻塞。
+- 有没有开 `--enable-mixed-chunk` / `--chunked-prefill-size` / `--schedule-policy`？
+- tokenizer 是单进程还是多 worker？system prompt / chat template 是否很长？
+likely_causes:
+- Prefill 阻塞 decode：短请求 queue 在长请求后面，长 prompt forward 期间短 prompt 首 token 拿不到。
+- Tokenizer 是 CPU 瓶颈：长 system prompt + chat template 每个请求都重新 tokenize，单线程跟不上。
+- 调度策略：默认 FCFS，短请求没机会抢到 prefill slot；可以换 LPM/LOF。
+- Prefix cache 未开或命中率低：重复的 system prompt 每次都 prefill 一遍。
+- "`max-prefill-tokens` 过小：一个 long prompt 被拆很多 chunk，串行 prefill 累积延迟。"
+- TP 跨节点 / EP（expert parallel）通信开销，forward 内部变慢。
+minimal_checks:
+- "开 `--log-level debug`，抓一次请求的 trace：看 `queued_for_ms`、`tokenize_ms`、`prefill_ms`、`first_token_ms` 分别多少。最大的那段就是瓶颈。"
+- "固定 prompt（system + user 完全相同）连发 100 次，记录 TTFT p50/p99。如果第二次起大幅下降，说明 prefix cache 起作用；如果没下降，cache 没开或没命中。"
+- "用 `sglang.bench_serving` 按 workload 定性：`--random-input-len 4096 --request-rate 5` vs `--input-len 512 --request-rate 50`，两组 TTFT 对比看是 prefill 瓶颈还是调度瓶颈。"
+- "`top -H` 看 tokenizer 子线程 CPU%；如果某个线程长期 100%，是 tokenizer 瓶颈。"
+- "检查启动参数：`--chunked-prefill-size` 是否开启且 ≥ 2048；`--enable-prefix-caching` 是否 True。"
+minimal_fixes:
+- 开 prefix cache：`--enable-prefix-caching`（或 `radix-cache`，SGLang 特色）；system prompt 重复的 workload 立刻见效。
+- 开 chunked prefill：`--chunked-prefill-size 8192`，让 long prompt 不再 block 调度器。
+- 调度策略：`--schedule-policy lof`（least-outstanding-first）或 `lpm`（largest-prefix-match），短请求不会饿死。
+- 多 tokenizer worker：`--tokenizer-worker-num 4`（或对应参数），CPU 够就加。
+- "`--max-running-requests` 降到合理值，避免把 GPU 打满后调度放大延迟。"
+- 长 system prompt 用 prefix cache + chat template 预 tokenize 缓存；不要每次都重组。
+what_not_to_do:
+- 不要只看 throughput 不看 TTFT 就宣称性能好。
+- 不要把 `--max-prefill-tokens` 拉到很大但不开 chunked，会让 decode 被长 prefill 饿死。
+- 不要简单加 TP 期望 TTFT 下降——TP 主要解决 forward 时间，队列/tokenize/prefix 问题不会因此消失。
+- 不要在 debug 时关掉 prefix cache；关闭后数字反而“稳定”但代价是持续慢。
+hint_1: |
+  先拆解 TTFT 的时间构成。用 `curl -w` 或 benchmark 脚本抓一次：
+  ```
+  queued_for_ms + tokenize_ms + prefill_ms = TTFT
+  ```
+  - queued_for_ms 是大头 → 调度/并发问题。考虑 chunked prefill + 换 schedule_policy。
+  - tokenize_ms 是大头 → CPU tokenizer 瓶颈。开多 worker 或缩短 system prompt。
+  - prefill_ms 是大头 → 真正 forward 慢。开 prefix cache 看是否命中；若命中仍慢，考虑量化 / TP / 模型换小。
+hint_2: |
+  定位后对症下药，按顺序尝试（影响最大优先）：
+  ```
+  prefill 主导
+    1. --enable-prefix-caching           （若 workload 有共享前缀，最大收益）
+    2. --chunked-prefill-size 8192       （解长 prompt 阻塞）
+    3. --kv-cache-dtype fp8 / 模型量化    （forward 本身加速）
+    4. TP 扩容                            （最后手段）
+
+  queue 主导
+    1. --schedule-policy lof / lpm
+    2. --max-running-requests 调到「GPU 不掉利用率但不过载」
+    3. 独立部署：长/短请求路由到不同 endpoint
+
+  tokenize 主导
+    1. --tokenizer-worker-num 4
+    2. 缓存固定 system prompt 的 token ids，只传 user 部分
+    3. 换更快的 tokenizer 实现（tokenizers rust）
+  ```
+  每改一项跑相同 workload，记录 TTFT p50/p99 和 throughput 的变化。
+solution: |
+  SGLang TTFT 的不变量：`TTFT = queue + tokenize + prefill`。**不做拆解就调优，十有八九改错地方**。诊断模板：
+  1. 抓一次单请求 trace，拆出三段时间。
+  2. 固定 workload 压测（共享 system prompt、长/短 prompt、并发阶梯），看三段时间的变化曲线。
+  3. 找出主导项，按 hint_2 的优先级修复。
+  4. 每次只改一个参数，留 benchmark artifact；报告里给 TTFT p50/p99 的修复前后对比表格。
+  5. 确认 throughput 没被牺牲——`sglang.bench_serving` 同时输出 TTFT / throughput，二者都记录。
+  SGLang 特有优化（RadixCache、continuous batching、zero-overhead scheduler）在官方 benchmark 文档里有参数对照。
+  参考：`github_repo/sglang/python/sglang/srt/`、labs/l21_sglang_serving_core、labs/l26_sglang_pd_observability、notebooks/n08_prefill_decode、notebooks/n09_prefix_cache。

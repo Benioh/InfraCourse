@@ -1,0 +1,203 @@
+mission: l13_moe_ep
+title: L05.5 Quiz · MoE 路由 / 容量因子 / 负载均衡
+pass_threshold: 1.0
+description: |
+  这 5 题打中 MoE 路由最容易迷糊的点：top-1 vs top-2、capacity factor 的物理意义、
+  aux loss 的数学、token drop vs token padding。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l13_moe_ep/patch/task.md
+  - title: 跑 notebook n15 · MoE router capacity
+    kind: notebook
+    path: notebooks/n15_moe_router_capacity.ipynb
+  - title: 读 Switch Transformer paper section 2-3
+    kind: source
+    path: docs/术语表.md
+  - title: 读 Megatron MoE 实现
+    kind: source
+    path: github_repo/Megatron-LM/megatron/core/
+
+questions:
+  - id: q1_top1_vs_top2
+    prompt: |
+      Switch Transformer 用 top-1，GShard / Mixtral / DeepSeekMoE 用 top-2。
+      它们的核心权衡是什么？
+    options:
+      - id: a
+        text: top-2 更准确但慢；top-1 不准但快
+      - id: b
+        text: top-1 通信少（每 token 走 1 expert），但负载不均时会抖；
+              top-2 通信翻倍但负载更平滑、模型质量更好
+        correct: true
+      - id: c
+        text: top-2 的 expert 数必须是偶数
+      - id: d
+        text: top-1 适合 inference，top-2 只适合训练
+    explanation: |
+      路由决策影响三件事：
+        1. **质量**：top-2 让每个 token 接收 2 个 expert 的输出加权，对 expert 选择
+           错误更鲁棒。Mixtral / DeepSeekMoE 选 top-2 主要为质量。
+        2. **通信**：MoE 的核心通信是 all-to-all（dispatch + combine）。
+           top-2 通信量是 top-1 的 2 倍。
+        3. **负载均衡**：top-1 时一个 token 只能去一个 expert，路由决策有"硬边界"，
+           容易在某些 batch 全压向一个 expert；top-2 给"次选 expert"分担一部分压力。
+
+      Switch 的论点："top-1 + 严格 capacity 限制 + load balance loss 已经足够好；
+      省一半通信换得 sparsity 收益。" Mixtral 的论点："top-2 质量更好，多用一倍
+      通信值得"。
+
+      DeepSeek-V2/V3：top-K=8（更激进），同时配 fine-grained expert（每个 expert 更小）。
+
+      面试金句："top-1 vs top-2 是延迟换质量的 trade-off，没有标准答案。"
+
+  - id: q2_capacity_factor
+    prompt: |
+      Capacity factor c=1.0 在 num_tokens=128, num_experts=8, top-2 设置下，
+      每个 expert 最多接收多少 token？
+    options:
+      - id: a
+        text: 16（128/8）
+      - id: b
+        text: 32（128 * 2 / 8 * 1.0）
+        correct: true
+      - id: c
+        text: 128（不限制）
+      - id: d
+        text: 8（experts/2）
+    explanation: |
+      Capacity 公式：
+        ```
+        capacity = capacity_factor * num_tokens * top_k / num_experts
+                 = 1.0 * 128 * 2 / 8 = 32
+        ```
+        - num_tokens * top_k 是总分发量（每个 token 选 2 个 expert，2*128=256）
+        - / num_experts 是均匀情况下每个 expert 应该接收的量（256/8=32）
+        - capacity_factor 是缓冲系数：1.0 = 刚好均匀；> 1.0 留余量；< 1.0 严格
+
+      实践经验值：
+        - 训练：capacity_factor = 1.25（留 25% buffer 容忍轻微不均）
+        - 推理：capacity_factor = 2.0+（推理 batch 小，更不均匀）
+        - DeepSeek：训练用 c=1.0 + 强力 aux loss，推理用 c=4.0+
+
+      Capacity 太严会有大量 token 被 drop（输出变 0 向量），损害质量；
+      太松会浪费 expert 容量，增加计算和通信。
+
+  - id: q3_aux_loss_intuition
+    prompt: |
+      Switch Transformer 的 aux loss 公式：
+      `aux_loss = num_experts × Σ (fraction_routed × fraction_prob)`
+      为什么用 `fraction_routed × fraction_prob` 而不是直接 `fraction_routed²`？
+    options:
+      - id: a
+        text: 没原因，习惯
+      - id: b
+        text: fraction_prob 是连续的（softmax 输出），可微；fraction_routed 是离散的
+              （argmax 输出），不可微。乘起来既能反映真实路由分布，又能传梯度
+        correct: true
+      - id: c
+        text: fraction_prob² 在数值上不稳定
+      - id: d
+        text: 这两个量本来就是同一个数
+    explanation: |
+      Router 的输出有两种"分布"：
+        - **fraction_routed[i]** = `mean(dispatch_mask[:, i])`
+          实际有多少 token 被路由到 expert i（离散，0/1）
+        - **fraction_prob[i]** = `mean(softmax(logits)[:, i])`
+          softmax 给 expert i 的平均概率（连续）
+
+      理想情况：
+        - top-1 时 fraction_routed 和 fraction_prob 都接近 1/num_experts，aux_loss ≈ 1
+        - top-2 时 fraction_routed 接近 2/num_experts，fraction_prob 接近 1/num_experts，
+          aux_loss ≈ 2
+      不均衡：某 expert 的 routed 和 prob 同时 spike，乘积放大。
+
+      为什么不用 fraction_routed²？
+        - dispatch_mask 是 argmax/topk 结果，不可微
+        - 反向传播无法把 gradient 传回 logits
+        - 整个 aux loss 退化成一个 detached 的常数，无法引导 router 学习
+
+      为什么不用 fraction_prob²？
+        - 不与"实际路由"挂钩，router 可以输出"理想 prob"但走的是另一条路
+          （实际 dispatch 行为不一定均匀）
+
+      乘积形式：fraction_routed 提供"实际信号"，fraction_prob 提供"梯度通道"，
+      两者的乘积既忠实又可优化。
+
+      面试金句："Switch aux loss 的设计精髓——用 detached 的实际行为放大可微的概率梯度。"
+
+  - id: q4_token_drop_strategy
+    prompt: |
+      capacity 不够时，超出容量的 token 应该怎么处理？
+    options:
+      - id: a
+        text: 强制塞进 expert（牺牲精度）
+      - id: b
+        text: 通常 drop：dispatch_mask 设 0，token 在 MoE 输出中变成全 0 向量；
+              加 residual connection 后等于"跳过 MoE 层"
+        correct: true
+      - id: c
+        text: 报错，让训练停下
+      - id: d
+        text: 转发给最空闲的 expert
+    explanation: |
+      标准做法（Switch / GShard / Mixtral）：
+        1. 排序：在该 expert 内部，按 router 给的概率排序
+        2. 保留前 capacity 个 token（最有信心的）
+        3. 其余 token：dispatch_mask 设 0
+        4. MoE 层输出：被 drop 的 token 输出 0 向量
+        5. 后续的 residual connection (`x + moe(x)`) 让被 drop 的 token 等价于
+           "跳过整个 MoE 层"
+
+      为什么是 drop 而不是 reroute？
+        - reroute 引入额外通信轮（找到空闲 expert，重新发送）
+        - 训练时 drop 的影响有限：模型在 dataset 上每个 token 见多次，少数 drop 不致命
+        - aux loss 已经在惩罚不均，rare drop 是信号而不是问题
+
+      实际工程指标：训练时 drop rate < 5% 算正常；> 10% 说明 capacity_factor 太小或
+      router 学糟了。
+
+      推理时：capacity_factor 通常调到 4-8，因为推理 batch size 小（不均匀更明显）。
+
+      DeepSeek-V3 的 trick：训练用 "auxiliary-loss-free balancing"，把 capacity
+      管理交给 expert 选择策略本身，省了一个 hyperparameter。
+
+  - id: q5_expert_parallelism
+    prompt: |
+      Expert Parallelism (EP) 与 Tensor Parallelism (TP) 的核心区别是什么？
+    options:
+      - id: a
+        text: EP 切 dense 矩阵，TP 切 sparse 矩阵
+      - id: b
+        text: TP 把每个 expert 的权重切到不同 rank，每个 token 都需要通信；
+              EP 把不同 expert 放到不同 rank，token 路由时通过 all-to-all 到对应 rank
+        correct: true
+      - id: c
+        text: 二者实质相同，只是名字不同
+      - id: d
+        text: EP 用 NVLink，TP 用 InfiniBand
+    explanation: |
+      **TP**（applied to MoE）：
+        - 每个 expert 的权重 [out, in] 沿 out 维切到 ws 张卡
+        - 每张卡持有所有 experts 的某一切片
+        - forward：每个 expert 走完 TP 集体通信（all-reduce / all-gather）
+        - 优点：负载天然均衡（所有 token 都走所有 expert 的某切片）
+        - 缺点：通信量与 token 数 × expert 数 都成正比
+
+      **EP**：
+        - 每张卡持有完整的几个 expert（比如 8 expert / 4 卡 → 每卡 2 个）
+        - 路由时：token 用 router 决定要去哪个 expert → 用 all-to-all 把 token 发送到对应 rank
+        - 计算完后再 all-to-all 把结果送回原 rank
+        - 优点：每 token 通信量只与"它实际去的 expert 数"成正比（top-2 → 通信 ×2）
+        - 缺点：负载可能不均（某 rank 的 expert 被冷落或过载）
+
+      **常见组合**：
+        - DDP + TP + PP + EP 四件套
+        - 例如 64 卡 = 8 (DDP) × 4 (TP) × 2 (PP) × 1 (EP) 或者 1×4×2×8
+        - DeepSeek-V3 训 671B 用 8-way TP + 16-way PP + 64-way EP
+
+      为什么 EP 是 MoE 必备：MoE 的本质是"稀疏激活"——每 token 只用部分 expert。
+      EP 让通信量与稀疏度成正比；TP 不会自动 sparse。
+
+      面试金句："MoE 不用 EP 等于浪费 sparsity——每 token 通信量从 O(top_k) 退化到 O(num_experts)。"

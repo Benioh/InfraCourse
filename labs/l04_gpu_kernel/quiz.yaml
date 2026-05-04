@@ -1,0 +1,173 @@
+mission: l04_gpu_kernel
+title: L01.7 Quiz · GPU kernel + Triton 基础
+pass_threshold: 1.0
+description: |
+  这 5 题打中"为什么 GPU kernel 需要这样写"——数值稳定、内存带宽、SRAM 大小、
+  warp/block 设计——最容易模糊的点。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l04_gpu_kernel/patch/task.md
+  - title: 跑 notebook n12 · Triton softmax walkthrough
+    kind: notebook
+    path: notebooks/n12_triton_softmax_walkthrough.ipynb
+  - title: 跑 notebook n11 · GPU memory hierarchy
+    kind: notebook
+    path: notebooks/n11_gpu_memory_hierarchy.ipynb
+  - title: 读 Triton 官方 02-fused-softmax 教程
+    kind: source
+    path: docs/术语表.md
+
+questions:
+  - id: q1_subtract_max
+    prompt: |
+      为什么标准 softmax 实现都是 `exp(x - max(x)) / sum(exp(x - max(x)))`，
+      而不是直接 `exp(x) / sum(exp(x))`？
+    options:
+      - id: a
+        text: 减 max 让结果更接近真实概率
+      - id: b
+        text: 减 max 防止 exp(x) 数值溢出（fp16 在 x>11.0 时 exp 就会 overflow）
+        correct: true
+      - id: c
+        text: 减 max 加速计算（少一次 exp）
+      - id: d
+        text: 减 max 是为了 backward 求导更稳
+    explanation: |
+      数学上 `exp(x - c) / sum(exp(x - c))` 与 `exp(x) / sum(exp(x))` 完全等价
+      （c 是任意常数，分子分母同时除以 e^c 抵消）。
+
+      **数值上**完全不同：
+        - fp16 max 值 ≈ 65504，exp(x) 在 x > 11 就开始 overflow
+        - fp32 在 x > 88 overflow
+        - bf16 在 x > 88 overflow（动态范围与 fp32 一致）
+
+      减 max 的技巧：让所有 `x - max(x) ≤ 0`，因此 `exp(x - max(x)) ∈ (0, 1]`，
+      不会 overflow。这就是 "online softmax"、"FlashAttention" 等所有数值稳定算法
+      的基础。
+
+      面试金句："任何能 overflow 的 exp 都需要先减 max——FlashAttention 的核心
+      创新就是怎么 *分块* 计算这个 max 仍然保持等价。"
+
+  - id: q2_softmax_memory_bound
+    prompt: |
+      Softmax 是 memory-bound 还是 compute-bound？为什么？
+    options:
+      - id: a
+        text: compute-bound，每个元素要算 exp（昂贵）
+      - id: b
+        text: memory-bound，FLOP/byte 比小（每读一个 fp32 大约只算 ~3 个 FLOP）
+        correct: true
+      - id: c
+        text: 两者各占一半，看 GPU 型号
+      - id: d
+        text: 既不 memory-bound 也不 compute-bound，是 latency-bound
+    explanation: |
+      Roofline 分析：
+        - softmax 每个元素：1 个 exp（约 1 FLOP）+ 1 加法 + 1 除法 ≈ 3 FLOP
+        - 每个元素需要从 HBM 读 4B（fp32）或 2B（fp16），写回同样字节
+        - **算术强度** ≈ 3 FLOP / 8 byte = 0.375 FLOP/byte
+
+      H100 的 roofline 拐点 ≈ 1500 FLOP/byte（HBM 带宽）。0.375 远低于这个，
+      所以 softmax 完全是 memory-bound——优化方向是减少 HBM 读写次数，
+      不是减少 FLOP。
+
+      这也是为什么 FlashAttention 把 attention（包含 softmax）的 HBM IO
+      从 O(N²) 降到 O(N)：把 softmax 的中间值留在 SRAM，避免反复读写 HBM。
+
+      记忆口诀：**softmax 慢，慢在带宽；FlashAttention 快，快在不写 HBM。**
+
+  - id: q3_block_size_power_of_2
+    prompt: |
+      为什么 Triton 的 `BLOCK_SIZE` 通常用 `triton.next_power_of_2(n_cols)`？
+      （如 n_cols=300 → BLOCK_SIZE=512）
+    options:
+      - id: a
+        text: 编译器要求，否则报错
+      - id: b
+        text: 2 的幂能让 warp（32 thread）整除 / 利用率更高，而 vectorized load
+              通常需要 16/32/64 字节对齐
+        correct: true
+      - id: c
+        text: 没什么原因，习惯而已
+      - id: d
+        text: 2 的幂可以避免数值精度损失
+    explanation: |
+      底层原因：
+        - GPU warp = 32 thread，BLOCK_SIZE 不是 32 的倍数会留 padding warp 浪费
+        - Triton 把 BLOCK_SIZE 编译成 SIMT 向量，2 的幂让 vectorized load/store
+          (8/16/32-byte) 对齐
+        - 一些 reduction primitive 在 2 的幂下走 fast path
+
+      实际写法：
+      ```python
+      BLOCK_SIZE = triton.next_power_of_2(n_cols)
+      mask = col_offsets < n_cols  # 处理 padding 部分
+      ```
+      用 mask 防止访问越界，BLOCK_SIZE 始终是 2 的幂。
+
+      边界：n_cols 不能太大，否则 BLOCK_SIZE > SRAM/regs，编译失败。
+      H100 SRAM ≈ 232KB/SM，BLOCK_SIZE 一般控制在 8K 以内。
+
+  - id: q4_load_with_mask_other
+    prompt: |
+      `tl.load(ptr, mask=mask, other=-float("inf"))` 中 `other=-inf` 起什么作用？
+    options:
+      - id: a
+        text: 让 mask=False 的位置取一个无穷小值
+      - id: b
+        text: 让被 mask 掉的元素在后续 `tl.max` 中被忽略（因为 max(x, -inf)=x）
+        correct: true
+      - id: c
+        text: 表示这些位置的数据无效，运行时会跳过
+      - id: d
+        text: 用于编译时优化的 hint
+    explanation: |
+      `other` 是 mask=False 时实际加载的值。在 softmax 里我们要算 `tl.max(row, axis=0)`，
+      如果 padding 位置的值是随机的（比如 0），可能成为虚假 max，污染结果。
+
+      用 `-inf` 作为占位值，因为 `max(x, -inf) = x`，padding 不影响 max；
+      后续 `exp(-inf) = 0`，不影响 sum。等价于 padding 位置"不存在"。
+
+      这是 GPU kernel 处理 ragged 输入的标准技巧：**用一个对当前 reduction 操作
+      的 identity 元素（max→-inf, sum→0, prod→1）作为 mask 占位值。**
+
+      面试金句："写 kernel 处理变长输入，先想清楚每个 reduction 的 identity
+      是什么，然后把 mask=False 的位置填成 identity。"
+
+  - id: q5_split_block_softmax
+    prompt: |
+      如果 `n_cols = 16384`（一行 16K 元素），单 block softmax kernel 还能用吗？
+    options:
+      - id: a
+        text: 能，BLOCK_SIZE=16384 即可
+      - id: b
+        text: 不能，BLOCK_SIZE > SRAM/registers 上限。需要分块累加 max/sum 的
+              "online softmax" 算法（FlashAttention 的核心）
+        correct: true
+      - id: c
+        text: 能，但只在 H100 上能跑
+      - id: d
+        text: 能，但 fp32 不行，必须降到 fp16
+    explanation: |
+      H100 SRAM ≈ 232KB/SM，每个 block 用大约一半 = 116KB。
+      16384 fp32 = 64KB，加上输出和中间值已逼近上限；
+      32768 fp32 = 128KB，超过了。
+
+      解决方案就是 FlashAttention 的核心算法 **online softmax**（Milakov 2018）：
+      把行切成多个 chunk，每读一个 chunk 维护两个状态：
+      ```
+      m_new = max(m_old, max(chunk))
+      l_new = exp(m_old - m_new) * l_old + sum(exp(chunk - m_new))
+      ```
+      最终 softmax = exp(x - m_final) / l_final。
+
+      这就是为什么 FlashAttention 能处理 4K/8K/16K seq——它把 softmax 算法
+      改造成"流式 + 数值稳定"。
+
+      面试 trick：被问"长序列 attention 怎么写"，能说出 online softmax + tiling
+      （而不是只说 FlashAttention 名字）就是真懂的。
+
+      课程主线：L04.5 长上下文 CP 这一关你会写一个简化版 ring attention，
+      其中就有 online softmax 的精髓。

@@ -1,0 +1,231 @@
+mission: l26_sglang_pd_observability
+title: L09 Quiz · Prometheus / SGLang PD 可观测性
+pass_threshold: 1.0
+description: |
+  这 5 题打中可观测性最容易忽略的点：counter vs gauge、TTFT vs TPS 怎么算、
+  PD disaggregation 解决什么、tail latency 怎么诊断。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l26_sglang_pd_observability/patch/task.md
+  - title: 读 SGLang scheduler / PD 实现
+    kind: source
+    path: github_repo/sglang/python/sglang/srt/managers/
+
+questions:
+  - id: q1_counter_vs_gauge
+    prompt: |
+      Prometheus 的 `counter` 和 `gauge` 区别是？
+    options:
+      - id: a
+        text: 没区别，都是数字
+      - id: b
+        text: counter 单调递增（如 requests_total），重启时归零；
+              gauge 可上下变化（如 active_connections）
+        correct: true
+      - id: c
+        text: counter 是整数，gauge 是浮点
+      - id: d
+        text: counter 用于网络，gauge 用于 GPU
+    explanation: |
+      **counter**:
+        - 只能递增；如 `requests_total{status="200"} 8421`
+        - 重启时归零（不持久化）
+        - 查询时用 rate() 算速率：`rate(requests_total[5m])` = 5min 平均 QPS
+        - 适合：请求数、字节数、错误数
+
+      **gauge**:
+        - 可任意上下；如 `gpu_memory_used_bytes 4e10`
+        - 反映当前瞬时状态
+        - 查询直接看值
+        - 适合：队列长度、活跃连接、显存、温度
+
+      **histogram / summary** (本关没实现)：
+        - 用于 latency 分布
+        - histogram：bucket 计数（_bucket{le="0.1"}），用于算分位数
+        - summary：客户端预算分位数
+
+      为什么这个区别重要：
+        - 用 gauge 当 counter → 重启检测不到 → 数据洞
+        - 用 counter 当 gauge → 看不到当前状态，必须 rate()
+
+      vLLM / SGLang 标准 metrics:
+        - request_count_total: counter
+        - request_latency_seconds: histogram
+        - active_sequences: gauge
+        - gpu_kv_cache_usage_perc: gauge
+
+  - id: q2_ttft_metric
+    prompt: |
+      "TTFT" (Time To First Token) 怎么算？
+    options:
+      - id: a
+        text: 总生成时间除以 token 数
+      - id: b
+        text: 从 client 发请求到 server 返回第一个 token 的时间，
+              主要由 prefill 时间 + queueing 时间 + scheduling 时间组成
+        correct: true
+      - id: c
+        text: 平均 token 生成时间
+      - id: d
+        text: 服务器 CPU 负载
+    explanation: |
+      LLM serving 的关键 SLA 指标：
+
+      **TTFT (Time To First Token)**:
+        - client 视角：发请求时刻 t0；收到第一 token chunk 时刻 t1
+        - TTFT = t1 - t0
+        - 拆解：
+          * 网络 round-trip：~5ms
+          * 队列等待：0-1000ms（取决于负载）
+          * Prefill：10-1000ms（取决于 prompt length）
+          * 第一 decode 到 sampling：~10ms
+        - SLA 一般要求 P99 < 500ms（chat），< 200ms（agentic）
+
+      **TPS (Tokens Per Second)** (also called "throughput per request"):
+        - 第二 token 之后，每秒生成多少 token
+        - 主要由 decode 速度决定
+        - 用户感知速度："顺滑/卡顿"
+        - SLA：~30 tokens/s 是流畅阅读速度
+
+      **System throughput**: 整个集群每秒生成 token 总数
+        - 与每个请求 TPS 不同，前者是 sum(per-request TPS)
+        - 受 batch size 影响：batch 大 throughput 高，但 per-request TPS 略低
+
+      Capstone Stage B 你要测的就是 TTFT 和 TPS。
+      pre-RL：需要看 baseline；post-RL：再测一次看 reward 是否影响 latency。
+
+  - id: q3_pd_disaggregation
+    prompt: |
+      SGLang / Mooncake 的 PD (Prefill-Decode) disaggregation 解决什么问题？
+    options:
+      - id: a
+        text: 节省显存
+      - id: b
+        text: 把 prefill (compute-bound) 和 decode (memory-bound) 放到不同 GPU 组，
+              避免 prefill 占用 SM 影响 decode TPS；同时各自用最优 batch size
+        correct: true
+      - id: c
+        text: 降低延迟
+      - id: d
+        text: 让 GPU 共享 KV cache
+    explanation: |
+      **混合调度的问题**（vLLM 默认）：
+        - 同一组 GPU 同时跑 prefill 和 decode
+        - prefill 是大矩阵乘，吃满 SM 几十 ms；这期间 decode 卡死
+        - 表现：长 prompt 进来，所有正在 decode 的请求 TPS 突然下降
+
+      **PD disaggregation**（Mooncake / SGLang 0.4+）：
+        - Prefill 集群：高 FLOP，处理 prompt 输入
+        - Decode 集群：高 batch，专门生成 token
+        - prefill 完成后，把 KV cache 通过 RDMA 转移到 decode 集群
+        - 各自用最优 batch size：prefill batch 1-4（避免长尾），decode batch 100+
+
+      代价：
+        - KV cache 跨节点传输：RDMA 带宽 ~50GB/s，传 LLaMA-7B 完整 KV ~ms 级
+        - 复杂度：scheduler / KV migration / fault tolerance
+
+      收益：
+        - decode TPS 不受 prefill 干扰：long prompt 不再卡所有用户
+        - prefill 利用率 ~80%，decode 利用率 ~60% → 整体 throughput 提升 30-50%
+
+      生产案例：
+        - DeepSeek 用类似架构服 V3
+        - Anthropic Claude API 也是 PD 分离
+        - vLLM 0.6+ 在补 PD disaggregation
+
+      面试金句："PD disaggregation 是把 prefill 和 decode 当作两个不同的服务来调度——
+      避免它们互相 block。"
+
+  - id: q4_p99_diagnosis
+    prompt: |
+      监控发现 P99 latency 突然从 500ms 飙到 2000ms。下列哪个 metric 组合最能定位原因？
+    options:
+      - id: a
+        text: GPU 温度
+      - id: b
+        text: prefill_queue_depth + decode_active_seqs + prefix_cache_hit_rate +
+              gpu_memory_usage + per-step latency histogram
+        correct: true
+      - id: c
+        text: 请求总数
+      - id: d
+        text: 网络流量
+    explanation: |
+      P99 飙高的常见原因（按 priority 排）：
+
+      1. **请求队列堵塞**:
+         - prefill_queue_depth 突然 >> baseline
+         - 原因：突发流量、prefill 太慢、或 decode 把卡占满了
+         - 修复：scale up、PD disaggregation
+
+      2. **KV cache 不够**:
+         - gpu_memory_usage 接近 100%
+         - active_sequences 达到上限后新请求排队
+         - 修复：减小 max_seq_len、加 evict 策略、加显存
+
+      3. **prefix cache 失效**:
+         - prefix_cache_hit_rate 突然下降
+         - 原因：用户 prompt 模式变了 / cache size 满
+         - 修复：增大 RadixCache size
+
+      4. **batch 失衡**:
+         - 长 prompt + 长 decode 抢资源
+         - per-step latency 大方差
+         - 修复：分桶 (chunked prefill)、PD 分离
+
+      5. **GPU 异常**:
+         - GPU 温度高 → throttle
+         - NCCL 出错 → rank 卡住
+         - 看 nvidia-smi / NCCL log
+
+      调试 mantra: **先看 queue → 再看 cache → 再看 GPU → 最后看 model**。
+
+      Capstone Stage B：你的 metrics 应该包含所有这些 gauge，
+      P99 高的时候能 1 分钟内定位是哪一类问题。
+
+  - id: q5_metric_cardinality
+    prompt: |
+      Prometheus metric 的 "high cardinality" 是什么？为什么要避免？
+    options:
+      - id: a
+        text: 数值太大
+      - id: b
+        text: label 组合太多，让每个 metric 衍生成上万 series；
+              内存和查询都会爆
+        correct: true
+      - id: c
+        text: metric 名字太长
+      - id: d
+        text: scrape interval 太小
+    explanation: |
+      Cardinality = unique label combination 数。
+
+      **bad example**:
+      ```
+      requests_total{user_id="12345", session_id="abc-...", request_id="..."}
+      ```
+      每个用户 / 每个 session / 每个请求都是一个新 series。
+      1M 用户 → 1M series；Prometheus 内存爆炸。
+
+      **good example**:
+      ```
+      requests_total{model="qwen2-vl", status="200"}
+      ```
+      label 只用"小基数"维度：模型类型、状态码、租户等级。
+      cardinality ~ 10-100，可控。
+
+      规则：
+        - 总 cardinality < 10K series for typical Prometheus
+        - label values 应该来自固定枚举（model name / status / tenant）
+        - 不要把 user_id / request_id 当 label
+        - 用 trace ID（OpenTelemetry）追请求维度，metric 维度只放可分析的低基数
+
+      vLLM / SGLang 默认 label 都很谨慎：
+        - model: 1-10 个
+        - status: 4-5 个
+        - finish_reason: 3-5 个
+
+      Capstone：你加 metric 时谨慎选 label。"image_size" / "audio_duration" 当 label
+      会让 cardinality 爆炸——应该用 histogram 或离散桶 (`audio_bucket="<5s"|"5-30s"|">30s"`)。

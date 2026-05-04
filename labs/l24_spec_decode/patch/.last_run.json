@@ -1,0 +1,16 @@
+{
+  "mission": "l24_spec_decode",
+  "passed": true,
+  "exit_code": 0,
+  "started_at": "2026-05-02T13:30:08.320906Z",
+  "finished_at": "2026-05-02T13:30:10.981381Z",
+  "duration_s": 2.66,
+  "summary": {
+    "passed": 5,
+    "failed": 0,
+    "total": 5
+  },
+  "output": "============================= test session starts ==============================\nplatform linux -- Python 3.12.3, pytest-8.1.1, pluggy-1.6.0 -- /usr/bin/python\ncachedir: .pytest_cache\nhypothesis profile 'default' -> database=DirectoryBasedExampleDatabase(PosixPath('/inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l24_spec_decode/patch/.hypothesis/examples'))\nrootdir: /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/labs/l24_spec_decode/patch\nconfigfile: pytest.ini\nplugins: anyio-4.9.0, hypothesis-6.130.8, flakefinder-1.1.0, rerunfailures-15.1, shard-0.1.2, xdist-3.7.0, xdoctest-1.0.2\ncollecting ... collected 5 items\nRunning 5 items in this shard: tests/test_patch.py::test_all_drafts_accepted, tests/test_patch.py::test_first_mismatch_at_position_2, tests/test_patch.py::test_zero_drafts_one_bonus, tests/test_patch.py::test_all_mismatch, tests/test_patch.py::test_output_dtypes\n\ntests/test_patch.py::test_all_drafts_accepted PASSED                     [ 20%]\ntests/test_patch.py::test_first_mismatch_at_position_2 PASSED            [ 40%]\ntests/test_patch.py::test_zero_drafts_one_bonus PASSED                   [ 60%]\ntests/test_patch.py::test_all_mismatch PASSED                            [ 80%]\ntests/test_patch.py::test_output_dtypes PASSED                           [100%]\n\n============================== 5 passed in 1.83s ===============================\n",
+  "output_truncated": false,
+  "all_gpu_skipped": false
+}

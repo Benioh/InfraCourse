@@ -1,0 +1,13 @@
+name: pytorch
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pyyaml

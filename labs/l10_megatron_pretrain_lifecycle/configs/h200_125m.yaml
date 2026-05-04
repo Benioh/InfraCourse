@@ -1,0 +1,57 @@
+profile: h200_125m
+mode: lifecycle_real_megatron
+model:
+  hidden_size: 768
+  num_layers: 12
+  num_attention_heads: 12
+  vocab_size: 32000
+  size_label: 125M
+training:
+  micro_batch_size: 4
+  global_batch_size: 256
+  seq_length: 2048
+  train_steps: 1000
+  precision: bf16
+parallel:
+  tp: 1
+  pp: 1
+  dp: 8
+optimizer:
+  name: adamw
+  lr: 3.0e-4
+  min_lr: 3.0e-5
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+scheduler:
+  name: cosine_with_restarts
+  restart_steps: [400]
+  total_steps: 1000
+data:
+  source: fineweb_edu_mini
+  jsonl_path: data/fineweb_edu/train.jsonl
+  indexed_prefix: data/fineweb_edu/indexed/fineweb_text_document
+checkpoint:
+  save_every: 500
+  save_dir: artifacts/checkpoints
+megatron_command_template: >
+  torchrun --nproc_per_node=8
+  github_repo/Megatron-LM/pretrain_gpt.py
+  --tensor-model-parallel-size {tp}
+  --pipeline-model-parallel-size {pp}
+  --num-layers {num_layers}
+  --hidden-size {hidden_size}
+  --num-attention-heads {num_attention_heads}
+  --seq-length {seq_length}
+  --max-position-embeddings {seq_length}
+  --micro-batch-size {micro_batch_size}
+  --global-batch-size {global_batch_size}
+  --train-iters {train_steps}
+  --lr {lr} --min-lr {min_lr}
+  --bf16
+  --data-path {indexed_prefix}
+  --save {save_dir}
+  --save-interval {save_every}
+acceptance:
+  loss_drop_first_50_steps: 0.8
+  loss_at_step_1000_below: 6.5
+  must_observe_restart_at_step: 400

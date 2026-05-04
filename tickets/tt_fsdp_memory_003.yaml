@@ -1,0 +1,82 @@
+id: tt_fsdp_memory_003
+title: TorchTitan FSDP2 显存仍然过高
+mission: l06_torchtitan_training
+severity: medium
+symptom: 已经开了 FSDP2（fully sharded data parallel），预期显存会显著下降，但实际观察到显存占用只比 DDP 少一点点，甚至某些 step 仍然 OOM；换成 `fully_shard` 反而没比 `DDP` 好多少。
+error_signatures:
+- DDP baseline vs FSDP 显存差距 < 20%，远低于理论（参数 + 梯度 + 优化器状态 ~3x 下降）
+- "CUDA out of memory 仍然出现"
+- "torch.distributed.fsdp._fully_shard: warning about unsharded parameters"
+- "`peak_memory_active` 未下降到预期水平"
+- Profiler 里 `ReduceScatter` 和 `AllGather` 对比 DDP 的 `AllReduce` 并没有分摊内存占用
+classification_questions:
+- "`fully_shard` 是应用在**整个 model** 还是**每个 transformer block**？只应用在 root 等于基本没分片。"
+- Mixed precision 策略：`reduce_dtype` / `param_dtype` 配了什么？是否还保留了 fp32 master copy？
+- "`activation_checkpoint` / selective recompute 开了吗？显存占用是**参数主导**还是**激活主导**？"
+- Optimizer 用的是 PyTorch 自带 AdamW 还是 bitsandbytes/8bit？
+- World size 多少？FSDP 分片效果与 world size 成正比。
+likely_causes:
+- Sharding unit 太粗：只 `fully_shard(model)` 而没有对每个 block 做 `fully_shard`，参数没真正分片。
+- 没开 mixed precision，仍用 fp32 跑，参数/梯度/优化器都是 fp32，shard 出来单卡占用仍然大。
+- Activation 主导：激活跟 FSDP 无关，显存瓶颈是 forward 中间张量，不是参数。
+- Optimizer state 仍然全量：用 PyTorch DDP 风格的 optimizer（不走 FSDP 分片）会保留全量 optimizer 状态；应使用 FSDP2 配合 `optim_in_backward` 或本身 FSDP 感知的 optimizer。
+- "`reshard_after_forward=False` 被设，参数前向后不释放，退化成 DDP。"
+- DP world size 很小（2 卡），shard 效果本来就有限。
+- 设了 `cpu_offload` 但 shard 后还要搬回 GPU，存在峰值重叠。
+minimal_checks:
+- "`torch.cuda.max_memory_allocated()` 打印四段：model init 后、forward 后、backward 后、step 后。与 DDP baseline 对比，看到底哪段差距小。"
+- "打印每个 `FSDPModule` 的 `local_shard` 大小：期望 = `全参数 / world_size`。如果等于全参数，分片没生效。"
+- "对比 DDP：同一模型、同一 batch，DDP 显存 vs FSDP 显存。若差距 < 30%，说明 FSDP 配置 + mixed precision 没到位。"
+- "看激活：关掉 `activation_checkpoint` 再看峰值变化——如果峰值大幅上升，那显存瓶颈就是激活而不是参数。"
+- "检查 `reshard_after_forward`：默认 True，改成 False 就会退化。"
+minimal_fixes:
+- 逐层分片：对每个 transformer block 调 `fully_shard(block)`，最后再 `fully_shard(model)`；不要只分 root。
+- 开 mixed precision：`MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32)`，shard 后的参数是 bf16，占用立即减半。
+- 激活主导：打开 activation checkpoint（`torch.utils.checkpoint.checkpoint`）+ selective recompute。
+- Optimizer：AdamW 默认 fp32 master，改 `foreach=True` + 考虑 8bit optimizer；确认 optimizer 看到的是 sharded parameter。
+- 保证 `reshard_after_forward=True`，不然参数 forward 后不释放。
+- 增加 DP world size：2 卡 FSDP 效果有限，4-8 卡才能显著下降。
+- CPU offload 慎用：带来峰值切换，除非其它手段都用尽。
+what_not_to_do:
+- 不要以为 `fully_shard(model)` 一行就万事大吉——不逐层分片就等于没分片。
+- 不要在没开 mixed precision 的情况下抱怨 FSDP 没用，fp32 下收益本来就有限。
+- 不要关 `reshard_after_forward` 以提高吞吐——显存会回到 DDP 水平。
+- 不要忽略激活主导的情况，FSDP 不解决激活。
+hint_1: |
+  先对比 DDP baseline：
+  ```python
+  torch.cuda.reset_peak_memory_stats()
+  # ... forward + backward + step ...
+  peak_fsdp = torch.cuda.max_memory_allocated() / 1024**3
+  ```
+  同一模型 / 同一 batch 分别跑 DDP 和 FSDP 各 5 step 取平均。
+  - FSDP / DDP > 0.8 → FSDP 几乎没生效。跳 hint_2 的「分片不到位」分支。
+  - FSDP / DDP ≈ 1/world_size → 分片到位，若仍 OOM 就是**激活主导**，上 activation checkpoint。
+hint_2: |
+  按瓶颈定位：
+  ```
+  分片不到位（FSDP / DDP > 0.5）
+    1. 检查是否逐层 fully_shard(每个 block) 而不是只在 root
+    2. MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32) 必开
+    3. reshard_after_forward=True（默认，但被人手动关过？）
+    4. 打印每个模块的 local_shard 尺寸，确认是 全参/N 而不是全参
+
+  分片到位但仍 OOM（激活主导）
+    1. activation checkpoint 逐 block
+    2. reduce_dtype 可以试 bf16 但收益小
+    3. 把 seq_len / micro_batch 暂时降一半定位是否激活
+
+  Optimizer 主导
+    1. 确认 optimizer 看 sharded params（通过 FSDPModule.parameters() 拿到的就是 sharded）
+    2. 8bit / paged optimizer
+  ```
+solution: |
+  FSDP2 的不变量：**参数、梯度、优化器状态都按 DP world size 分片；只有「正在被用的」那一层 full gather 到 GPU**。显存没下来几乎一定是这里面某环没满足。
+  1. 逐层分片：每个 transformer block 单独 `fully_shard`，再 `fully_shard(model)`。
+  2. Mixed precision：`param_dtype=bf16, reduce_dtype=fp32`。
+  3. `reshard_after_forward=True`（默认）。
+  4. Optimizer 吃 FSDP 后的 parameter handle（FSDPModule.parameters()）。
+  5. 激活主导时上 activation checkpoint；FSDP 不解决激活。
+  验证：DDP 峰值 / FSDP 峰值 ≈ world_size（乘以 bf16 系数）；OOM 消失；step_time 不应退化超过 10%。
+  报告贴：DDP vs FSDP 峰值对比表、local_shard 尺寸验证、配置 diff。
+  参考：`github_repo/torchtitan/torchtitan/`、PyTorch FSDP2 文档、labs/l06_torchtitan_training、notebooks/n01_gpu_memory_anatomy、notebooks/n06_activation_recompute。

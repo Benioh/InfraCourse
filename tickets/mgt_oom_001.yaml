@@ -1,0 +1,81 @@
+id: mgt_oom_001
+title: Megatron 训练 OOM（TP/PP/micro_batch 配置不当）
+mission: l35_multimodal_capstone
+severity: high
+symptom: Megatron `pretrain_gpt.py` 启动时或前几步即 CUDA OOM；显存却明显没到 80GB。调小 `micro-batch-size` 能跑，放大一点就炸。
+error_signatures:
+- "RuntimeError: CUDA out of memory 出现在 forward 的第 N 个 transformer layer"
+- "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate ... MiB"
+- Megatron log 在 `iteration 1` 之前就退出；`training_log.txt` 只有 "building GPT model ..." 然后无下文
+- "`nvidia-smi` 显示某张卡被吃满，其它卡空闲（TP/PP 配置偏斜）"
+- "`forward-compute` timers 根本没打印出来"
+classification_questions:
+- OOM 发生在 `build_model` 后第一步 forward、backward、还是 optimizer state 初始化？
+- TP/PP/DP 三维实际等于多少？`tensor-model-parallel-size * pipeline-model-parallel-size * DP = world_size` 吗？
+- "`micro-batch-size × seq-length × hidden-size × num-layers / TP` 的激活估算对不对得上 80GB？"
+- 是否开了 `--sequence-parallel`、`--recompute-granularity full`、`--use-distributed-optimizer`？
+likely_causes:
+- "`micro-batch-size` × `seq-length` 组合超过激活上限，没开 sequence parallel / activation recompute。"
+- "`--use-distributed-optimizer` 没开，optimizer state 在每个 DP rank 全量副本（Adam fp32 的 m,v 翻三倍参数显存）。"
+- TP 切分不均：`hidden-size` 或 `num-attention-heads` 不能被 TP size 整除，Megatron 内部 fallback 到某张卡多载。
+- PP 的 first/last stage 载 embedding + lm_head，比中间 stage 多几 GB；`--num-layers-per-stage` 没手动平衡。
+- "`--fp16` 下仍存在部分 fp32 tensor（loss scaler、master weights）；未用 bf16 会多一份 master copy。"
+minimal_checks:
+- 把 `GPUS_PER_NODE=1 TP=1 PP=1 MBS=1 SEQ_LEN=512` 跑最小 smoke，看能否启动。不能 → 模型+optimizer 本身就超显存，必须加 TP 或 recompute。
+- "`torch.cuda.memory_summary()` 在 `iteration 1` 前打印；对照 Megatron 的 `report_memory` 输出。"
+- 日志里搜 "number of parameters on (tensor, pipeline) model parallel rank"，确认每个 rank 的参数量是否对称。
+- 检查 `--hidden-size % TP == 0` 和 `--num-attention-heads % TP == 0`；不满足时 Megatron 通常会 assert，但历史版本可能静默偏斜。
+- 对照 `nvidia-smi -l 1`：如果只有 rank0 满、其它没满，就是 PP 不平衡或 embedding 偏载。
+minimal_fixes:
+- 先把 `--use-distributed-optimizer` 开上，optimizer state shard 到 DP，立刻省 ~2/3 参数大小显存。
+- 打开 `--sequence-parallel`（配合 TP 一起），激活按 seq 维度再切一刀到 TP rank，通常省 20-40% 激活。
+- "`--recompute-granularity selective --recompute-method uniform --recompute-num-layers 1`：只 recompute attention，吞吐损失 ~10%，激活大幅下降。"
+- bf16 代替 fp16：`--bf16`，不需要 loss scaler，master copy 也不需要。
+- PP 不平衡：`--num-layers-per-virtual-pipeline-stage` 或手动切分 first/last 的 layer 数。
+what_not_to_do:
+- 不要直接把 `--micro-batch-size` 强行调到 1 就宣称解决——吞吐会掉到不可接受，要找主导项。
+- 不要在没开 distributed optimizer 的前提下堆 DP 数量，OOM 不会解决，反而放大 all-reduce 通信。
+- 不要无脑开 `--recompute-granularity full`，这会 ~33% 吞吐损失，除非激活真的是主导。
+- 不要 TP 和 PP 都拉满却不看通信代价；TP 跨节点通常比 OOM 更糟。
+hint_1: |
+  从最小配置开始收敛：
+  ```bash
+  torchrun --nproc_per_node=1 pretrain_gpt.py \
+    --tensor-model-parallel-size 1 \
+    --pipeline-model-parallel-size 1 \
+    --micro-batch-size 1 --global-batch-size 1 \
+    --seq-length 512 --max-position-embeddings 512 \
+    ...
+  ```
+  如果这个都 OOM → 模型本身放不下，必须 TP≥2 或 activation recompute。
+  如果这个能跑 → 把 `seq-length` 翻倍、`micro-batch-size` 翻倍，分别测哪个变量先炸，定位是激活主导还是 optimizer 主导。
+hint_2: |
+  根据主导项选修复：
+  ```
+  激活主导（seq-length 翻倍立刻 OOM）
+    → --sequence-parallel
+    → --recompute-granularity selective  （先 selective 再 full）
+    → --bf16
+
+  Optimizer 主导（参数量大、step 后才 OOM）
+    → --use-distributed-optimizer   （必开）
+    → --bf16 代替 --fp16
+    → DP shard 数增加
+
+  Rank 不对称（nvidia-smi 某卡独自满）
+    → 看 "number of parameters on ... rank" 日志
+    → PP 分层不均：加 --num-layers-per-virtual-pipeline-stage
+    → TP 分不动：检查 hidden-size / num-heads 是否整除 TP
+  ```
+  每改一个就跑一次最小 smoke，留 `command.sh` 和 `config.resolved.yaml` 做 diff。
+solution: |
+  Megatron OOM 的诊断模板：
+  1. **先最小 smoke**（TP=1 PP=1 MBS=1 SEQ=512）确认「模型本身是否装得下」。
+  2. **再翻倍定位主导项**：单独翻 seq → 激活主导；单独翻 mbs → forward 常数；开关 optimizer → optimizer 主导。
+  3. **对症下药**：
+     - 激活：`--sequence-parallel` + `--recompute-granularity selective` + `--bf16`。
+     - Optimizer：`--use-distributed-optimizer`（几乎永远开）+ `--bf16`。
+     - 不对称：PP 分层 / TP 整除性。
+  4. **确认并行一致性**：`TP * PP * DP == world_size`；`hidden_size % TP == 0`；`num_layers % PP == 0`；`num_attention_heads % TP == 0`。
+  5. 报告里贴 `memory_summary()` 的修复前后对比、`training_log.txt` 中 "elapsed time per iteration"、以及 `config.resolved.yaml` 的完整 diff。
+  参考：labs/l08_megatron_text_pretrain、labs/l11_megatron_scale_optimization、Megatron-LM docs 的 memory optimization 段、`github_repo/Megatron-LM/megatron/training/arguments.py` 的 recompute/optim 参数定义。

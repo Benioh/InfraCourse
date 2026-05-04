@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infra-quest"
+version = "0.1.0"
+description = "Infra Quest: multimodal LLM infrastructure engineering training system"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "pyyaml>=6.0.0",
+  "pydantic>=2.7.0",
+  "jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch>=2.3.0",
+  "datasets>=2.20.0",
+]
+notebook = [
+  "jupyterlab>=4.2.0",
+  "matplotlib>=3.9.0",
+  "pandas>=2.2.0",
+]
+dashboard = [
+  "streamlit>=1.37.0",
+  "plotly>=5.22.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["mini_infra*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+
+[tool.ruff.lint.per-file-ignores]
+"labs/**/scripts/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

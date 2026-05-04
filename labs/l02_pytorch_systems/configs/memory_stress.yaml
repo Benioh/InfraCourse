@@ -1,0 +1,13 @@
+seed: 42
+steps: 50
+batch_size: 8
+seq_len: 256
+vocab_size: 512
+d_model: 192
+n_heads: 6
+n_layers: 3
+learning_rate: 0.001
+precision: fp32
+activation_checkpointing: true
+dataloader_sleep_ms: 5
+profile: true

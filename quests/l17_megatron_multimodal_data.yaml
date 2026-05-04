@@ -1,0 +1,54 @@
+id: l17_megatron_multimodal_data
+title: ★ 多模态 Collator（image + audio + text）
+level: L06
+act: 第 2 章：数据与多模态
+role: 多模态数据工程师
+priority: ★ 核心（与 Capstone 强相关）
+estimated_minutes: 150
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - LLaVA / Qwen2-VL / Qwen-Audio (对照)
+
+patch:
+  description: |
+    实现 multimodal_collate(batch, image_num_patches, max_audio_frames)：
+    把变长 image + audio + text 样本打包成对齐的 batch tensor。
+    序列拼接 [image_token × N][audio_token × M][text_ids]，输出 input_ids、
+    attention_mask、modal_type_ids、pixel_values、audio_features+mask 等。
+    这就是 LLaVA / Qwen2-VL / Qwen-Audio 数据管道的核心逻辑。
+  task_md: labs/l17_megatron_multimodal_data/patch/task.md
+  starter_file: labs/l17_megatron_multimodal_data/patch/starter/multimodal_collate.py
+  reference_file: labs/l17_megatron_multimodal_data/patch/reference/multimodal_collate.py
+  test_command: make patch-test M=l17_megatron_multimodal_data
+  status_file: labs/l17_megatron_multimodal_data/patch/.last_run.json
+  test_count: 7
+  test_kind: 结果对比 + 形状/索引契约
+
+source_reading:
+  - title: LLaVA-1.5 conversation_lib & data prep
+    repo_path: docs/术语表.md
+    focus: 看 LLaVA 怎么把 <image> 占位扩成 N 个 image embedding
+  - title: Qwen2-VL 多模态 tokenizer
+    repo_path: docs/术语表.md
+    focus: 动态分辨率怎么决定 image_num_patches
+
+mini_infra_targets:
+  - mini_infra/data/
+
+notebooks: []
+
+tickets:
+  - mm_missing_file_001
+  - mm_corrupt_audio_002
+  - mm_bad_shard_003
+  - mm_resume_state_004
+  - wds_slow_io_001
+
+prereq: l15_megatron_parallel_checkpoint
+next_lab: l18_data_engineering
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 配合 Capstone Stage A 大数据集

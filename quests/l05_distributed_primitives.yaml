@@ -1,0 +1,56 @@
+id: l05_distributed_primitives
+title: 手写 Tensor Parallel Linear
+level: L02
+act: 第 0 章：分布式系统基础
+role: 分布式原语学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch Distributed
+  - Megatron Core (对照)
+
+# ★ 本关核心：Patch Track（学完做这一件事就过关）
+patch:
+  description: |
+    不用 Megatron，自己用 torch.distributed.all_reduce / all_gather +
+    autograd.Function 写 ColumnParallelLinear 和 RowParallelLinear。
+    通过 5 个结果对比测试就 PASS。
+  task_md: labs/l05_distributed_primitives/patch/task.md
+  starter_file: labs/l05_distributed_primitives/patch/starter/tp_linear.py
+  reference_file: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+  test_command: make patch-test M=l05_distributed_primitives
+  status_file: labs/l05_distributed_primitives/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比（不规定实现方式，输出/梯度对就过）
+
+# 配套学习资源（可选，强烈建议在写 patch 前/后参考）
+source_reading:
+  - title: Megatron ColumnParallelLinear 真实实现
+    repo_path: github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
+    focus: 写完 patch 之后对照真实工程级实现的边界（async TP / sequence parallel / ckpt 切片）
+  - title: MiniInfra 同构 TP 骨架
+    repo_path: mini_infra/megatron/core/tensor_parallel/layers.py
+    focus: 本课同构最小骨架，写完 patch 后可与之对比
+
+mini_infra_targets:
+  - mini_infra/megatron/core/tensor_parallel/layers.py
+  - mini_infra/megatron/core/pipeline_parallel/schedules.py
+
+notebooks:
+  - notebooks/n03_ddp_collectives.ipynb
+  - notebooks/n04_tensor_parallel_linear.ipynb
+
+tickets:
+  - dist_wrong_world_size_001
+  - dist_rank_hang_002
+  - dist_device_mismatch_003
+
+prereq: l03_nccl_ddp_smoke
+next_lab: l06_torchtitan_training
+
+# 兼容旧字段（curriculum / dashboard 页面渐进迁移）
+gpu_modes:
+  local: 1×4090 / CPU gloo
+  cluster: 8×H200 (可选)

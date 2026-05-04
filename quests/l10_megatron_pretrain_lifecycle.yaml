@@ -1,0 +1,54 @@
+id: l10_megatron_pretrain_lifecycle
+title: Megatron-shaped Train Step
+level: L04.8
+act: 第 1 章：训练框架
+role: Megatron 源码主线学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+
+frameworks:
+  - Megatron-LM
+  - MiniInfra
+
+patch:
+  description: |
+    实现 Megatron-shaped train_step：zero_grad → forward_backward →
+    optimizer.step → scheduler.step → metrics，把 L04 scheduler 放回训练循环。
+  task_md: labs/l10_megatron_pretrain_lifecycle/patch/task.md
+  starter_file: labs/l10_megatron_pretrain_lifecycle/patch/starter/train_step.py
+  reference_file: labs/l10_megatron_pretrain_lifecycle/patch/reference/train_step.py
+  test_command: make patch-test M=l10_megatron_pretrain_lifecycle
+  status_file: labs/l10_megatron_pretrain_lifecycle/patch/.last_run.json
+  test_count: 5
+  test_kind: 训练循环行为验证
+
+source_reading:
+  - title: MiniInfra Megatron pretrain
+    repo_path: mini_infra/megatron/pretrain_gpt.py
+    focus: 入口如何组装 provider
+  - title: MiniInfra training loop
+    repo_path: mini_infra/megatron/training/training.py
+    focus: pretrain/train_step/log/checkpoint 生命周期
+  - title: Megatron training.py
+    repo_path: github_repo/Megatron-LM/megatron/training/training.py
+    focus: forward_backward_func、training_log、save_checkpoint 边界
+
+mini_infra_targets:
+  - mini_infra/megatron/pretrain_gpt.py
+  - mini_infra/megatron/training/training.py
+
+notebooks:
+  - notebooks/n06_activation_recompute.ipynb
+
+tickets:
+  - mgt_tokenizer_003
+  - mgt_data_index_004
+  - mgt_checkpoint_002
+
+prereq: l09_long_context_cp
+next_lab: l11_megatron_scale_optimization
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 可对照真实 Megatron pretrain smoke

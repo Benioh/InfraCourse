@@ -1,0 +1,47 @@
+id: l18_data_engineering
+title: MinHash 文本去重（含 LSH 数学）
+level: L06.3
+act: 第 2 章：数据与多模态
+role: 数据工程师
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - Python stdlib (hashlib / random)
+
+patch:
+  description: |
+    实现 minhash_signature(text, num_perm) + jaccard_estimate + dedup。
+    用 char-level n-gram shingle + universal hashing 算签名；用签名 hit ratio
+    估计 Jaccard；用 first-occurrence 策略去重。
+  task_md: labs/l18_data_engineering/patch/task.md
+  starter_file: labs/l18_data_engineering/patch/starter/dedup_minhash.py
+  reference_file: labs/l18_data_engineering/patch/reference/dedup_minhash.py
+  test_command: make patch-test M=l18_data_engineering
+  status_file: labs/l18_data_engineering/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比
+
+source_reading:
+  - title: datasketch / RedPajama dedup pipeline
+    repo_path: docs/术语表.md
+    focus: 真生产用 LSH banding 加速；本关只做朴素 O(N²)，先掌握签名数学
+
+mini_infra_targets:
+  - mini_infra/data/
+
+notebooks:
+  - notebooks/n16_minhash_dedup.ipynb
+
+tickets:
+  - dedup_collision_002
+  - shard_corrupt_003
+  - wds_slow_io_001
+
+prereq: l17_megatron_multimodal_data
+next_lab: l19_vllm_serving_baseline
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 大数据集去重时分布式（可选）

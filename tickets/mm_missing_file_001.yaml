@@ -1,0 +1,88 @@
+id: mm_missing_file_001
+title: 多模态 manifest 指向缺失文件（Sample 加载失败）
+mission: l17_megatron_multimodal_data
+severity: medium
+symptom: |
+  多模态数据管线在 epoch 中途（或第一个 epoch 结尾）报 FileNotFoundError，指向某个图片 / 音频 / 视频路径；
+  或者 DataLoader 把坏样本 skip 后，某个 rank 的样本数与别的 rank 不一致引发 DDP hang；
+  或者训练看似正常但某些 shard 几乎不产生任何有效样本。
+error_signatures:
+- "FileNotFoundError: [Errno 2] No such file or directory: '/data/mm/images/xxx.jpg'"
+- "PIL.UnidentifiedImageError: cannot identify image file"
+- "soundfile.LibsndfileError: Error opening ... No such file"
+- "WARNING: dropping sample {id} due to missing media，每个 epoch 大量重复"
+- rank 间 step 数或 global_step 出现偏差，DDP all_reduce hang（配合 dist_rank_hang_002）
+- Manifest 行数 >> 实际可用样本数（能 load 的不到 10%）
+classification_questions:
+- Manifest 是集中式的 JSONL / Parquet 还是 shard 化的 WebDataset / tar？
+- 数据是存本地磁盘还是 NFS / S3 / OSS？不同 rank 是挂载相同 path 吗？
+- 缺失的文件是**小量**（< 1%）还是**成批**（某个前缀全丢）？前者清洗就行，后者可能是 shard copy 漏了。
+- DataLoader 的 `collate_fn` 如何处理缺失：`raise` / `return None` / `return empty` / replace with next？
+- 多模态数据的 path 是绝对路径还是相对 manifest_root 的相对路径？
+likely_causes:
+- 数据搬运漏：从某个数据源 rsync / aws s3 sync 没完整拷贝，manifest 包含了未到达的文件。
+- Path 拼接错：manifest 里是相对路径，代码里用了错误的 root（本机 vs 集群）。
+- 多机路径差异：NFS 挂载点不同、S3 bucket 权限某几个 rank 不可见。
+- 数据 corrupt：文件存在但损坏（0 字节 / 格式错），PIL / soundfile 读取抛异常。
+- WebDataset / tar shard 部分损坏：某个 tar 文件损坏，整个 shard 的后续样本全丢。
+- Skip 逻辑不对称：某个 rank skip 多了，DDP step 数对不上。
+- Manifest 被过滤后 rank 之间的 sharding 没重新平衡。
+minimal_checks:
+- "对 manifest 的前 1000 条做存在性检查：`head -n 1000 manifest.jsonl | jq -r .image_path | xargs -I{} test -e {} || echo MISSING: {}`。统计缺失比例。"
+- "对缺失的路径做**前缀**聚合：是零散缺失还是某个前缀全丢？"
+- "比较多 rank 看到的文件：在不同节点上 `ls <path>` 同一个文件，确认挂载一致。"
+- "对已存在的文件做格式校验：小样本随便抽 100 张，`identify` / `ffprobe` 确认不是 corrupt。"
+- "看 DataLoader 的 worker log，找 `dropping sample` 或 `failed to load`，统计每个 rank 的 skip 数。"
+- "manifest 行数 vs 实际样本数：训练 1 个 epoch 的 step 数 = total_samples / global_batch_size，对比预期。"
+minimal_fixes:
+- 先清洗 manifest：离线跑一次 existence + readability 校验，产出 `manifest.cleaned.jsonl`，只包含确实可读的样本。
+- Path 统一：manifest 里存**相对路径**，代码里 `os.path.join(MANIFEST_ROOT, rel_path)`，通过环境变量传入 root。
+- 补数据：如果是 rsync 漏，重新 sync 并 md5 验证；S3 用 `aws s3 sync --dryrun` 对比。
+- 缺失样本处理策略要**对称**：所有 rank 用同一个过滤函数，或者统一用 `replace with next valid sample`，避免 rank 间样本数不等。
+- WebDataset shard 坏了：tar 逐个校验 `tar -tvf shard.tar > /dev/null`；坏 shard 单独重 download。
+- 数据加载加 `try/except`，但必须**记录到 metrics / log**（`num_skipped`），不要静默吞掉。
+what_not_to_do:
+- 不要让不同 rank 用不同的 filter 函数，会导致 DDP hang。
+- 不要在训练里热修 manifest，应离线清洗后用 clean 版。
+- "不要 `try/except: pass` 静默 skip——你看不到数据健康度下降。"
+- 不要用绝对路径写死到某台机器的磁盘，跨机必炸。
+- 不要忽略 "corrupted but exists" 的情况：存在 ≠ 可读。
+hint_1: |
+  快速估缺失比例：
+  ```bash
+  head -n 2000 manifest.jsonl | jq -r '.image' | while read p; do
+    [ -e "$p" ] || echo "MISSING $p"
+  done | tee /tmp/missing.log | wc -l
+  ```
+  - 缺失 < 1% → 小量脏数据，离线清洗 manifest 再训练。
+  - 缺失 > 5% 且**集中在某前缀** → 数据搬运漏了一批，回去 sync。
+  - 缺失率 rank0 和别的 rank 不一样 → 挂载 / 路径不一致问题。
+hint_2: |
+  清洗流程：
+  ```python
+  import json, os
+  from PIL import Image
+  with open("manifest.jsonl") as f, open("manifest.cleaned.jsonl", "w") as g:
+      ok = bad = 0
+      for line in f:
+          r = json.loads(line)
+          p = os.path.join(ROOT, r["image"])
+          try:
+              Image.open(p).verify()
+              g.write(line); ok += 1
+          except Exception as e:
+              bad += 1
+      print(f"ok={ok} bad={bad} bad_ratio={bad/(ok+bad):.3%}")
+  ```
+  所有 rank 用 `manifest.cleaned.jsonl`，不在训练时动态 skip。
+  DDP 不对称：确认所有 rank 看到的 `len(dataset)` 相同；用 `DistributedSampler` 自动分片。
+solution: |
+  多模态数据管线的不变量：**所有 rank 看到的样本集合在训练期间完全一致**。诊断模板：
+  1. **存在性 + 可读性校验**，离线一次，产出 cleaned manifest。
+  2. **路径一致性**：相对路径 + 环境变量 root；跨机挂载验证。
+  3. **对称 skip**：所有 rank 使用同一个 cleaned manifest；如需动态 skip，用 `replace-with-next` 保证样本数不变。
+  4. **健康度指标**：每个 epoch 记录 `num_samples_loaded / num_samples_total`、`num_skipped_per_rank`（用 all_reduce 汇总）。
+  5. **坏 shard 处理**：WebDataset / tar 按 shard 校验，坏的单独重 download。
+  修复后跑 1 个 epoch，确认没有 FileNotFoundError、每个 rank 的 step 数一致、skip_rate < 0.1%。
+  报告贴：manifest 原始 / cleaned 行数、每个 rank skip 数、epoch step 数一致性验证。
+  参考：labs/l17_megatron_multimodal_data、相关 ticket: mm_corrupt_audio_002、mm_bad_shard_003、mm_resume_state_004、dist_rank_hang_002。

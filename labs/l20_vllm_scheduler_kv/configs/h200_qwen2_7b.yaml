@@ -1,0 +1,20 @@
+profile: h200_qwen2_7b
+scheduler:
+  num_blocks: 4096
+  max_num_running_reqs: 256
+workload_seed: 13
+workload_size: 256
+workload_prompt_tokens_range: [256, 4096]
+workload_max_tokens_range: [64, 1024]
+acceptance:
+  min_p50_kv_usage: 0.5
+  must_terminate: true
+vllm_serve_command: >
+  python -m vllm.entrypoints.openai.api_server
+  --model Qwen/Qwen2.5-7B-Instruct
+  --tensor-parallel-size 8
+  --max-model-len 8192
+  --gpu-memory-utilization 0.9
+  --max-num-seqs 256
+  --enable-prefix-caching
+  --enable-chunked-prefill

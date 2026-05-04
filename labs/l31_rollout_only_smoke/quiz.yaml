@@ -1,0 +1,229 @@
+mission: l31_rollout_only_smoke
+title: L10.5 Quiz · Async rollout / RL 数据流
+pass_threshold: 1.0
+description: |
+  这 5 题打中 RL rollout 系统设计：异步 vs 批处理 inference、为什么 rollout
+  要解耦于训练、weight sync 时机、reward computation 在哪一步。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l31_rollout_only_smoke/patch/task.md
+  - title: 读 SLiME RolloutController 源码
+    kind: source
+    path: github_repo/
+
+questions:
+  - id: q1_async_vs_batch
+    prompt: |
+      RL rollout 用 async (per-prompt 并发) vs sync batch (一次 batch_size 个 prompt)，
+      哪个更合理？
+    options:
+      - id: a
+        text: 总是 async
+      - id: b
+        text: 总是 batch
+      - id: c
+        text: vLLM/SGLang 已经做 continuous batching；async rollout 把多个 prompt
+              并发递交，让 inference 引擎自己组合 batch，这是标配
+        correct: true
+      - id: d
+        text: 与算法无关
+    explanation: |
+      现代 LLM inference 引擎（vLLM 0.6+、SGLang）内部已经做 continuous batching：
+        - 接收异步请求
+        - 动态合并到当前 batch
+        - 每 token 后检查完成 / 替换 slot
+
+      所以 RL rollout 客户端应该：
+        1. 异步并发递交 prompt（让 inference 引擎做 batching）
+        2. 用 max_concurrency 限制内存（防止积压）
+        3. 等所有 prompt 返回再训练 step
+
+      错误模式：
+        - **手动 batch**：客户端自己分桶，inference 引擎收到一批就只能等所有请求完
+          → 长尾请求拖慢整 batch
+        - **无并发**：串行调用 inference → 引擎 batch=1，throughput 下降 5-20×
+
+      面试金句："Async rollout 把 batching 决策交给 inference 引擎——它知道怎么
+      最优组合。客户端管 max_concurrency 防止失控。"
+
+  - id: q2_train_inference_decouple
+    prompt: |
+      为什么 RLHF 训练通常把 rollout (inference) 和 train (gradient update) 解耦到
+      不同的 GPU 集群？
+    options:
+      - id: a
+        text: 节省显存
+      - id: b
+        text: training 需要 weights+grads+optimizer state（~7×param size）
+              + activation; inference 只要 weights + KV cache。
+              用同卡训 + 推会显存爆 + 算力浪费
+        correct: true
+      - id: c
+        text: 互相不干扰更稳定
+      - id: d
+        text: 是历史习惯
+    explanation: |
+      显存对比（7B fp16）：
+        - **Training**:
+          weights (14GB) + grads (28GB fp32) + master (28GB) + Adam state (56GB)
+          + activations (50-200GB depending on batch/seq)
+          → 总 130-300GB
+        - **Inference**:
+          weights (14GB) + KV cache (~10GB)
+          → 总 25GB
+
+      用同一组卡同时做：
+        - 显存爆炸（要装满训练 130GB + 推理 25GB = 155GB，单卡装不下）
+        - 切换开销大（卸 grad/optimizer 到 CPU 几秒，再加载回来）
+
+      解耦设计（SLiME, Mooncake）：
+        - **Train cluster**: 8 卡 H100，跑 policy training（FSDP-Z3 + LoRA + grad ckpt）
+        - **Inference cluster**: 4 卡 H100，跑 vLLM/SGLang 推理（continuous batch）
+        - **Coordinator**: Ray actor 调度 + weight sync 触发
+
+      Weight sync 机制：
+        - Train rank 0 broadcast 新 weights 到 inference cluster
+        - 通常每 N rollout 同步一次，N 视 train cluster batch size 决定
+        - L11 SLiME RL core 那关你会真打 weight sync 这一仗
+
+      面试金句："RL 训练里训和推不能合卡——显存 6× 差距，调度耦合死。"
+
+  - id: q3_weight_sync_timing
+    prompt: |
+      RL 训练每 step 都同步 weights 到 inference cluster 吗？
+    options:
+      - id: a
+        text: 是，否则数据 stale
+      - id: b
+        text: 不是。同步成本高（GB 级权重通过网络），通常每 N 个 batch 同步一次；
+              inference 用的是稍微 stale 的 policy，但因 PPO 的 importance sampling
+              correction，N=1-8 都正常
+        correct: true
+      - id: c
+        text: 完全不需要同步
+      - id: d
+        text: 同步频率对 RL 算法无影响
+    explanation: |
+      Weight sync 是 RL 训练的瓶颈之一：
+        - 7B 模型 fp16 = 14GB
+        - 8 卡 train + 4 卡 infer，broadcast 14GB ≈ 1-3 秒（IB 网络）
+        - 每 train step 1 秒，sync 1 秒 → 同步频繁会浪费 50% 时间
+
+      实践：
+        - **off-policy 容忍**：PPO 通过 importance sampling correction
+          (`ratio = π_θ / π_old`) 容许 inference 用稍 stale 的 policy
+        - **同步频率**：每 1-8 个 train batch 同步一次
+        - DeepSeek-R1：每个 train step 之后才同步（同步贵但 PPO 友好）
+        - SLiME 默认：每 N 个 rollout 之后同步，N 可调
+
+      工程优化：
+        - **only delta**: 只传 fine-tuned 部分（如 LoRA 参数）
+        - **NCCL broadcast**: P2P RDMA 比 TCP 快 10×
+        - **double buffer**: 同步期间 inference 仍跑老 policy，sync 完原子切换
+
+      错误模式：
+        - 同步太勤 → 训练慢
+        - 同步太疏 → KL 失控（policy_θ 与 π_old 漂太远，importance ratio 爆炸）
+
+      面试金句："RL weight sync 频率是 throughput vs accuracy 的 trade-off，
+      生产值 1-8 step 同步一次。"
+
+  - id: q4_reward_compute_step
+    prompt: |
+      Reward 是在 rollout 阶段算还是 train 阶段算？
+    options:
+      - id: a
+        text: 都行，结果一样
+      - id: b
+        text: 通常**rollout 阶段就算好**：每个生成的 sequence 通过 reward model
+              forward 一遍存到 buffer；train 阶段直接读，不需要再算
+        correct: true
+      - id: c
+        text: 必须 train 阶段算
+      - id: d
+        text: 必须 rollout 之前算
+    explanation: |
+      RL 训练流程：
+        1. **Rollout**: policy 生成 sequences
+        2. **Reward computation**: reward model forward sequences → scalar reward / token
+        3. **Advantage computation**: GAE / Monte Carlo advantage
+        4. **Train**: PPO loss + KL penalty + critic update
+
+      Reward 在哪步算？
+        - **standard**: rollout 后立刻算（仍在 inference cluster）
+        - **for**: reward model 是 inference-only，与 policy 共用 inference 资源
+        - **存储**: (prompt, sequence, reward, log_probs) 进 buffer
+
+      为什么不在 train cluster 算？
+        - reward model = LLM forward，需要 weights load
+        - train cluster 已经满载（policy 训练）
+        - rollout cluster 反正在跑 inference，加一个 reward forward 复用资源
+
+      实际架构（SLiME / verl）：
+        - inference cluster runs:
+          - policy.generate() → sequence
+          - reward_model.forward(sequence) → reward
+          - reference.forward(sequence) → log_p_ref
+        - 写入 dataset：(prompt, seq, reward, log_p_ref, log_p_old)
+        - train cluster reads：算 advantage + PPO loss + KL
+
+      RLAIF / multi-step reward 例外：
+        - reward 需要工具调用 / multi-turn → 复杂调度
+        - DeepSeek-R1 process reward：每 step 都算 reward，更复杂
+
+      Capstone Stage C：你的 reward 是 CLIP score 和 WER（离线计算），
+      可以直接在 rollout 后用 CPU 算（不占 GPU）。
+
+  - id: q5_advantage_estimation
+    prompt: |
+      PPO 的 advantage estimation A_t 是什么？为什么不直接用 reward？
+    options:
+      - id: a
+        text: A_t 是 reward 减某个 baseline
+      - id: b
+        text: A_t = Q(s_t, a_t) - V(s_t)，估算这个 action 比"平均"好多少；
+              通常用 GAE：A_t = Σ γλ × δ_t；critic 学 V(s)；advantage 比 raw reward
+              方差小，PPO 收敛更稳
+        correct: true
+      - id: c
+        text: advantage 等于 entropy
+      - id: d
+        text: 不需要，可以直接用 reward
+    explanation: |
+      Vanilla policy gradient: ∇log π(a|s) × R
+        - 高 variance（R 全 batch 累加）
+        - 训练不稳
+
+      Actor-Critic: ∇log π(a|s) × A(s, a)
+        - A(s, a) = Q(s, a) - V(s)
+        - 减去 baseline V(s) 后 variance 大幅下降
+        - "这个 action 比平均好多少" 才是 policy 该学的信号
+
+      **GAE (Generalized Advantage Estimation)** (Schulman 2015):
+        ```
+        δ_t = r_t + γ V(s_{t+1}) - V(s_t)
+        A_t = Σ_{l=0}^{∞} (γλ)^l δ_{t+l}
+        ```
+        λ 控制 bias-variance trade-off（λ=0 high bias 低 variance；λ=1 unbiased 高 variance）。
+        实践 λ=0.95 是经验值。
+
+      RLHF (PPO) 实施：
+        1. critic V_φ(s) 学 expected return
+        2. 每 batch 用 V_φ 算 GAE A_t
+        3. PPO loss: -E[ratio_t × A_t]，clipped
+        4. critic 自己用 V loss 训：(V_φ(s_t) - return_t)^2
+
+      DeepSeek-R1 / GRPO 简化：
+        - 不用 critic
+        - A_t = R(seq) - mean(R 在 group 内)
+        - "这个 sequence 比同组其它 sequence 好多少"
+
+      Capstone Stage C 你可以选：
+        - PPO + GAE：完整 actor-critic
+        - GRPO：去掉 critic，更省显存
+        - 简单版：A = R - moving_average，最 minimal viable
+
+      面试金句："Vanilla PG 用 reward，actor-critic 用 advantage——
+      减去 baseline 是 RL 训练稳定性的关键发明。"

@@ -1,0 +1,94 @@
+id: verl_rollout_slow_003
+title: verl rollout 吞吐过低（每步 RL 大量时间花在生成 response 上）
+mission: l29_verl_rl_baseline
+severity: medium
+symptom: |
+  RL 训练的 `time_per_iteration` 长到不可接受（几十秒到几分钟），其中 `rollout_ms` 占 >60%；
+  actor update 本身很快，但整体 step time 被 rollout 拖慢；
+  GPU rollout 阶段利用率不饱满（某些时候 50% 以下）。
+error_signatures:
+- "metrics: rollout_ms: 42000 / actor_update_ms: 3800（rollout 占绝对多数）"
+- "average generation length: 1950 tokens（长得离谱，接近 max_new_tokens）"
+- "rollout batch size: 32, per-sample gen time: 1.8s（并发太低）"
+- GPU util 在 rollout 阶段周期性掉到 40-60%
+- "`sample_per_second` 个位数（预期 10+）"
+classification_questions:
+- Rollout 用的是**训练框架自带 generate**（每个 step 走 HF `generate`），还是**独立 serving 实例**（vLLM / SGLang）？前者效率低 3-10×。
+- Rollout 的 **batch size** 多少？单 prompt 还是 batched？
+- "**max_new_tokens** 设多少？实际平均生成多少？是不是因为没 stop token 导致大量 EOS 后的无效 token？"
+- 采样参数：temperature、top_p、n（每个 prompt 产多少 sample for GRPO）？
+- Rollout 和 actor 是否 GPU 分离（各自独占一组 GPU），还是共享（同一组 GPU 轮流用）？
+likely_causes:
+- 用 HF `model.generate` 跑 rollout：无 KV cache 分页、无 continuous batching，比 vLLM/SGLang 慢 3-10×。
+- Batch size 过小：rollout 每次只 8-16 条，GPU 算力吃不满。
+- max_new_tokens 太大 + 没正确配置 stop token：模型生成远超需要，大量无效 token 浪费算力。
+- GRPO 的 `n=16`（每个 prompt 产 16 条）本身数据量大，没有批内共享 prefix（prefix cache）。
+- Actor 和 rollout 共享同一组 GPU：串行执行，每次都 swap model state。
+- Tokenizer 串行：decode 大量 token 到文本是 CPU 瓶颈。
+- Weight sync 混在 rollout 时间里没拆分（见 slime_weight_sync_003）。
+minimal_checks:
+- "拆解 rollout time：生成 + tokenize/detokenize + sync。在日志里找 `rollout breakdown`，或手动加 timer。"
+- "看实际生成长度分布：`jq '.response | length' rollout_samples.jsonl | datamash mean 1 max 1 p99 1`。若 p99 ≈ max_new_tokens 说明经常生成到上限，可能 stop token 没设对。"
+- "单独 benchmark rollout 路径：固定 100 个 prompt 用当前 rollout 配置生成，记录 tokens/sec 和 samples/sec。与对应模型在 vLLM/SGLang 的 published benchmark 对比。"
+- "`nvidia-smi dmon` 看 rollout 阶段 GPU util；长期 < 70% 就是 batch 太小。"
+- "确认是否用独立 serving：verl 有 `rollout.name=vllm` / `rollout.name=sglang` 配置，HF 原生 generate 是 `rollout.name=hf`（慢）。"
+minimal_fixes:
+- "切到 **vLLM / SGLang** 作为 rollout engine：`rollout.name=vllm` / `rollout.name=sglang`，`rollout.engine_args: {...}`；吞吐通常 3-10× 提升。"
+- 开 **prefix cache**：同一个 prompt 产 n 条样本时，共享前缀全部命中，GRPO 的 n=16 几乎免费。
+- "**合理设置 stop token**：chat template 的 `<|im_end|>` / `<|eot_id|>` 必须配到 stop list；检查 EOS 后是否继续 generate。"
+- "**缩 max_new_tokens** 到实际任务需要（数学题 512 够用、代码 2048 够用），监控实际 p99 长度。"
+- "**batch size 提高**：让每次 rollout 一次送 64-256 个 prompt（取决于显存）；vLLM/SGLang 自动 continuous batching。"
+- "**GPU 分离**：actor 在 4 卡，rollout 在另 4 卡，两边并行；actor update 和 rollout 不再串行。"
+- "**低精度 rollout**：rollout 用 fp8/int8 量化模型（质量可接受下），速度再 ×1.5-2。"
+what_not_to_do:
+- 不要只提高 max_new_tokens 指望多采样——rollout 慢会被放大。
+- 不要 batch size=1 一条条 generate，这是性能最差的模式。
+- 不要忽略 stop token 配置，模型可能生成满 2048 token 后再 EOS。
+- 不要把 rollout 和 actor 放同一组 GPU 做 swap 式调度，除非资源极端受限。
+- 不要用 HF `model.generate` 做大规模 RL，它是参考实现不是生产路径。
+hint_1: |
+  先确认 rollout 路径：
+  ```bash
+  grep -E "rollout.name|rollout_engine" configs/*.yaml
+  ```
+  - `rollout.name: hf` 或默认走 HF generate → 切到 vllm/sglang，单步 rollout 通常 3-10× 加速。
+  - 已经是 vllm/sglang → 往下看 batch / prefix cache / stop token。
+
+  再看生成长度分布：
+  ```bash
+  jq '.response_len' runs/<mission>/<run>/rollout_samples.jsonl \
+    | sort -n | awk '{a[NR]=$1} END {print "p50", a[int(NR*0.5)], "p99", a[int(NR*0.99)], "max", a[NR]}'
+  ```
+  - p99 ≈ max_new_tokens → stop token 没设对，调整 stop_token_ids + chat template。
+  - p99 << max_new_tokens → 长度合理，看 batch / cache。
+hint_2: |
+  按瓶颈优化：
+  ```
+  走 HF generate
+    → 改 rollout.name=vllm 或 sglang，engine_args 设 tp_size、max_model_len、enable_prefix_caching=True
+    → 预期 3-10× 提升
+
+  已经 vllm/sglang 但仍慢
+    1. GRPO n=16：开 prefix_caching，共享 prompt 前缀，实际新 decode 只有 n 条 response
+    2. batch 提高到 GPU 接近饱和（nvidia-smi util > 85%）
+    3. max_new_tokens 降到实际 p99 * 1.2
+    4. stop_token_ids 完整：HF tokenizer.convert_tokens_to_ids(['<|im_end|>', '<|eot_id|>', ...])
+
+  GPU 分离不够
+    → actor_gpus=[0..3], rollout_gpus=[4..7]，两边异步，actor update 与 rollout 并行
+    → 需要 weight sync 高效（见 slime_weight_sync_003）
+
+  最后手段
+    → rollout 用量化模型（AWQ/FP8），actor 保留 bf16
+    → 小 n（GRPO n=8 代替 16），看 advantage 方差是否可接受
+  ```
+solution: |
+  Rollout 吞吐的不变量：**生成 token 的 tokens/sec 应接近同模型在 vLLM/SGLang serving benchmark 的 published 值**，否则配置有问题。诊断模板：
+  1. 确认 rollout engine：必须是 vLLM 或 SGLang，不能是 HF generate。
+  2. 实际生成长度：p99 不应贴着 max_new_tokens；贴着就是 stop token / template 问题。
+  3. GRPO/n>1 时必须开 prefix cache，否则每个 sample 重复 prefill。
+  4. Batch size 要让 GPU 长期 util > 80%；不够就升 batch 或开 continuous batching。
+  5. Actor 与 rollout GPU 分离 + 高效 weight sync（见 slime_weight_sync_003）。
+  6. 验证：`rollout_ms / iteration_ms < 40%`；rollout `tokens_per_sec` 达到 published serving benchmark 的 70%+。
+  报告贴：rollout 路径对比（HF vs vLLM/SGLang）、生成长度分布、prefix cache hit rate、修复前后 rollout_ms 和 tokens/sec。
+  参考：`github_repo/verl/`、`github_repo/vllm/benchmarks/`、`github_repo/sglang/benchmark/`、labs/l29_verl_rl_baseline、labs/l31_rollout_only_smoke、相关 ticket: slime_weight_sync_003、slime_rollout_bottleneck_001。

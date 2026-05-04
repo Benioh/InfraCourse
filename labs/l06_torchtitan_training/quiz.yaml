@@ -1,0 +1,180 @@
+mission: l06_torchtitan_training
+title: L03 Quiz · Activation Checkpoint 设计权衡
+pass_threshold: 1.0
+description: |
+  这 5 题打中 activation checkpoint（recompute）的核心权衡——
+  时间 vs 显存、何时 ckpt 何时不 ckpt、与 DDP/TP 的交互。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l06_torchtitan_training/patch/task.md
+  - title: 跑 notebook n06 · activation recompute
+    kind: notebook
+    path: notebooks/n06_activation_recompute.ipynb
+  - title: 读 TorchTitan apply_ac 源码
+    kind: source
+    path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+  - title: 读 PyTorch torch.utils.checkpoint 源码
+    kind: source
+    path: docs/术语表.md
+
+questions:
+  - id: q1_what_ckpt_saves
+    prompt: |
+      Activation checkpoint 用什么换什么？
+    options:
+      - id: a
+        text: 用更多通信换更少计算
+      - id: b
+        text: 用一次额外 forward（计算）换 activation 显存的减少
+        correct: true
+      - id: c
+        text: 用更多显存换更快 backward
+      - id: d
+        text: 用更慢的 forward 换更少 grad 显存
+    explanation: |
+      ckpt 的工作原理：
+        - 正常 forward：保存所有 activation，backward 时直接用
+        - ckpt forward：**只保存输入**（drop activation）；backward 时**重新跑一次 forward**
+          得到 activation 再算 grad
+
+      所以 ckpt 是 **以算力换显存**，时间代价 ≈ 多一次 forward (+33% 总训练时间)，
+      显存收益 = 节省所有中间 activation。
+
+      经验法则：
+        - 7B 模型 fp16 + Adam，no ckpt 显存 ≈ 200GB（爆 80G H100）
+        - 全量 ckpt 后显存 ≈ 50GB（能跑），但训练慢 33%
+        - 选择性 ckpt（只 ckpt attention）显存 ≈ 80GB，训练慢 ≈ 15%
+
+      这就是 TorchTitan / Megatron 默认做 selective ckpt 的原因。
+
+  - id: q2_what_to_ckpt
+    prompt: |
+      在 Transformer 模型里，attention 和 MLP 哪个更值得 ckpt？为什么？
+    options:
+      - id: a
+        text: MLP，因为它的 activation 比 attention 多
+      - id: b
+        text: Attention，因为它的 activation 占 activation 总量 ~60%，且 forward 比较快（recompute 代价小）
+        correct: true
+      - id: c
+        text: 两者一样，按层数挑就行
+      - id: d
+        text: 不用挑，全 ckpt 最省显存
+    explanation: |
+      attention activation 包括：QKV projection 输出、attention weights (B*H*S*S)、
+      attention output。S=4096 时 weights 是 B×H×4096×4096 = 巨大！
+      MLP 只有 (B, S, 4×hidden) 一个中间张量。
+
+      但 recompute 代价：
+        - attention forward 主要是矩阵乘 + softmax，~30% 总 forward 时间
+        - MLP forward 是两个矩阵乘，~70% 总 forward 时间
+
+      显存节省 / 时间代价比：
+        - ckpt attention: 省 ~60% activation，多 ~30% 时间 → 比值高
+        - ckpt MLP: 省 ~40% activation，多 ~70% 时间 → 比值低
+
+      所以选择性 ckpt 优先 attention。这就是 TorchTitan `attention_only_policy`、
+      Megatron `--recompute-method core_attn` 的设计。
+
+      面试金句："ckpt attention 不 ckpt MLP，是显存压力下的最优 Pareto 点。"
+
+  - id: q3_ckpt_with_ddp
+    prompt: |
+      用 PyTorch DDP 时，activation checkpoint 与 DDP 的 grad bucket overlap 有什么交互？
+    options:
+      - id: a
+        text: 没有交互
+      - id: b
+        text: ckpt 让 backward 中插入一次 recompute forward，DDP grad hook 触发时机
+              被推迟，但 overlap 仍能工作
+        correct: true
+      - id: c
+        text: ckpt 与 DDP 不兼容，必须二选一
+      - id: d
+        text: ckpt 会导致 grad 重复 all-reduce 多次
+    explanation: |
+      backward 流程（带 ckpt）：
+        ```
+        loss.backward()
+        ├── 反向跑到 mlp1：用保留的 activation 算 grad ✓ DDP hook 触发
+        ├── 反向跑到 attn1：activation 没保留 → recompute forward → 算 grad ✓ DDP hook 触发
+        ├── 反向跑到 mlp0：用保留的 activation 算 grad ✓ DDP hook 触发
+        └── 反向跑到 attn0：recompute forward → 算 grad ✓ DDP hook 触发
+        ```
+
+      DDP 的 grad hook 在每个 param 的 `.grad` 写入时触发，与是否 ckpt 无关。
+      ckpt 只是延迟了 attn 部分 grad 的可见时间，但不影响 hook 注册。
+
+      实际副作用：ckpt 把 backward 的"忙碌时间"拉长（多了 recompute），
+      留给通信的 overlap 窗口反而**更充裕**——所以 ckpt 经常意外地让 DDP 通信
+      更好地隐藏。
+
+      面试 trick：被问 "ckpt 和 DDP 是不是冲突"，能立刻答 "不冲突，反而 overlap 更好"
+      是真懂。
+
+  - id: q4_use_reentrant
+    prompt: |
+      `torch.utils.checkpoint(use_reentrant=False)` 与 `True` 区别是什么？现在推荐哪个？
+    options:
+      - id: a
+        text: 完全等价，只是写法不同
+      - id: b
+        text: True 是老实现，对 nested checkpoint / 有 RNG 的模块有 bug；
+              False 是新实现（基于 saved-tensor hooks），现在推荐
+        correct: true
+      - id: c
+        text: True 更快但用更多显存
+      - id: d
+        text: False 是 PyTorch 实验功能，生产环境不推荐
+    explanation: |
+      `use_reentrant=True`（默认 in PyTorch < 2.1）：
+        - 实现：把 forward 包成一个 autograd.Function 的 ctx.save_for_backward
+        - bug：与 nested checkpoint、RNG state、`torch.compile` 都有兼容问题
+
+      `use_reentrant=False`（PyTorch >= 1.11，2.1+ 默认）：
+        - 实现：用 saved-tensor hook 拦截 activation 的保存
+        - 优点：与新版 autograd 完全兼容，支持 nested ckpt，与 `compile` 兼容
+        - 已经稳定 2 年+，大模型训练框架（TorchTitan / Megatron / DeepSpeed）都默认用它
+
+      推荐：**新代码一律 use_reentrant=False**。本关 starter 也这样写。
+
+      老旧代码迁移：把 `True` 改 `False` 99% 兼容；个别 RNG-sensitive 模块
+      （如 dropout）可能需要重新设种子。
+
+  - id: q5_ckpt_vs_offload
+    prompt: |
+      activation checkpoint vs activation offload（把 activation 移到 CPU），
+      二者哪个更划算？
+    options:
+      - id: a
+        text: ckpt 更好，CPU/GPU 拷贝太慢
+      - id: b
+        text: offload 更好，CPU 显存便宜
+      - id: c
+        text: 看具体场景：单层 activation 大 (>1GB) 时 offload 优；中等大小时 ckpt 优；
+              真正生产环境 ZeRO-3/Megatron 通常组合用
+        correct: true
+      - id: d
+        text: 现代 GPU 已经够大，两者都没必要
+    explanation: |
+      ckpt：
+        - 时间代价：多 1 次 forward（FLOP）
+        - 显存收益：drop 几乎全部 activation
+        - 限制：与 dynamic shape 不友好，需要 deterministic forward
+
+      offload：
+        - 时间代价：activation 在 CPU/GPU 之间拷贝（H100 PCIe ≈ 64 GB/s 单向）
+        - 显存收益：drop 那一部分 activation
+        - 限制：PCIe 带宽受限，offload 量大时变成 IO-bound
+
+      经验法则：
+        - 如果一层 activation < 1GB 且 forward 计算量小：ckpt 更好
+        - 如果一层 activation > 1GB：offload 可能更好（PCIe < recompute 时间）
+        - 如果你有多机 + InfiniBand：直接 ZeRO-3 把 activation 切到不同 rank
+
+      实际生产：DeepSpeed ZeRO-3 + offload + selective ckpt 三件套组合。
+      本关只学 ckpt 这一项；L05 Megatron scale 那关会接触 ZeRO 的实现。
+
+      面试金句："如果只用一个工具：ckpt 最简单最稳。如果有钱：上 ZeRO-3 + offload。"

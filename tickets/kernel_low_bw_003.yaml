@@ -1,0 +1,135 @@
+id: kernel_low_bw_003
+title: Triton kernel 跑通了但 bandwidth_gbs < 30% peak HBM
+mission: l04_gpu_kernel
+severity: medium
+symptom: |
+  Kernel 通过数值验证（max_abs_err < 1e-5），延迟也比 PyTorch eager 快，但是用
+  `mini_infra.gpu.microbench` 或 `torch.profiler.kineto` 测出来的 `bandwidth_gbs` 远低于
+  4090 peak HBM（1008 GB/s）的 30%——例如只有 200-300 GB/s。这说明 kernel 没把硬件
+  压满，存在显著优化空间。
+error_signatures:
+- "bandwidth_gbs / peak_hbm_gbs < 0.30"
+- "torch.profiler 显示 cuLaunchKernel 自身比 kernel 执行还久（说明 launch overhead 占大头）"
+- "ncu 报告 'SM Active Cycles' 利用率 < 50%"
+- "ncu 报告 'L1 Cache Throughput' 远小于 'DRAM Throughput'（cache 命中差，多次回 HBM）"
+- "occupancy_estimate 输出 < 0.5"
+classification_questions:
+- 是 launch overhead 主导（小输入 kernel）还是 memory access 不连续？
+- BLOCK_SIZE / num_warps / num_stages 三个值你扫过哪几组？
+- 是单次跑得慢还是 batch 跑得慢？小 N 大 N 哪个更糟？
+- ncu 报告里 'Memory Throughput Distribution' 是均匀的还是只在 L2/L1 high？
+- 用 `tl.load(ptr, eviction_policy='evict_first')` 之类的 hint 试过吗？
+likely_causes:
+- BLOCK_SIZE 不在硬件甜区：4090 上常见甜区 `BLOCK_SIZE=1024 num_warps=4`，512 太小、2048 受 SMEM 限制
+- Strided load：`tl.load(ptr + col * stride_n)` 的 stride 不是 1，破坏 coalesced read
+- num_warps 太少（如 1），SM 活跃度低；或太多（如 16）造成寄存器抢占 spill
+- 每个 program 处理的工作量太小，launch overhead 占比 > 50%
+- num_stages=1 没开 software pipeline，HBM load 与计算无法重叠
+- 没用 vectorized load：fp16 时应该用 `tl.load` + dtype hint 让编译器发 ld.global.v4
+- L2 cache 没复用：相邻 program 处理同一行不同段，但 cache line 已被换出
+minimal_checks:
+- 跑 BLOCK_SIZE × num_warps × num_stages 三轴 sweep（共 27 组），找到 bandwidth_gbs 最高的组合
+- 对照 `mini_infra.gpu.memory_model.roofline_softmax(...)` 的预算，看你与上限差多少
+- ncu：`ncu --set roofline --kernel-name softmax_kernel python bench.py`
+  关注 'DRAM Frequency'、'SM Active'、'Achieved Occupancy'
+- 用 `torch.profiler.kineto` 看 launch overhead vs kernel time 的比例
+- `triton.testing.do_bench(...)` 跑 100 次取中位数，避免单次抖动
+- 增大 batch（如从 8 到 64），bandwidth_gbs 是否上升 → 是的话原来是 launch overhead 主导
+minimal_fixes:
+- 进入 4090 甜区：`BLOCK_SIZE=1024, num_warps=4, num_stages=2`
+- 用 `triton.autotune` 让编译器自动搜：
+  ```python
+  @triton.autotune(configs=[
+      triton.Config({'BLOCK_SIZE': 256}, num_warps=2),
+      triton.Config({'BLOCK_SIZE': 512}, num_warps=4),
+      triton.Config({'BLOCK_SIZE': 1024}, num_warps=4),
+      triton.Config({'BLOCK_SIZE': 2048}, num_warps=8),
+  ], key=['n_cols'])
+  ```
+- 修 stride：检查 `input_ptr + row * stride_row + col * stride_col`，确保 col 维 stride=1
+- 增大 N：把多 batch 合到一个 grid，减少 launch
+- 开 num_stages=2 启用 software pipeline
+- 添加 vectorized load 提示：用 `tl.load(... eviction_policy='evict_first')` 暗示 cache 行为
+what_not_to_do:
+- 不要只看一次 timing 就下结论——抖动可能 ±20%，必须 do_bench 多次取中位数
+- 不要相信"BLOCK_SIZE 越大越快"——4090 上 BLOCK=2048 通常输给 BLOCK=1024
+- 不要把 launch overhead 算进 bandwidth_gbs——估算字节时只算实际 load+store
+- 不要在 4090 上跑通后宣称"H200 也能达到"——两者甜区不一样，必须在 H200 上重新 sweep
+- 不要直接抄 Triton tutorial 的 autotune config——它针对的硬件可能与你不同
+hint_1: |
+  3 分钟法：扫 BLOCK_SIZE × num_warps 共 9 组，找出 bandwidth_gbs 最高的：
+  ```python
+  import itertools
+  results = []
+  for bs in (256, 512, 1024, 2048):
+      for nw in (2, 4, 8):
+          try:
+              t = triton.testing.do_bench(lambda: softmax_kernel[grid](..., BLOCK_SIZE=bs, num_warps=nw))
+              bw = bytes_total / t / 1e9 * 1000
+              results.append((bw, bs, nw))
+          except Exception:  # OutOfResources
+              continue
+  for bw, bs, nw in sorted(results, reverse=True)[:5]:
+      print(f"bw={bw:.0f} GB/s, BLOCK={bs}, warps={nw}")
+  ```
+  如果 best 还是 < 30% peak → 不是 config 问题，是 kernel 写法问题（看 hint_2）。
+hint_2: |
+  Config 已经扫过仍然 < 30% peak，按这个顺序排查：
+
+  1. **stride 检查**：打开 PyTorch tensor 的 `.stride()`：
+     ```python
+     print(x.stride())  # 期望 (n_cols, 1)
+     ```
+     如果不是 (n_cols, 1) → tensor 不是 contiguous，先 `.contiguous()`。
+
+  2. **launch overhead**：
+     ```python
+     import torch
+     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+         for _ in range(100):
+             softmax_kernel[grid](...)
+     print(prof.key_averages().table(sort_by="cuda_time_total"))
+     ```
+     如果 `cuLaunchKernel` 时间 > kernel 时间一半 → 把多 batch 合并跑或增大 BLOCK_SIZE。
+
+  3. **vectorized load**：fp16 时确保 PTX 里有 `ld.global.v4.b16`：
+     ```python
+     compiled = softmax_kernel.warmup(...)
+     print(compiled.asm['ptx'][:2000])  # grep 'ld.global'
+     ```
+     看到 `ld.global.b16`（标量）而不是 `ld.global.v4.b16`（向量）→ stride/对齐不对。
+
+  4. **L2 复用**：相邻 program 处理同一行不同列时，加 `pid` 排序让 cache 友好：
+     ```python
+     # group by row first
+     pid = tl.program_id(0)
+     row_idx = pid // num_col_blocks
+     col_idx = pid % num_col_blocks
+     ```
+
+  跑完上面 4 步还低 → 上 Nsight Compute Roofline，看 kernel 落在 memory-bound 还是 compute-bound：
+  ```bash
+  ncu --set roofline --kernel-name softmax_kernel python bench.py
+  ```
+solution: |
+  Bandwidth 低的根因排序：**(1) Config 不在甜区 → (2) Launch overhead → (3) Stride 不连续 → (4) L2 没复用**。
+
+  1. **扫甜区**：4090 上 `BLOCK_SIZE=1024, num_warps=4, num_stages=2` 是稳定起点。
+     用 `triton.autotune` 自动搜，但首次跑要保留 autotune 缓存（`TRITON_CACHE_DIR`）。
+  2. **减少 launch**：如果 batch=1 必须支持，至少把 N 行 fuse 进同一个 program；
+     或者用 `triton.testing.do_bench` 测时排除 launch 开销。
+  3. **保 contiguous**：在调 kernel 前 `x = x.contiguous()`，断言 `x.stride(-1) == 1`。
+  4. **L2 友好**：grid 排布优先按行遍历，让相邻 program 命中相同 cache line。
+  5. **测量诚实**：bandwidth_gbs = (load_bytes + store_bytes) / kernel_time。
+     不算 launch overhead；不把 L2 命中算进 HBM 字节。
+     用 `triton.testing.do_bench(fn, warmup=25, rep=100)` 取中位数。
+  6. **报告里必须写**：sweep 表（≥9 组 BLOCK × warps）、ncu roofline 截图（如有权限）、
+     最终 config + bandwidth_gbs + occupancy_estimate、与 `roofline_softmax` 预算的偏差解释。
+
+  **银线指标**（你应该追求的目标）：
+  - 4090: ≥ 70% peak (≥ 700 GB/s)
+  - H200: ≥ 85% peak (≥ 4000 GB/s)
+
+  达不到银线 → 报告写清"已达 X%，剩余瓶颈是 Y，下一步用 Z 验证"，不要装作达标。
+
+  参考：`mini_infra/gpu/memory_model.py:roofline_softmax`、`labs/l04_gpu_kernel/scripts/bench_softmax.py`、L01.7 README Stuck Checklist、Triton autotune docs。

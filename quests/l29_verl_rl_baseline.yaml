@@ -1,0 +1,49 @@
+id: l29_verl_rl_baseline
+title: Adaptive KL Controller (PPO)
+level: L10
+act: 第 4 章：RL 与对齐
+role: RL 学徒
+priority: 核心
+estimated_minutes: 60
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - verl / TRL (对照)
+
+patch:
+  description: |
+    实现 InstructGPT App C 风格的 adaptive KL coefficient controller：
+    根据 current_kl / target_kl 的偏差自动调节 KL penalty 系数，clip 到
+    ±0.2 防止单步剧变。
+  task_md: labs/l29_verl_rl_baseline/patch/task.md
+  starter_file: labs/l29_verl_rl_baseline/patch/starter/kl_controller.py
+  reference_file: labs/l29_verl_rl_baseline/patch/reference/kl_controller.py
+  test_command: make patch-test M=l29_verl_rl_baseline
+  status_file: labs/l29_verl_rl_baseline/patch/.last_run.json
+  test_count: 5
+  test_kind: 行为契约 + 数值校验
+
+source_reading:
+  - title: verl PPO core_algos
+    repo_path: github_repo/verl/
+  - title: InstructGPT paper App C
+    repo_path: docs/术语表.md
+
+mini_infra_targets:
+  - mini_infra/rl/
+
+notebooks:
+  - notebooks/n10_rl_kl_reward.ipynb
+
+tickets:
+  - verl_kl_explosion_002
+  - verl_reward_parse_001
+  - verl_rollout_slow_003
+
+prereq: l27_sglang_pd_cache
+next_lab: l31_rollout_only_smoke
+
+gpu_modes:
+  local: CPU OK
+  cluster: 完整 RL 训练验证（可选）

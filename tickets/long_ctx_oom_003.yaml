@@ -1,0 +1,160 @@
+id: long_ctx_oom_003
+title: 增到 32K 即 OOM，CP=2 / recompute 也救不回
+mission: l09_long_context_cp
+severity: high
+symptom: |
+  在 4K 上训练正常，加大 `--seq 32768` 后立刻 `CUDA out of memory`。
+  开 `recompute=full`、`CP=2`、`flash-attn` 任何一个都没救回，仍 OOM 或 only marginally 改善。
+  典型在 4090 单卡或 8×H100 集群上看到。
+error_signatures:
+- "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate X GiB"
+- "GPU 0; X.YZ GiB allocated; A.BC GiB free"（可见 OOM 量级，常 2-10GB）
+- "memory_allocated() / max_memory_allocated() ratio > 0.95"
+- 开 CP=2 后 OOM 推迟一两步但仍崩
+- flash-attn 报 "headdim must be ≤ 128" 等不兼容
+classification_questions:
+- 是激活 OOM 还是 KV/optimizer state OOM？通常激活
+- 是 forward 崩还是 backward 崩？backward 几乎一定是激活
+- 用了 flash-attn 吗？哪个版本？是否启用？
+- recompute 是 full 还是 selective？只在某些 layer 吗？
+- DP / TP / PP / CP 复合用了哪些？显存账有没有具体算过？
+likely_causes:
+- 激活显存爆：`micro_batch × seq × hidden × num_layers` 在 32K 时占主导
+- 没用 flash-attention：标准 attention 内存 O(seq²) → 32K seq → 1G+ 激活
+- recompute 实际未生效：config 中 `--recompute-granularity full` 没传到对应 layer
+- CP 切的是 attention 维但 MLP 维仍是全 seq → MLP 是新瓶颈
+- KV cache 在训练里也存（如果 use_cache=True 没关）
+- micro_batch 太大：长 seq 应该 micro_batch=1 + grad_accum
+minimal_checks:
+- 算激活账：
+  ```python
+  micro_bs = 1; seq = 32768; hidden = 4096; layers = 32
+  attn_act = micro_bs * seq * seq * 2 / 1e9  # naive attention
+  mlp_act = micro_bs * seq * hidden * 4 * 2 / 1e9
+  total_act = (attn_act + mlp_act) * layers
+  print(f'naive attention activation = {total_act:.1f} GB')  # 4090 24G 一定爆
+  ```
+  把 attn 换 flash 后 attn_act 降为 O(seq) 不是 O(seq²)
+- 跑 `torch.cuda.memory_summary()` 看分配 breakdown
+- 用 `torch.cuda.max_memory_allocated()` 在每个 step 后查看峰值
+- 暂时把 recompute 关掉与开 full 对比，看激活差是否符合理论
+- micro_batch 临时设 1 + grad_accum=micro_batch 看是否过 OOM
+minimal_fixes:
+- **必开 flash-attention**：`--use-flash-attn` 或 SDPA 的 flash 后端
+- micro_batch=1：长 seq 几乎必须 micro_batch=1
+- recompute=full：所有 transformer block 的 attention 与 MLP 全 recompute
+- 增大 CP：CP=2 不够 → CP=4；同时确保 MLP 也按 SP 切（sequence parallel for MLP）
+- 启 selective recompute：只 recompute attention（最省）而不 recompute MLP
+- 降 hidden（如果是预训练）或降 layers 来证明显存账正确
+- 关闭 use_cache（训练时根本不该开 KV cache）
+what_not_to_do:
+- 不要直接调 lr 或 batch 试图 "稳住"——OOM 是结构问题
+- 不要把 recompute 全开然后说"训练慢就慢吧"——长 seq 必须先想清楚 attention 复杂度
+- 不要在没 flash-attn 的情况下宣布 32K 跑通——你在烧 O(seq²) 显存
+- 不要混用多种 recompute 策略让自己看不清账
+- 不要忘了 grad_accum 也消耗显存（轻微）
+hint_1: |
+  90% 的长 ctx OOM 因为没开 flash-attn。先做这个 1 分钟检查：
+  ```python
+  import torch
+  print('SDPA flash backend available:', torch.backends.cuda.flash_sdp_enabled())
+  # 期望 True
+
+  # 测试 naive vs flash:
+  q = torch.randn(1, 32, 32768, 128, device='cuda', dtype=torch.bfloat16)
+  k = torch.randn_like(q); v = torch.randn_like(q)
+
+  # naive: 一定 OOM
+  with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+      try:
+          out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+          print('naive ok, peak mem =', torch.cuda.max_memory_allocated() / 1e9, 'GB')
+      except Exception as e:
+          print('naive OOM:', e)
+
+  torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+
+  with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False):
+      out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+      print('flash ok, peak mem =', torch.cuda.max_memory_allocated() / 1e9, 'GB')
+  ```
+  Naive 在 32K 上一定 OOM，flash 应该 < 5GB。如果你的训练代码没走 flash 路径 → 这就是根因。
+hint_2: |
+  Flash 已经开了仍 OOM，按这个顺序：
+
+  1. **micro_batch=1**：
+     ```yaml
+     micro_batch_size: 1
+     global_batch_size: 16  # 用 grad_accum 凑
+     ```
+     长 seq + micro_bs > 1 几乎必爆。
+
+  2. **selective recompute**（先开这个，比 full 快）：
+     ```yaml
+     recompute_granularity: selective
+     recompute_method: uniform
+     # 只 recompute attention，不 recompute MLP（MLP 重算很贵）
+     ```
+
+  3. **Sequence Parallel + CP**：
+     ```yaml
+     sequence_parallel: true   # MLP 也按 seq 切，与 TP 配合
+     context_parallel_size: 2   # 然后再 CP
+     ```
+     注意：SP 在 TP > 1 时才有意义；CP 独立于 TP。
+
+  4. 仍然 OOM → 上 full recompute：
+     ```yaml
+     recompute_granularity: full
+     ```
+
+  5. 仍然 OOM → 32K 在你的硬件上不可达，需要：
+     - 降模型大小（layers, hidden）
+     - 增 GPU 数（更大的 CP）
+     - 用 ZeRO-3 或 FSDP（训 optimizer state 也分片）
+     - 或者干脆用 16K 而不是 32K
+
+  关键算账：
+  ```python
+  from mini_infra.megatron.core.context_parallel.ring_attention import attention_memory_gb
+  for seq in [4096, 16384, 32768, 65536]:
+      mem = attention_memory_gb(seq, hidden_size=4096, dtype_bytes=2)
+      print(f'seq={seq:>5}: naive attention = {mem:.1f} GB')
+  ```
+  4090 只有 24GB，扣掉 weights + grads + optimizer 大约只剩 8-10GB 给激活。
+solution: |
+  长 ctx OOM 的修复路径：**先开 flash → micro_bs=1 → selective recompute → SP+CP → full recompute**。
+
+  按硬件给典型方案：
+
+  **4090 (24GB)**：
+  - 最大可达 seq ≈ 16K（micro_bs=1 + flash + full recompute）
+  - 32K+ 必须 CP（多卡）
+  - 配置示例：`micro_batch_size=1 / use_flash_attn=true / recompute_granularity=full / cp=1 / tp=1`
+
+  **8×H100 (80GB ea)**：
+  - 单 CP=1：可达 32K
+  - CP=2：可达 64K
+  - CP=4：可达 128K（论文级）
+  - 配置示例：`micro_bs=1 / flash / selective recompute / cp=4 / sp=true / tp=4`
+
+  **8×H200 (141GB ea)**：
+  - 类似 H100 但每节点 +50%
+  - CP=4 可达 256K
+
+  **必做 checklist**：
+  1. ✓ `--use-flash-attn` 或 PyTorch SDPA flash 后端
+  2. ✓ `--micro-batch-size 1`
+  3. ✓ `--recompute-granularity selective` 或 `full`
+  4. ✓ `--sequence-parallel`（如果 TP > 1）
+  5. ✓ `--context-parallel-size N`（按硬件预算选）
+  6. ✓ `use_cache=False`（训练时关掉 KV cache）
+  7. ✓ 验证 `torch.cuda.max_memory_allocated()` 在预期范围
+
+  **报告里必须写**：
+  - 显存账（你算的 vs 实测 peak）
+  - 4 组对照：(无 flash, +flash, +flash+recompute, +flash+recompute+CP) 的最大可达 seq
+  - 配置 yaml 完整 dump
+  - 4090 vs H200 的边界（哪些是 H200-only）
+
+  参考：`mini_infra/megatron/core/context_parallel/ring_attention.py:attention_memory_gb`、L04.5 README、Megatron 长 ctx 文档。

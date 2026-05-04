@@ -1,0 +1,81 @@
+id: sglang_cache_miss_002
+title: SGLang RadixCache / prefix cache 命中率低
+mission: l21_sglang_serving_core
+severity: medium
+symptom: 明明 workload 有大量共享前缀（同一个 system prompt、few-shot example），但 SGLang metrics 里 `cache_hit_rate` 很低（< 20%），每个请求 prefill 时间几乎和首次一样。
+error_signatures:
+- "metrics: cache_hit_rate: 0.08（期望 > 0.5 的 workload 下）"
+- "prefix_match_len: 0 频繁出现在 trace"
+- 重复发送完全相同 prompt，第二次 prefill_ms 未下降
+- "RadixCache eviction rate high: X evictions/s"
+- tokenizer 输出的 token id 在不同请求下同位置不同
+classification_questions:
+- 两个“应该共享前缀”的请求，**token id 层面**真的一样吗？（不是文本一样就够）
+- system prompt、chat template、special tokens（BOS/EOS/`<|im_start|>`）是否完全一致？
+- 是否每次请求重新构造 chat template，导致顺序或空格差异？
+- 采样参数（temperature、top_p、repetition_penalty）对 prefix cache 有没有影响？（大多数实现不影响 prefill cache）
+- 请求是否带了不同的 `session_id` / `rid`，导致 cache namespace 被隔离？
+likely_causes:
+- Chat template 漂移：客户端拼了 `<|user|>hello<|assistant|>`，服务端以为是 `<|im_start|>user\nhello\n<|im_end|>\n<|im_start|>assistant\n`，token id 完全不同。
+- Special token 差异：一个请求带 BOS，另一个不带；tokenizer 的 `add_special_tokens` 默认值在 HF chat_template vs raw encode 之间不同。
+- 空格/换行漂移：一次有尾部换行一次没有，token 末位就不匹配，cache 只能匹配到更早的某个节点。
+- 请求中途插入了动态内容（时间戳、随机 id），虽然 system prompt 相同但实际 prompt 前缀不同。
+- RadixCache 容量不足：`--max-total-tokens` 小，长共享前缀被早早 evict。
+- 多个 worker / TP rank 下 cache 未共享，rank 切换后重新 prefill。
+- Sampling 参数不影响 prefill，但如果实现里把 sampling 绑进 cache key（误实现），就会被动 miss。
+minimal_checks:
+- "对两个应该共享前缀的请求 `tok.encode(prompt_a)` 和 `tok.encode(prompt_b)`，对比**共同前缀 token id 长度**。如果你预期 1000 token 共享但实际只有 50，就是 tokenize 环节就已经差异。"
+- "打开 `--log-level debug`，单独发一次共享前缀的请求，看日志里 `matched prefix len: X / total_len Y`。"
+- "调用 `/get_server_info` 或 `/metrics`，看 `cache_hit_rate`、`tree_cache_num_nodes`、`token_cache_size`；长时间运行后 tree 应该有稳态规模。"
+- "连续发 10 次完全相同 prompt（二进制一致），第 2-10 次 `prefill_ms` 应接近 0。如果仍不降，cache 根本没开或未在该路径生效。"
+- "检查启动参数：`--disable-radix-cache` 有没有被误开？默认应开启。"
+minimal_fixes:
+- 客户端锁定 chat template：用 `tokenizer.apply_chat_template(messages, tokenize=False)` 拼好，再发给服务端；两端用**同一份** tokenizer。
+- 去除非必要动态字段：时间戳、请求 id 放在独立 metadata 而不是 prompt 内。
+- "`--enable-prefix-caching` 或等价参数开启；检查 `--disable-radix-cache` 未设置。"
+- 扩容 `--max-total-tokens` / RadixCache 容量，避免共享前缀被过早 evict。
+- 多 worker / TP：检查 cache 是否全局共享（SGLang 默认共享），不要把请求分到独立 process 又不共享 cache。
+- 固定 special tokens：统一 `add_special_tokens=True/False` 的选择，不要在不同代码路径混用。
+what_not_to_do:
+- 不要只看 TTFT 不看 `cache_hit_rate`；TTFT 可能因为别的原因短，但缓存未命中还是浪费显存与算力。
+- 不要先把 `--max-total-tokens` 拉满再改 prompt 拼接——根因可能是 token id 不同，拉满也没用。
+- 不要手动在 prompt 里塞大段相同内容做“作弊”测试，这会掩盖真实 workload 的问题。
+- 不要只做文本比较 `prompt_a == prompt_b`，必须比 token id。
+hint_1: |
+  在本地跑这段，确认「相同 prompt 真的 tokenize 成相同 id」：
+  ```python
+  from transformers import AutoTokenizer
+  tok = AutoTokenizer.from_pretrained("<your-model>")
+  a = tok.apply_chat_template([
+      {"role": "system", "content": "You are helpful."},
+      {"role": "user", "content": "Q1"}
+  ], tokenize=True, add_generation_prompt=True)
+  b = tok.apply_chat_template([
+      {"role": "system", "content": "You are helpful."},
+      {"role": "user", "content": "Q2"}
+  ], tokenize=True, add_generation_prompt=True)
+  # 找最长公共前缀
+  i = 0
+  while i < min(len(a), len(b)) and a[i] == b[i]:
+      i += 1
+  print("shared prefix len:", i, "total:", len(a), len(b))
+  ```
+  - shared prefix len ≈ 你预期的 system+few-shot 长度 → tokenize 端正常，问题在服务端。
+  - shared prefix len 远小于预期 → 客户端 chat template / special token 不一致，从这里改起。
+hint_2: |
+  Tokenize 端正常，仍 miss：
+  ```bash
+  curl <sglang>/metrics | jq '{hit: .cache_hit_rate, nodes: .tree_cache_num_nodes, tokens: .token_cache_size}'
+  ```
+  - `hit ≈ 0`，`nodes` 很小 → RadixCache 没在生效。检查启动参数 `--disable-radix-cache` 是否被误加；重启时看 log 是否有 "RadixCache initialized"。
+  - `hit` 低但 `nodes` 很多 → cache 在频繁 evict。扩容 `--max-total-tokens`，或者减少并发使 working set 更小。
+  - 连续发 10 次相同 prompt（二进制一致）hit 仍 0 → 服务端对每个请求加了 random session id / rid，导致 cache key 不共享。排查客户端 / gateway 是否加了动态字段。
+solution: |
+  Prefix cache 命中率低，**几乎一定是 token id 层面前缀就不相同**，而不是 cache 实现 bug。按这个顺序排查：
+  1. **Token id 等同性**：用同一 tokenizer、同一 chat template 产出 token id，对比最长公共前缀。这一步抓 80% 问题。
+  2. **服务端配置**：`--enable-prefix-caching` / `--disable-radix-cache` 状态、`/metrics` 的 `cache_hit_rate` 和 `tree_cache_num_nodes` 是否合理。
+  3. **容量**：`--max-total-tokens` / KV 容量够不够存下共享前缀 + 活跃 decode KV。
+  4. **隔离**：是否每个请求带了独立 session_id 打破 cache key；多 worker 是否共享 tree。
+  修复后发 10 次相同 prompt，第 2-10 次 `prefill_ms` 应接近 0；workload 压测 `cache_hit_rate` 应从 <20% 升到 50-90%（取决于共享度）。
+  报告里贴：共享前缀 token id 长度、`cache_hit_rate` 修复前后、重复请求的 prefill_ms 曲线。
+  参考：`github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py`、labs/l21_sglang_serving_core、notebooks/n09_prefix_cache。

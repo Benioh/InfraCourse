@@ -1,0 +1,10 @@
+profile: cpu_smoke
+mode: synthetic
+beta: 0.1
+num_pairs: 64
+hidden_dim: 64
+vocab_size: 32
+seq_length: 16
+seed: 0
+acceptance:
+  loss_drop_first_50_steps: 0.2

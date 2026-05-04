@@ -1,0 +1,12 @@
+model:
+  vocab_size: 128
+  hidden_size: 64
+  num_layers: 2
+  num_heads: 4
+  max_seq_len: 128
+train:
+  backend: simulated
+  steps: 12
+  batch_size: 4
+  seq_len: 64
+  learning_rate: 0.0003

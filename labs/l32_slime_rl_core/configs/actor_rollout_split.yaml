@@ -1,0 +1,2 @@
+actor_gpus: 4
+rollout_gpus: 4

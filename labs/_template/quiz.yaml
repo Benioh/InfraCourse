@@ -1,0 +1,44 @@
+mission: lXX_xxx
+title: LXX Quiz · <一句话主题>
+pass_threshold: 1.0  # 全对才解锁 patch；可降到 0.8 等
+description: |
+  这 N 题打中本关最容易混淆的概念点。答错任何一题说明你的理解还没到
+  "能写代码"的程度，重读对应资料再答一遍。
+
+# 前置必读资料（顺序 = 推荐学习顺序）
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/lXX_xxx/patch/task.md
+  - title: 跑对应 notebook 建直觉
+    kind: notebook
+    path: notebooks/nXX_xxx.ipynb
+  - title: 读 mini_infra 同构骨架
+    kind: source
+    path: mini_infra/<module>/<file>.py
+  - title: 读真实框架源码
+    kind: source
+    path: github_repo/<framework>/<path>.py
+
+# 题目设计原则：
+#   - 打中"最核心、最容易错、最容易模棱两可"的点
+#   - 一眼能看出是不是真学懂
+#   - 答完必须有详细解析，包括为什么对、为什么错、记忆口诀
+questions:
+  - id: q1_<topic>
+    prompt: |
+      <一句话或带代码块的清晰提问>
+    options:
+      - id: a
+        text: <选项 A>
+      - id: b
+        text: <选项 B>
+        correct: true
+      - id: c
+        text: <选项 C>
+      - id: d
+        text: <选项 D>
+    explanation: |
+      <为什么 B 对：核心机制 / 不变量 / 实践证据>
+      <为什么 A/C/D 错：常见错误模式 / 后果>
+      <可选：记忆口诀或一句面试金句>

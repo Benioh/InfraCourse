@@ -1,0 +1,2 @@
+prefill_gpus: 4
+decode_gpus: 4

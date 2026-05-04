@@ -1,0 +1,184 @@
+mission: l08_megatron_text_pretrain
+title: L04 Quiz · LR scheduling 与训练动态学
+pass_threshold: 1.0
+description: |
+  这 5 题打中 LR 调度最常被误解的点：余弦的数学、warmup 的必要性、
+  restart 的作用、以及 lr × batch_size 的 scaling rule。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l08_megatron_text_pretrain/patch/task.md
+  - title: 读 Megatron optimizer_param_scheduler 源码
+    kind: source
+    path: github_repo/Megatron-LM/megatron/training/optimizer_param_scheduler.py
+  - title: 读 mini_infra megatron training 主线
+    kind: source
+    path: mini_infra/megatron/training/
+
+questions:
+  - id: q1_cosine_formula
+    prompt: |
+      标准 cosine LR scheduler 的公式是 `lr(t) = min + 0.5*(max-min)*(1 + cos(π·t/T))`。
+      在 t = T/2（中点）时 lr 等于多少？
+    options:
+      - id: a
+        text: max_lr
+      - id: b
+        text: min_lr
+      - id: c
+        text: (max_lr + min_lr) / 2
+        correct: true
+      - id: d
+        text: max_lr × cos(π/2) = 0
+    explanation: |
+      cos(π × 0.5) = cos(π/2) = 0
+      lr = min + 0.5*(max-min)*(1 + 0) = min + 0.5*(max-min) = (max + min) / 2 ✓
+
+      所以余弦衰减的中点恰好是 max 和 min 的算术平均。这就是为什么 cosine 比线性
+      衰减"前期慢、后期快"——前半段 lr 下降幅度小（保留高 lr 用于探索），后半段
+      下降快（让模型收敛）。
+
+      面试金句："余弦衰减不是线性衰减——它的好处在于前半段保持高 lr，避免过早
+      陷入局部最优。"
+
+  - id: q2_warmup_necessity
+    prompt: |
+      为什么大模型预训练几乎都用 warmup（前 N step lr 从 0 线性升到 max）？
+    options:
+      - id: a
+        text: 让数据 loader 预热
+      - id: b
+        text: 优化器（特别是 Adam）在前几步的二阶矩估计 v 还没稳定，过大 lr 会让 update 爆炸
+        correct: true
+      - id: c
+        text: GPU kernel 需要预热
+      - id: d
+        text: warmup 没必要，是 paper 的迷信
+    explanation: |
+      Adam 的更新公式：`update = m / (sqrt(v) + ε)`
+        - m = exp_avg(grad)，v = exp_avg(grad²)
+        - 训练开始时 m, v 都从 0 起步，需要几十步才能到稳态
+        - 这段时间 v 偏小 → sqrt(v) + ε 接近 ε → update 巨大
+
+      没 warmup 时，前 N 步的 update 幅度可能比稳态大 10-100 倍，模型权重会
+      "炸"——loss 突然冲到 nan，或者权重分布严重偏移再也回不来。
+
+      Warmup 让 lr 从 0 线性升到 max，给优化器时间稳定 m/v：
+        - 通常 warmup 长度 = 1-5% 总训练步数
+        - 7B 训练 1T tokens：warmup 大约 2000-5000 step
+        - 13B+ / 长序列时 warmup 步数应该更长
+
+      Megatron 默认 `--lr-warmup-iters 2000`，对应 fp16 训练 ~10B token 数据集
+      的稳定值。
+
+      面试金句："Adam 用 warmup 是因为它的二阶矩没初始化好，不是为了硬件预热。"
+
+  - id: q3_restart_purpose
+    prompt: |
+      Cosine **with restarts** 比纯 cosine 多了什么好处？
+    options:
+      - id: a
+        text: 完全没好处，是噱头
+      - id: b
+        text: 可以跳出局部最优。每次 restart 把 lr 重置回 max，相当于给优化器一次
+              重新探索的机会
+        correct: true
+      - id: c
+        text: 让训练更慢但精度更高
+      - id: d
+        text: 节省显存
+    explanation: |
+      纯 cosine 衰减后期 lr 很小（趋近 min），优化器实际上停滞——只在当前 basin
+      内做小幅 fine-tune。但损失面有很多 saddle point 和浅 basin，模型可能困在
+      不够好的局部。
+
+      Restart 把 lr 重置回 max：
+        - 模型权重已经处在一个相对好的位置
+        - 大 lr 让优化器"跳出"当前 basin
+        - 下一段衰减又收敛到一个新（可能更好）的位置
+
+      实践证据：SGDR 论文（Loshchilov 2017）显示 cosine + restarts 在 CIFAR/ImageNet
+      上比纯 cosine 高 0.5-1pp。LLM 预训练也常用——SDXL diffusion training 用
+      4 段 cosine restart，每段 lr 上限逐渐降低。
+
+      但别滥用：restart 会带来短暂 loss 抖动，wandb 上看起来像训练崩了。
+      Restart 间隔太短（< 500 step）反而损害收敛。经验值：每个 restart 跨 5-10%
+      总训练长度。
+
+      面试金句："Cosine 收敛慢但稳；Cosine + restart 是 'simulated annealing
+      + warm restart' 的合体——每次 restart 是一次小型 escape。"
+
+  - id: q4_lr_batch_scaling
+    prompt: |
+      你的小模型 batch=64 用 lr=1e-4 训练得很好。换成 8 卡 DDP 全局 batch=512
+      时，lr 应该改成多少？
+    options:
+      - id: a
+        text: 不变 lr=1e-4，DDP 自动处理
+      - id: b
+        text: lr=1e-4 × 8 = 8e-4（线性 scaling rule，Goyal 2017）
+        correct: true
+      - id: c
+        text: lr=1e-4 ÷ 8（小 lr 更安全）
+      - id: d
+        text: lr=1e-4 × √8（square root rule，更保守）
+    explanation: |
+      经典 "Linear Scaling Rule"（Goyal et al. 2017，"Accurate, Large Minibatch SGD"）：
+        - batch ↑ k 倍 → lr ↑ k 倍
+        - 直觉：每个 step grad 是 k 个样本的平均，方差是单样本的 1/k；
+          想保持每个样本的有效 lr 不变，需要补偿这 k 倍
+
+      实践：
+        - SGD：linear scaling 工作得很好，最大批 64K（ImageNet）
+        - Adam：linear scaling 在中等 batch 工作；超大 batch（>4096）
+          可能需要 square root rule 或 LARS optimizer
+
+      但要配合 warmup！batch ↑ 8x 后 lr ↑ 8x，没 warmup 第一步会爆炸。
+      ImageNet ResNet50 训练里：batch 8K + lr 0.4 + warmup 5 epoch。
+
+      LLM 预训练：通常 batch 1-4M tokens，lr 用类似规则但更保守
+      （每翻倍 batch lr 涨 ~70% 而不是 100%）。
+
+      面试金句："Linear scaling 在 SGD 上是经典原则，但 Adam 上需要配合 warmup
+      避免初始爆炸；超大 batch 用 LARS / LAMB。"
+
+  - id: q5_scheduler_save_state
+    prompt: |
+      训练 1000 步之后保存 checkpoint，第二天恢复继续训练。除了 model 和
+      optimizer state，**还必须保存什么**才能让 LR 调度连续？
+    options:
+      - id: a
+        text: 不需要，PyTorch 会自动算
+      - id: b
+        text: scheduler.step_count（或等价地：当前训练 step 数）
+        correct: true
+      - id: c
+        text: optimizer 的所有 lr 历史值
+      - id: d
+        text: data loader 的 epoch 数
+    explanation: |
+      LR scheduler 是 step-based（每次调用 step() lr 改变）。如果不保存 step_count：
+        - 第一天训练到 step 1000，lr 衰减到了某个值
+        - 第二天 reload，scheduler 重新初始化，step_count 从 0 开始
+        - 第二天的 step 1 把 lr 又设回 max！整个 schedule 错乱
+
+      正确的 ckpt 内容：
+        ```python
+        torch.save({
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": {
+                "step_count": sched.step_count,
+                # 其他配置 max_lr / restart_steps 通常也存下
+            },
+            "step": global_step,  # 用于 wandb resume
+        }, "ckpt.pt")
+        ```
+
+      Megatron / TorchTitan 的 ckpt 都包含 scheduler state。Capstone 你训练
+      projector 的时候要记得保存它，否则训练第 2 天发现 "loss 突然变大"——
+      就是这个 bug。
+
+      面试金句："恢复训练的三件套：model + optimizer + scheduler。少一个都
+      会让恢复后的 loss 曲线不连续。"

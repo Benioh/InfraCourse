@@ -1,0 +1,9 @@
+model: Qwen/Qwen2.5-0.5B-Instruct
+host: 127.0.0.1
+port: 30000
+max_new_tokens: 32
+temperature: 0.0
+enable_metrics: true
+repeated_prefix: |
+  You are a careful infra engineer.
+  Explain the difference between prefill and decode.

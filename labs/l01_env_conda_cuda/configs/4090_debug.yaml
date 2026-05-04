@@ -1,0 +1,3 @@
+gpu_mode: 1x RTX 4090
+torchrun_nproc_per_node: 2
+distributed_backend: gloo_if_cpu_else_nccl

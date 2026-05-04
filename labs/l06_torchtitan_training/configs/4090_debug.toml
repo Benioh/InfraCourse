@@ -1,0 +1,3 @@
+[training]
+steps = 10
+global_batch_size = 8

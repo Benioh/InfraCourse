@@ -1,0 +1,203 @@
+id: shard_corrupt_003
+title: 单个 shard 损坏导致整个 epoch 中断
+mission: l18_data_engineering
+severity: high
+symptom: |
+  训练跑了几小时后突然挂掉：
+  (a) `tarfile.ReadError: unexpected end of data` 或 `ReadError: invalid header`；
+  (b) 整个 epoch 终止，所有 worker 进程退出；
+  (c) 重启训练后从同一个 shard 又挂；
+  (d) 1000 个 shard 中只有 1-3 个坏，但每次都让训练死掉。
+error_signatures:
+- "tarfile.ReadError: unexpected end of data / invalid header"
+- "json.decoder.JSONDecodeError on sample <X>"
+- "PIL.UnidentifiedImageError: cannot identify image file"
+- "OSError: [Errno 116] Stale file handle"
+- 训练 step 数随每次 epoch 大致相同位置中断
+classification_questions:
+- 是单 sample 损坏还是整 shard tar 头损坏？
+- shard 是 NFS / 远程下载来的，还是本地拷贝？
+- 损坏是恒定（永远第 X 个 shard）还是抖动（不同时间不同 shard）？
+- 你 dataloader 有 try/except handler 吗？
+- 是否能 detect 到 corrupt shard 并跳过 + 继续？
+likely_causes:
+- 没装 handler：`webdataset` 默认 raise，挂整个 worker
+- handler 装错：`raise` instead of `warn_and_continue`
+- 单 sample 的 decode error 没单独 catch（PIL 报错就挂）
+- shard 下载未完成被读取（race condition with downloader）
+- NFS / 远程存储的 stale file handle
+- 物理介质坏（SSD bad block）
+- tar 文件本身在生成时就坏了（生成脚本未 fsync）
+minimal_checks:
+- 用 `mini_infra/data/shard_resume.py` 测试 corrupt 注入：
+  ```python
+  from mini_infra.data.shard_resume import simulate_corrupt_recovery
+  result = simulate_corrupt_recovery(\n      shards=['data/shards/*.tar'],\n      corrupt_indices=[5, 17, 42],\n      handler='warn_and_continue',\n  )\n  print(f'lost samples: {result[\"lost_samples\"]}, recovered shards: {result[\"recovered_shards\"]}')
+  ```
+- 手动跑：`python -c "import tarfile; tarfile.open('data/shards/shard-005.tar').getmembers()"`
+  快速判断 tar 头是否完好
+- 找出所有损坏 shard：
+  ```bash
+  for f in data/shards/*.tar; do
+      tar -tf "$f" >/dev/null 2>&1 || echo "BAD: $f"
+  done
+  ```
+- 检查 dataloader handler 设置：grep `webdataset` 配置代码
+- 跑 dataloader 强制全 epoch："`for batch in dl: pass`"，统计实际处理 sample 数
+minimal_fixes:
+- 装 `warn_and_continue` handler：
+  ```python
+  ds = wds.WebDataset(urls, handler=wds.warn_and_continue).decode(handler=wds.warn_and_continue)
+  ```
+- decode handler 单独装（防 PIL/json 错误）：
+  ```python
+  def safe_decode(sample):
+      try:
+          return wds.decode_pil(sample)
+      except Exception as e:
+          print(f'skip {sample.get("__key__", "?")}: {e}')
+          return None
+  ds = ds.map(safe_decode).filter(lambda x: x is not None)
+  ```
+- 续读 cursor：把 (shard_id, sample_id) 写入 checkpoint，重启时跳过已处理
+- 隔离损坏 shard：
+  ```bash
+  mkdir data/shards.broken
+  mv data/shards/shard-005.tar data/shards.broken/
+  ```
+- NFS：用 `noac` mount option 减少 cache 不一致；考虑预下载到本地 NVMe
+- 重新生成 corrupt shard（如果有源数据）
+what_not_to_do:
+- 不要 catch all Exception 然后 silent skip——你不知道丢了多少数据
+- 不要在 broken shard 上跑训练后说 "完成 1 epoch"——实际可能只完成 80%
+- 不要直接 `mv broken_shard.tar /tmp/` 当作 fix——report 必须记录哪些 shard 删了
+- 不要在 NFS 上做关键训练而不预下载到本地
+- 不要忽略 `warn_and_continue` 的输出日志——它告诉你哪些 sample 丢了
+hint_1: |
+  3 分钟法：先扫所有 shard 看哪些坏：
+  ```bash
+  cd data/shards/
+  total=0; bad=0
+  for f in *.tar; do
+      total=$((total+1))
+      if ! tar -tf "$f" >/dev/null 2>&1; then
+          bad=$((bad+1))
+          echo "BAD: $f"
+      fi
+  done
+  echo "summary: $bad / $total bad shards"
+  ```
+  如果 bad / total < 1%（如 5/1000）→ 加 handler + 隔离即可。
+  如果 bad / total > 5% → 数据生成有系统问题，先修生成 pipeline。
+
+  装 handler:
+  ```python
+  import webdataset as wds
+
+  def log_warn(exn):
+      print(f'shard error: {exn}')
+      return True   # True = continue, False = stop
+
+  ds = wds.WebDataset(urls, handler=log_warn)\n     .decode('pil', handler=log_warn)\\\n     .to_tuple('jpg;png', 'cls', handler=log_warn)
+  ```
+  跑一遍记录被 skip 的 sample 数：
+  ```python
+  total = 0
+  for sample in ds:
+      total += 1
+  print(f'processed {total} samples')
+  ```
+hint_2: |
+  Handler 已装但 sample-level 错误仍挂时，手写更细的恢复：
+
+  ```python
+  import webdataset as wds
+  from PIL import Image, UnidentifiedImageError
+  import io, json, logging
+
+  log = logging.getLogger('wds_recovery')
+
+  def safe_decode(sample):
+      out = {'__key__': sample['__key__']}
+      # JPG
+      try:
+          if 'jpg' in sample:
+              out['jpg'] = Image.open(io.BytesIO(sample['jpg'])).convert('RGB')
+          elif 'png' in sample:
+              out['png'] = Image.open(io.BytesIO(sample['png'])).convert('RGB')
+          else:
+              return None  # 无图像
+      except (UnidentifiedImageError, OSError) as e:
+          log.warning(f'image decode failed for {sample[\"__key__\"]}: {e}')
+          return None
+      # JSON metadata
+      try:
+          out['json'] = json.loads(sample.get('json', b'{}').decode())
+      except json.JSONDecodeError:
+          out['json'] = {}
+      return out
+
+  ds = wds.WebDataset(urls, handler=wds.warn_and_continue)\n     .map(safe_decode)\\\n     .filter(lambda x: x is not None)
+  ```
+
+  续读 cursor（在 multi-worker 下保不重不漏）：
+  ```python
+  # 训练 step N 时把 (epoch, shard_idx, sample_idx_within_shard) 写入 checkpoint
+  # 重启时 skip 到那个位置
+  resume_state = {'epoch': 5, 'shard_idx': 17, 'sample_idx': 234}
+  ```
+  注意 webdataset 的 multi-worker shuffle 让 sample_idx 不稳定，更可靠是按 shard 级 cursor。
+
+  日志聚合：
+  ```bash
+  # 收集所有 worker 的 warn_and_continue 输出
+  python train.py 2>&1 | tee training.log | grep "shard error\|skip" > skipped.log
+  wc -l skipped.log   # 总丢失 sample 数
+  ```
+solution: |
+  Shard 容灾的修复路径：**(1) 装 handler → (2) sample-level safe_decode → (3) cursor 续读 → (4) 隔离已知坏 shard → (5) 监控丢失率**。
+
+  **黄金配置**：
+  ```python
+  import webdataset as wds
+
+  def log_handler(exn):
+      logger.warning(f'wds error: {exn}')
+      return True
+
+  ds = (wds.WebDataset(urls, handler=log_handler, shardshuffle=100)
+        .shuffle(1000)
+        .map(safe_decode_fn)
+        .filter(lambda x: x is not None)
+        .to_tuple('jpg', 'cls')
+        .map_tuple(transform, identity)
+        .batched(64))
+  dl = DataLoader(ds, batch_size=None, num_workers=8, prefetch_factor=4, pin_memory=True)
+  ```
+
+  **必做 checklist**：
+  1. ✓ shard-level handler (`warn_and_continue` 或自定义)
+  2. ✓ sample-level safe_decode + filter None
+  3. ✓ 跑前 `tar -tf` 扫一遍所有 shard 检查
+  4. ✓ 隔离已知坏 shard（`data/shards.broken/`）
+  5. ✓ 训练后统计丢失 sample 数
+  6. ✓ 续读 cursor（如果支持长训）
+
+  **验收**：
+  - 故意注入 1 个坏 shard，训练能继续完成 epoch
+  - 日志统计的丢失 sample 数与人工标注的 corrupt sample 数吻合
+  - cursor 续读时下次重启从正确位置开始
+
+  **报告里必须写**：
+  - 总 shard 数 / 损坏 shard 数 / 隔离策略
+  - 每 epoch 实际处理 sample 数 vs 名义 sample 数（损失率）
+  - corrupt 注入实验的 recovered_shards 与 lost_samples
+  - handler 实现（贴代码段）
+  - cursor 续读策略（如有）
+
+  **SLO 建议**：
+  - 单 epoch sample 损失率 < 1%
+  - 损坏 shard 比例 < 0.5%
+  - 检测到 corrupt 后训练继续不中断
+
+  参考：`mini_infra/data/shard_resume.py`、L06.3 README、WebDataset handler docs。

@@ -1,0 +1,90 @@
+id: slime_weight_sync_003
+title: SLiME actor→rollout 权重同步过慢（rollout 使用过期 policy）
+mission: l32_slime_rl_core
+severity: medium
+symptom: |
+  SLiME RL 训练中，actor 已经更新好几百步，但 rollout（SGLang serving）产出的样本看起来还是老 policy 的行为；
+  `weight_sync_ms` 每次 > 30 秒甚至分钟级，明显拖慢整体 step time；
+  或同步周期太长导致 off-policy 严重，actor update 的 advantage 与实际 rollout 行为不符。
+error_signatures:
+- "weight_sync_ms: 42000 （量级到几十秒以上）"
+- "Ray ObjectStore: pushing X GB ... 频繁出现且慢"
+- "SGLang model update: reloading full weights, took X s"
+- "actor iteration log 显示 `time_per_iter`: forward+backward 几秒，但 total 几十秒（差值几乎全在 weight sync）"
+- 对同一 prompt，actor 更新 100 步后 rollout 输出与 actor 自己 forward 的 token 差别很大（说明 rollout 仍用旧权重）
+classification_questions:
+- Weight sync 的**传输路径**是什么：actor GPU → Ray object store → SGLang GPU？还是通过 checkpoint 文件？还是 NCCL broadcast？
+- 传输**数据量**：是传全部参数（几十 GB）还是只传 delta / LoRA adapter？
+- 同步**频率**：每个 iteration 一次，还是每 N iteration？
+- SGLang 更新方式：直接 in-place 覆盖 GPU weight，还是走 shutdown → reload？
+- 多机场景：actor 和 rollout 是否同节点？跨节点带宽多少？
+likely_causes:
+- 全量参数传输：每次同步几十 GB，NCCL / Ray object store 反复序列化传输。
+- 经过 CPU/disk 中转：actor dump 到 disk → SGLang reload，放大 IO。
+- SGLang 用了 "reload model" 重建整个 engine 而不是只替换 weight tensor。
+- NCCL 直连没开：本可以 actor ↔ rollout 直接 `dist.broadcast`，却走了 Ray 对象 store。
+- 跨节点网络瓶颈：actor 8 张 H200，rollout 在别的节点，IB 没打通走 eth。
+- 频率问题：每步同步一次是浪费；过低又造成 staleness。
+minimal_checks:
+- "在 SLiME 日志里搜 `weight_sync`，统计每次耗时和频率；把 `weight_sync_ms / total_step_ms` 算出来，> 30% 就是瓶颈。"
+- "确认同步实现路径。看 SLiME 的 `update_weights` / `sync_weights` 调用栈：是 `torch.distributed.broadcast` 还是 `ray.put` + `ray.get` 再 `load_state_dict`？"
+- "监控带宽：`ibstat` / `ethtool -S` / `nload` 看 sync 时段的带宽使用。单机 NVLink 应 > 100GB/s，跨节点 IB 应 > 20GB/s，走 eth 可能 < 10Gb/s。"
+- "测单次传输量：参数大小 = `num_params × bytes_per_param`；7B bf16 ≈ 14GB、70B bf16 ≈ 140GB。除以实际耗时得到有效带宽，与理论值对比。"
+- "对比 rollout 输出和 actor forward：同一 prompt 两边各跑一次，token 序列应完全一致（greedy 下）；不一致就说明权重没同步到。"
+minimal_fixes:
+- 首选走 **NCCL 直接 broadcast**：actor rank0 → rollout rank0 用 `dist.broadcast`，避免 Ray object store 中转。SLiME 的 `nccl_group` 配置要打通 actor + rollout 的 process group。
+- SGLang 用 **in-place weight update** API（`update_weights_from_tensor` 之类），而不是重启 engine。
+- 只同步需要变化的部分：LoRA 训练时只传 adapter（几百 MB 而不是几十 GB）。
+- 降低同步频率：每 N iteration（N=4-16）同步一次，但要和 KL/advantage 计算兼容；太大会导致 off-policy。
+- 跨节点：确保 `NCCL_SOCKET_IFNAME` 指向 IB；验证 `nccl-tests` 能达到预期带宽。
+- 参数量化同步：bf16 → fp8 传输再 upcast（收益看实现支持）。
+what_not_to_do:
+- 不要通过 disk checkpoint 做 weight sync——IO 代价巨大，是最慢的路径。
+- 不要盲目缩短同步周期——增加次数而不优化每次耗时等于雪上加霜。
+- 不要关掉 weight sync 验证对 reward 的影响——你会把 off-policy 严重性藏起来。
+- 不要在单机上测完就上跨节点，NCCL 拓扑是两种完全不同的工程问题。
+hint_1: |
+  先量化瓶颈：
+  ```bash
+  grep "weight_sync" runs/<mission>/<run>/rl.log | awk '{print $NF}' \
+    | python -c "import sys, statistics; xs=[float(x) for x in sys.stdin if x.strip()]; print('count', len(xs), 'mean_ms', statistics.mean(xs), 'p99_ms', sorted(xs)[int(len(xs)*0.99)])"
+  ```
+  同时算：
+  ```
+  actor 参数量 × bytes_per_param = 每次 sync 数据量
+  数据量 / weight_sync_ms = 实际带宽
+  ```
+  实际带宽 vs 理论带宽（NVLink 900GB/s, IB 50GB/s, Ethernet 100Gb/s）：
+  - 实际 << 理论 → 走错路径（IO / CPU / Ray obj store / socket instead of IB）。
+  - 实际 ≈ 理论 → 数据量太大，想办法减少（LoRA / delta / 同步频率）。
+hint_2: |
+  按瓶颈方向修：
+  ```
+  实际带宽 << 理论带宽
+    1. 确认同步实现：grep 代码里的 broadcast / ray.put / save_state_dict
+       理想：torch.distributed.broadcast 或 SGLang update_weights_from_tensor
+       反例：torch.save → /tmp/ckpt → SGLang load from path
+    2. 多机：检查 NCCL_SOCKET_IFNAME、nccl-tests 实测带宽
+    3. SGLang 侧：确认用 in-place update API，而不是 engine restart
+
+  带宽到位但总量太大
+    1. LoRA-only sync：只同步 adapter（MB 级）
+    2. 降低同步频率到每 4-16 iter，监控 off-policy bias（KL actor vs rollout）
+    3. bf16 / fp8 量化传输
+  ```
+  每改一项跑 10 个 iter，对比 `weight_sync_ms` 和 `reward_mean` / `kl` 是否健康。
+solution: |
+  Weight sync 的不变量：**actor 更新的权重必须「足够快、足够新鲜」地到达 rollout engine，否则 RL 是伪 on-policy**。
+  诊断与修复模板：
+  1. **量化瓶颈**：`weight_sync_ms / total_step_ms` 百分比；参数量 / sync time = 实际带宽。
+  2. **对比理论**：实际 << 理论 → 路径错；实际 ≈ 理论 → 数据量大。
+  3. **路径优化**（优先级）：
+     - NCCL broadcast 直连（actor + rollout 同 process group）
+     - SGLang `update_weights_from_tensor` 之类的 in-place API
+     - 多机 IB 打通（NCCL_SOCKET_IFNAME 到 IB 网卡）
+  4. **量优化**：
+     - LoRA-only 同步
+     - 降低同步频率 + 监控 off-policy（actor 对 rollout 样本重算 log_prob，KL 应 < 0.1）
+  5. **验证**：同 prompt 下 actor forward 与 rollout 生成 token 一致（greedy）；`weight_sync_ms / total_step_ms < 10%`；reward 正常上升。
+  报告贴：weight_sync_ms 分布（修复前后）、每次同步数据量、实际带宽、off-policy KL。
+  参考：`github_repo/slime/slime/ray/`（weight sync 实现）、`github_repo/sglang/python/sglang/srt/managers/tp_worker.py`（update_weights 接口）、labs/l32_slime_rl_core、相关 ticket: slime_reward_collapse_002、slime_rollout_bottleneck_001。

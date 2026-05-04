@@ -1,0 +1,204 @@
+mission: l23_quant_serving
+title: L08.5 Quiz · 量化 / AWQ / GPTQ / FP8
+pass_threshold: 1.0
+description: |
+  这 5 题打中量化最容易混的点：W8A16 vs W4A16 vs W4A4、per-tensor vs per-channel、
+  AWQ 与 GPTQ 的差别、FP8 比 INT8 强在哪。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l23_quant_serving/patch/task.md
+  - title: 跑 notebook n17 · quant calibration
+    kind: notebook
+    path: notebooks/n17_quant_calibration.ipynb
+  - title: 读 AWQ paper / SmoothQuant paper
+    kind: source
+    path: docs/术语表.md
+
+questions:
+  - id: q1_w8a16_meaning
+    prompt: |
+      "W8A16" 是什么意思？
+    options:
+      - id: a
+        text: weight 用 8 bit 存，激活用 16 bit 算
+        correct: true
+      - id: b
+        text: weight 8 个 channel，activation 16 个 channel
+      - id: c
+        text: 8 bit 输入，16 bit 输出
+      - id: d
+        text: 量化之后模型大小变 16/8=2 倍
+    explanation: |
+      命名约定：**W{weight_bits}A{activation_bits}**。
+        - W8A16：weight 用 INT8 存（4× 压缩 vs fp32），activation 仍 fp16 算。
+        - W4A16：weight INT4（8× 压缩），activation fp16。
+        - W4A4：weight + activation 都 INT4（推理快但精度损失大）。
+        - W8A8：SmoothQuant 默认；activation 也量化才能用 INT8 GEMM 加速。
+
+      实际权衡：
+        - 显存压力：W8A16 节省 50% weight 显存，W4A16 75%
+        - 推理速度：weight bit 数不直接加速；只有 activation 也量化（W4A4 / FP8 / W4A8）
+          才能用 dedicated INT/FP8 Tensor Core 加速 ~1.5-2x
+        - 精度：W8A16 ≈ fp16；W4A16 -1% perplexity；W4A4 -3-5%
+
+      生产部署：
+        - 边缘设备 / 单卡推理：W4A16 + AWQ（最好的精度/显存权衡）
+        - 服务器多用户高吞吐：FP8 weight + FP8 activation（H100 原生支持）
+        - 实验不在乎显存：fp16
+
+      面试金句："量化的本质 trade-off 是 显存 vs 精度 vs 计算速度，三者不可兼得。"
+
+  - id: q2_per_tensor_vs_per_channel
+    prompt: |
+      `per-tensor` 量化 vs `per-channel` 量化，区别是什么？
+    options:
+      - id: a
+        text: per-tensor 用一个 scale 量化整个 tensor；per-channel 每个 (out 或 in) 通道一个 scale
+        correct: true
+      - id: b
+        text: per-tensor 是 fp16，per-channel 是 fp32
+      - id: c
+        text: per-tensor 用于 weight，per-channel 用于 activation
+      - id: d
+        text: 两者数学等价
+    explanation: |
+      量化公式：`int_x = round(x / scale).clamp(...)`，scale 用来把 fp 范围映射到 [-127, 127]。
+
+      **Per-tensor (1 个 scale)**：
+        - 整个 tensor 共用一个 scale = max(|x|) / 127
+        - 简单、显存几乎 0 开销
+        - 缺点：tensor 内部 channel 分布差异大时精度差
+          （outlier channel 主导 scale，其它 channel 用不上 INT8 全范围）
+
+      **Per-channel (out_features 个 scale)**：
+        - 每个 output channel 一个 scale
+        - 显存：scale tensor 大小 = (out_features,) × fp16 = 几 KB
+        - 优点：每个 channel 用全部 [-127, 127] 范围，精度高 5-10×
+
+      **Per-group (groups × scale)**：
+        - GPTQ / AWQ 标准：每 (out_features, group_size) 一个 scale，group_size=128 常见
+        - 折中：精度 ≈ per-channel，显存 < per-channel
+
+      Activation：通常只能 per-tensor 量化（per-channel 需要 dynamic scale 计算开销大）。
+      但 SmoothQuant 通过 weight side 吸收 activation outlier，让 per-tensor act 量化也准确。
+
+      Megatron / vLLM 量化默认 per-channel weight + per-tensor activation。
+
+  - id: q3_awq_vs_gptq
+    prompt: |
+      AWQ 和 GPTQ 都是 W4 量化方法，核心区别是什么？
+    options:
+      - id: a
+        text: 没区别
+      - id: b
+        text: GPTQ 用二阶 Hessian 信息 + 顺序量化（每量化一列就更新剩余列）；
+              AWQ 用 activation 统计计算 per-channel scale（保护 salient weights 不被破坏）
+        correct: true
+      - id: c
+        text: AWQ 只能用于 weight，GPTQ 只能用于 activation
+      - id: d
+        text: GPTQ 是 W4，AWQ 是 W8
+    explanation: |
+      **GPTQ** (Frantar 2023)：
+        - 基于 Optimal Brain Quantization (OBQ) 算法
+        - 利用 Hessian 矩阵指导每个 weight 量化方向
+        - 实现：列方向迭代量化，每量化一列就用 Hessian 调整剩余列
+        - 优点：理论最优（Hessian-aware）；W4 精度损失小
+        - 缺点：校准需要前向 + 求 Hessian，慢（30min 量化 7B 模型）
+
+      **AWQ** (Lin 2023)：
+        - 观察：1% 的 "salient weights" 决定模型 99% 精度
+        - 这些 salient weights 与 activation outlier 对齐
+        - 算法：用 activation amax 计算 per-channel scale，让 salient weight 通道 scale 大
+          → 量化时这些通道用更大的 scale → 精度更高
+        - 优点：校准只需 forward，快（5min 量化 7B 模型）；INT4 后接近 fp16 精度
+        - 缺点：理论上次于 GPTQ；但实测差距很小
+
+      生产推荐：
+        - W4 部署首选 AWQ（速度快、精度够）
+        - 极端精度敏感（医学 / 法律 LLM）用 GPTQ + 长校准
+        - W4 + GPTQ + AWQ 联用（先 AWQ scale，再 GPTQ 量化）见过更好结果
+
+      vLLM / TGI / SGLang 都原生支持 AWQ + GPTQ 加载。
+
+  - id: q4_fp8_vs_int8
+    prompt: |
+      H100 / B100 同时支持 INT8 和 FP8。FP8 的优势是什么？
+    options:
+      - id: a
+        text: 压缩率更高
+      - id: b
+        text: 动态范围更大（FP8 的 e4m3 范围 ~448，e5m2 ~57000；INT8 只有 ±127）。
+              不需要 calibration 也不会 overflow，训练时直接用更稳
+        correct: true
+      - id: c
+        text: 比 INT8 慢但更精确
+      - id: d
+        text: 是软件优化，硬件支持上 INT8 等价
+    explanation: |
+      **INT8**：
+        - 范围 ±127，离散均匀
+        - 必须 calibration 选 scale；scale 错了就 saturation 或精度差
+        - 适合分布稳定的 weight；activation 因 outlier 难量化
+
+      **FP8 (e4m3 / e5m2)**：
+        - e4m3：4 exponent + 3 mantissa，范围 ±448，精度高
+        - e5m2：5 exponent + 2 mantissa，范围 ±57000，范围大
+        - 浮点表示：sign × mantissa × 2^exponent
+        - **动态范围 ~256× INT8**，不容易 overflow / underflow
+
+      训练用 FP8 (NVIDIA Transformer Engine, NeMo)：
+        - 不需要 calibration，每 step 自动 amax track
+        - weight grad / activation 都能用 FP8
+        - 训练吞吐 1.5-2× vs FP16，精度几乎无损
+
+      推理用 FP8：
+        - 与 FP16 精度差距 < 0.5pp（vs INT4 AWQ 差 1-3pp）
+        - 适合高质量服务（GPT-4 / Claude API 用 FP8）
+
+      硬件加速：
+        - H100 INT8 = 3958 TOPS，FP8 = 1979 TFLOPS（INT8 算力更高）
+        - 但 FP8 不需要 dequant + INT8 GEMM 的 wrapper，端到端更快
+
+      面试金句："FP8 是为大模型生的——动态范围解决 INT8 calibration 痛点。"
+
+  - id: q5_quant_aware_training
+    prompt: |
+      Post-training quantization (PTQ) 与 Quantization-aware training (QAT) 的差别？
+    options:
+      - id: a
+        text: PTQ 用 fp16，QAT 用 int8
+      - id: b
+        text: PTQ 在已训练的 fp16 模型上事后量化；
+              QAT 训练时就插入 fake quantize 节点，模型学会"量化后的"权重分布
+        correct: true
+      - id: c
+        text: PTQ 更准确，QAT 更快
+      - id: d
+        text: 两者数学等价
+    explanation: |
+      **PTQ** (post-training quantization)：
+        - 训练完一个 fp16 模型 → 用一小部分校准数据 → 量化为 INT8/INT4
+        - 优点：快、便宜、不需要原数据集
+        - 缺点：精度损失（W4 通常 -1-3%）
+        - 代表：AWQ / GPTQ / SmoothQuant
+        - 适合：已发布模型再压缩、原数据丢了
+
+      **QAT** (quantization-aware training)：
+        - 训练时插入 fake quantize：W → quantize → dequantize → W'，但梯度透传
+        - 模型学到的权重分布天然适合量化
+        - 优点：W4 精度损失 < 0.5%
+        - 缺点：需要重训（1 epoch 也行），需要训练数据
+        - 代表：QLoRA（W4 + LoRA fine-tune）
+
+      生产实践：
+        - 推理服务通常 PTQ + AWQ（够用，便宜）
+        - 极致部署（手机端 7B）QAT 必备
+        - QLoRA 是 PTQ + QAT 混合（W4 PTQ + LoRA 训练补救）
+
+      Capstone Stage B 你部署 0.5B 多模态模型时：W8A16 PTQ 已经够（精度损失 < 1%），
+      不需要 QAT。
+
+      面试金句："PTQ 量化已存在的模型，QAT 训练量化友好的模型——前者补救，后者主动。"

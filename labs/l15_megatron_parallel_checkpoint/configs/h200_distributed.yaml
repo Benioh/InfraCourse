@@ -1,0 +1,22 @@
+profile: h200_distributed
+checkpoint_iteration: 1000
+states:
+  model_state: {note: "real Megatron uses sharded tensors; this drill uses placeholders"}
+  optimizer_state: {distributed: true}
+  scheduler_state: {step_count: 1000, last_lr: 3.0e-4}
+  parallel_state: {tp: 2, pp: 2, dp: 2, ep: 1}
+expected_compatibility:
+  - label: same_topology
+    parallel_state: {tp: 2, pp: 2, dp: 2}
+    must_pass_strict: true
+  - label: tp_quadrupled
+    parallel_state: {tp: 8, pp: 1, dp: 1}
+    must_pass_strict: false
+megatron_save_command: >
+  torchrun --nproc_per_node=8 github_repo/Megatron-LM/pretrain_gpt.py
+  --save artifacts/checkpoints --save-interval 500
+  --tensor-model-parallel-size 2 --pipeline-model-parallel-size 2
+megatron_load_command: >
+  torchrun --nproc_per_node=8 github_repo/Megatron-LM/pretrain_gpt.py
+  --load artifacts/checkpoints
+  --tensor-model-parallel-size 2 --pipeline-model-parallel-size 2

@@ -1,0 +1,50 @@
+id: l13_moe_ep
+title: MoE Top-2 Router + Capacity + Aux Loss
+level: L05.5
+act: 第 1 章：训练框架
+role: MoE 学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - Megatron MoE (对照)
+  - Switch Transformer (对照)
+
+patch:
+  description: |
+    实现 top2_router(logits, capacity_factor)：返回 dispatch_mask、combine_weights、
+    aux_loss。包含 softmax + topk + scatter + capacity 限制 + Switch 风格负载均衡 loss。
+  task_md: labs/l13_moe_ep/patch/task.md
+  starter_file: labs/l13_moe_ep/patch/starter/moe_router.py
+  reference_file: labs/l13_moe_ep/patch/reference/moe_router.py
+  test_command: make patch-test M=l13_moe_ep
+  status_file: labs/l13_moe_ep/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比 + 行为契约
+
+source_reading:
+  - title: Switch Transformer paper Section 3 (router + aux loss)
+    repo_path: docs/术语表.md
+    focus: 公式 (3) (4) 与本关 patch 一一对应
+  - title: Megatron MoE 实现
+    repo_path: github_repo/Megatron-LM/megatron/core/
+
+mini_infra_targets:
+  - mini_infra/megatron/
+
+notebooks:
+  - notebooks/n15_moe_router_capacity.ipynb
+
+tickets:
+  - moe_router_collapse_001
+  - moe_capacity_overflow_002
+  - moe_alltoall_slow_003
+
+prereq: l11_megatron_scale_optimization
+next_lab: l15_megatron_parallel_checkpoint
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 分布式 EP all-to-all 验证（可选）

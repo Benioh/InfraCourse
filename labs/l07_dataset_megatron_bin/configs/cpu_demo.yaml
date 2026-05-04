@@ -1,0 +1,21 @@
+profile: cpu_demo
+input:
+  jsonl_path: data/wikitext_demo/train.jsonl
+  generate_demo_if_missing: true
+  demo_lines: 100
+output:
+  prefix: data/wikitext_demo/indexed/wikitext_text_document
+tokenizer:
+  kind: char_mod_30k    # 字节 → (ord % 30000) + 1，演示用
+dtype: int32
+acceptance:
+  min_samples: 50
+  min_total_tokens: 500
+megatron_command_template: >
+  torchrun --nproc_per_node=1 github_repo/Megatron-LM/pretrain_gpt.py
+  --data-path {prefix}
+  --tokenizer-type GPT2BPETokenizer
+  --num-layers 12 --hidden-size 768 --num-attention-heads 12
+  --seq-length 1024 --max-position-embeddings 1024
+  --micro-batch-size 2 --global-batch-size 16 --train-iters 200
+  --lr 3e-4 --bf16

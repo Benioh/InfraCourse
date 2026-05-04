@@ -1,0 +1,49 @@
+id: l19_vllm_serving_baseline
+title: typical_p Sampling Filter
+level: L07
+act: 第 3 章：推理服务
+role: vLLM 学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - vLLM (对照)
+
+patch:
+  description: |
+    实现 Locally Typical Sampling (Meister 2022) 的 logits filter：
+    保留 surprisal 接近期望信息量的 token，剔除 outlier。可用于替代 / 补充
+    top_p / top_k。
+  task_md: labs/l19_vllm_serving_baseline/patch/task.md
+  starter_file: labs/l19_vllm_serving_baseline/patch/starter/typical_p.py
+  reference_file: labs/l19_vllm_serving_baseline/patch/reference/typical_p.py
+  test_command: make patch-test M=l19_vllm_serving_baseline
+  status_file: labs/l19_vllm_serving_baseline/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比 + 行为契约
+
+source_reading:
+  - title: vLLM sampler 源码
+    repo_path: github_repo/vllm/vllm/sampling_params.py
+    focus: 看 SamplingParams 的所有可选 filter（top_p, top_k, typical_p, min_p）
+
+mini_infra_targets:
+  - mini_infra/vllm/
+
+notebooks:
+  - notebooks/n07_kv_cache.ipynb
+  - notebooks/n08_prefill_decode.ipynb
+
+tickets:
+  - vllm_memory_pressure_001
+  - vllm_bad_chat_template_002
+  - vllm_port_conflict_003
+
+prereq: l18_data_engineering
+next_lab: l20_vllm_scheduler_kv
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 真 vLLM serving 验证（可选）

@@ -1,0 +1,139 @@
+id: dedup_collision_002
+title: MinHash 报出大量伪近重复，正常多样性样本被误删
+mission: l18_data_engineering
+severity: medium
+symptom: |
+  跑 minhash dedup 后：
+  (a) `dedup_ratio > 30%`（删了 30%+ 数据，远超预期 5-15%）；
+  (b) 抽查"近重复对" 发现内容差异其实很大；
+  (c) 删完后训练 loss 收敛速度反而变慢（正常去重应该加快）；
+  (d) `near_dup_pairs` 数远高于真值（有 ground truth 子集时可对照）。
+error_signatures:
+- "dedup_ratio > 0.30 in non-curated dataset"
+- "false positive rate > 0.10（如有标注）"
+- "near_dup_pairs / total_samples > 0.50"
+- "不同 LSH band 设置下 dedup_ratio 差异 > 5x"
+- "随机 sample 100 对 near-dup 人工检查后 < 50% 真重复"
+classification_questions:
+- num_perm（哈希数）多少？默认 128 还是更小？
+- LSH band × row 的乘积是否等于 num_perm？
+- jaccard 阈值多少？0.5/0.7/0.9？
+- shingle size 多少？n-gram 取 1（单词）/ 3 / 5？
+- 数据类型：纯文本 / 代码 / 多语言？不同类型最优阈值不同
+likely_causes:
+- num_perm 太低（如 32）：签名分辨率不够，假阳性高
+- band/row 选错：band 太多 → 召回多但精度低
+- shingle size 太小（n=1）：单词级近似让所有同语言文本相似
+- jaccard 阈值太低（如 0.5）：把"主题相同"误判为"近重复"
+- 没去停用词：高频词 dominate jaccard 相似度
+- 文档长度差异大：短文档 vs 长文档 jaccard 自然偏低，但 minhash 可能高估
+- 跨语言 / 多 domain：未分桶，短文 vs 长文混在一起
+minimal_checks:
+- 用 `mini_infra/data/minhash_dedup.py` 在合成数据上测召回率与精度：
+  ```python
+  # 构造已知 ground truth: 100 个原 + 10 个 near-dup（真重复）+ 90 个独立
+  # 跑 minhash 看 detected pairs 与 ground truth 的 precision/recall
+  ```
+- 抽 50 对 detected pairs 人工看：
+  - 阈值 0.7 时应有 80%+ 真重复
+  - 阈值 0.5 时只有 50%
+- 不同 num_perm 跑同数据：64/128/256，看 dedup_ratio 是否稳定
+- 不同 shingle size 跑：n=1/3/5，看 dedup_ratio 差几倍
+- 用 simhash 或精确 jaccard 在小子集上做 cross-check
+minimal_fixes:
+- num_perm 升到 128 或 256（精度↑，速度↓）
+- band × row = num_perm，调整后看效果：
+  - 高召回低精度: band 多 row 少（如 32 × 4）
+  - 高精度低召回: band 少 row 多（如 8 × 16）
+- shingle size = 5（5-word n-gram）：比 single word 精度高
+- jaccard 阈值提到 0.7-0.85：业界默认
+- 去停用词 / 标准化（lowercase, strip punctuation）后再 hash
+- 按文档长度分桶：短 vs 长不要互相比
+- 多语言：按 lang 分别 dedup，再汇总
+what_not_to_do:
+- 不要拍脑袋设阈值——必须在 ground truth 子集上量化 precision/recall
+- 不要把 near_dup_pairs 数量大就当成"去重很有效"
+- 不要"为了更激进"把 jaccard 阈值降到 0.5——实际是误删
+- 不要在没看 sample 的情况下信 dedup_ratio——它可能是假阳性
+- 不要把 dedup 跑一遍就以为永远正确——数据增量后要重跑
+hint_1: |
+  3 分钟法：构造 ground truth 测精度。
+  ```python
+  from mini_infra.data.minhash_dedup import minhash_dedup_summary  # 假设有
+  import random
+
+  base_texts = [\n      \"the quick brown fox jumps over the lazy dog\",\n      \"machine learning is a subset of artificial intelligence\",\n      \"python is a high level programming language\",\n      \"deep learning models are trained on large datasets\",\n  ]\n\n  # 添加真重复（近似改写）+ 独立样本\n  near_dups = [(t, t.replace('the', 'a')) for t in base_texts]   # 真 near-dup\n  independents = [\"completely different topic about \" + str(i) for i in range(100)]\n\n  all_texts = base_texts + [d for _, d in near_dups] + independents\n  ground_truth_pairs = [(i, len(base_texts) + idx) for idx, i in enumerate(range(len(base_texts)))]\n\n  # 跑你的 minhash 配置\n  detected = run_minhash(all_texts, num_perm=128, threshold=0.7, shingle=3)\n  tp = len(set(detected) & set(ground_truth_pairs))\n  fp = len(detected) - tp\n  fn = len(ground_truth_pairs) - tp\n  print(f'precision = {tp/(tp+fp):.3f}, recall = {tp/(tp+fn):.3f}')\n  ```\n  目标：precision > 0.85, recall > 0.7。如果 precision 显著低 → 阈值 / num_perm / shingle 调高。
+hint_2: |
+  Minhash 调参公式速记：
+
+  ```\n  Pr(LSH 检测到 jaccard=s 的对) = 1 - (1 - s^r)^b\n  ```
+  其中 b = num_bands, r = rows_per_band。绘制曲线找你想要的"S 形拐点"位置。
+
+  常用配置：
+  | num_perm | b × r | 检测拐点（jaccard） |
+  |---|---|---|
+  | 128 | 32 × 4 | 0.55 |
+  | 128 | 16 × 8 | 0.7 |
+  | 128 | 8 × 16 | 0.83 |
+  | 256 | 32 × 8 | 0.7 |
+
+  按 jaccard 阈值倒推（你想检测 0.7+）→ 选 num_perm=128, b=16, r=8。
+
+  Shingle size 经验：
+  - n=1（单词级）: 太宽松，自然语言文档间易似
+  - n=3（三元词）: 标准，平衡
+  - n=5（五元词）: 严格，适合代码 / 结构化文本
+  - n=8+（字节级）: 检测精确复制粘贴
+
+  常见 fix 序：
+  1. shingle 1 → 3
+  2. num_perm 64 → 128
+  3. 阈值 0.5 → 0.7
+  4. 加 lowercase + strip punctuation
+  5. 按 doc length 分桶
+
+  Cross-check：在 1k 样本上用精确 jaccard（O(N²)）算 ground truth pairs，与 minhash 对比。
+solution: |
+  Minhash dedup 的修复路径：**(1) 构造 ground truth → (2) 量 precision/recall → (3) 调 num_perm/shingle/threshold → (4) 按 lang/length 分桶**。
+
+  **推荐起始配置**（中等规模文本）：
+  ```python
+  config = {
+      'num_perm': 128,
+      'shingle_size': 3,        # 3-gram
+      'jaccard_threshold': 0.7,
+      'bands': 16,
+      'rows_per_band': 8,       # b × r = num_perm
+      'normalize': 'lowercase + strip_punctuation',
+  }
+  ```
+
+  **代码场景**（较严格）：
+  ```python
+  config = {'num_perm': 256, 'shingle_size': 5, 'jaccard_threshold': 0.85,
+            'bands': 32, 'rows_per_band': 8}
+  ```
+
+  **多语言**：按 lang 分别 dedup，最后用唯一 doc_id 合并。
+
+  **必做 checklist**：
+  1. ✓ 构造 100-1000 sample 的 ground truth（含已知近重复）
+  2. ✓ precision > 0.85 在你的 threshold 下
+  3. ✓ recall > 0.7
+  4. ✓ 按 doc length 分桶（短/中/长）
+  5. ✓ 多语言分别 dedup
+  6. ✓ 删除前 dump 一份 dedup_pairs.json 供 audit
+
+  **报告里必须写**：
+  - ground truth 子集的 precision/recall
+  - 三组配置（threshold 0.5/0.7/0.85）的 dedup_ratio + acc 影响
+  - 抽查 50 对 detected pairs 的人工真重复率
+  - 是否分桶（lang/length）
+  - dedup 后训练前 100 step loss 对比（去重是否真加速收敛）
+
+  **危险信号**（任一触发就要回头查）：
+  - dedup_ratio > 30%（除非你明知数据脏）
+  - precision < 0.7
+  - 删完后 loss 收敛变慢
+
+  参考：`mini_infra/data/minhash_dedup.py`、`docs/术语表.md#minhash--lsh`、L06.3 README、datasketch documentation。

@@ -1,0 +1,111 @@
+id: kernel_oom_smem_002
+title: Triton kernel SMEM 溢出（out of resource: shared memory）
+mission: l04_gpu_kernel
+severity: high
+symptom: |
+  把 BLOCK_SIZE 从 1024 调到 2048 或 4096 后，Triton 编译时直接报错，未进入运行：
+  `triton.compiler.errors.OutOfResources: out of resource: shared memory, Required: 98304, Hardware limit: 49152`。
+  常见情境：你想"用更大的 block 减少 launch 开销"或者刚开始写 kernel 没意识到 SMEM 是稀缺资源。
+error_signatures:
+- "triton.compiler.errors.OutOfResources: out of resource: shared memory"
+- "Required: <X> bytes, Hardware limit: <Y> bytes"
+- "Required: <X> registers, Hardware limit: <Y> registers"（同源问题，SMEM/寄存器都是 SM 资源）
+- "PTXAS error: Entry function uses too much shared data"
+- 在 H100/H200 上没事，搬到 4090 上就 OOM（消费卡 SMEM 比数据中心卡少）
+classification_questions:
+- 错的是 shared memory 还是 registers？两者都属于 SM 资源但 fix 路径不同
+- BLOCK_SIZE × dtype_bytes × 中间缓冲数 是多少？心里先估一遍
+- num_warps 是多少？num_warps × BLOCK_SIZE 决定了寄存器压力
+- 是 4090 上 OOM 还是 H100/H200 上 OOM？查 device 的 `smem_kb_per_sm`
+- 用了 `num_stages` > 2 吗？pipeline stage 会复制 SMEM
+likely_causes:
+- BLOCK_SIZE 太大：每行 BLOCK_SIZE × 4 bytes (fp32) 直接占满 SMEM
+- 中间缓冲过多：online softmax 你保留了 (x, exp, sum, max) 四份，其实只需 2 份
+- 用 `num_stages=4` 做 software pipelining，SMEM × 4
+- 多维 BLOCK：(BLOCK_M=128, BLOCK_N=128) 时实际 SMEM = 128*128*4*N（N=stage 数）
+- dtype 没降：本来可以 fp16 计算，一直在 fp32
+minimal_checks:
+- 算账：`SMEM_required ≈ BLOCK_SIZE × dtype_bytes × num_buffers × num_stages`
+  4090 的 `smem_kb_per_sm` 是 100KB。`mini_infra/gpu/memory_model.py:GPU_PROFILES["rtx4090"]` 有规格表
+- 看 PTXAS 报错信息里 `Required: <X>`，与你估算的 X 是否一致——不一致说明你少算了一个 buffer
+- 把 BLOCK_SIZE 临时减半，OOM 是否消失——是 → 100% SMEM；否 → 是 register spill
+- `triton.compiler.compile(...).asm['ptx']` 看 PTX，搜索 `.shared` 段总大小
+- 用 `ncu --set basic --kernel-name <kernel>` 看 `Shared Memory Configuration Size`
+minimal_fixes:
+- BLOCK_SIZE 减半（如 2048 → 1024），同时把 `num_warps` 减半保持 occupancy
+- num_stages 从 4 降到 2 或 3，SMEM 立减
+- 把累加器 dtype 从 fp32 降到 bf16（精度风险：online softmax 必须 fp32 累加，不能降）
+- Split-K：把一行切成两半，分两个 program 跑，最后 reduce
+- 重新设计：不用 online，改成 two-pass（pass 1 求 max+sum，pass 2 算 exp/sum）——SMEM 复用 → 减半
+what_not_to_do:
+- 不要把 BLOCK_SIZE 加大期望"更快"——4090 上 BLOCK=2048 反而比 BLOCK=512 慢
+- 不要把 online softmax 的 `running_max` `running_sum` 累加器从 fp32 降到 fp16——数值会崩
+- 不要在 4090 上盲跑 H200 的 BLOCK_SIZE 配方——SMEM 容量不一样
+- 不要用 try/except 包 OutOfResources——这是编译期错误，不是运行期，无法吞掉
+hint_1: |
+  最快的 fix 是先算账。运行：
+  ```python
+  from mini_infra.gpu.memory_model import GPU_PROFILES
+  profile = GPU_PROFILES["rtx4090"]
+  print(f"4090 SMEM/SM = {profile.smem_kb_per_sm} KB")
+  block_size = 2048
+  dtype_bytes = 4  # fp32 累加
+  num_buffers = 4  # x, exp, max, sum
+  num_stages = 2
+  required_kb = block_size * dtype_bytes * num_buffers * num_stages / 1024
+  print(f"required = {required_kb:.1f} KB, fits = {required_kb <= profile.smem_kb_per_sm}")
+  ```
+  如果 required > smem_kb_per_sm → 必须减 BLOCK_SIZE 或减 num_buffers/num_stages。
+
+  最简单的两个减法：
+  - `BLOCK_SIZE = 1024`（最优先）
+  - `num_stages = 2`（如果你之前 ≥ 3）
+hint_2: |
+  仍然 OOM 时，问题通常是 num_buffers 计算错了。Triton 编译器会为：
+  - `tl.load` 的源
+  - `tl.exp(...)` 的临时结果
+  - reduction 的累加器
+  - 用作 mask 的辅助张量
+  各分配 SMEM。重写时把所有中间变量"原地复用"：
+  ```python
+  # 不好：3 个 SMEM buffer
+  x = tl.load(...)
+  e = tl.exp(x - tl.max(x, axis=0))
+  out = e / tl.sum(e, axis=0)
+
+  # 好：2 个 SMEM buffer（x 直接被覆盖）
+  x = tl.load(...)
+  x = tl.exp(x - tl.max(x, axis=0))
+  x = x / tl.sum(x, axis=0)
+  ```
+  仍然不够就上 split-K：把一行切两半，每个 program 处理一半，最后 atomic 或第二阶段 reduce。
+
+  也可以换 two-pass：
+  ```python
+  # pass 1: row max
+  # pass 2: row sum + output
+  ```
+  SMEM 减半但 HBM 读两次——通常 SMEM 是更稀缺资源，用 HBM 换 SMEM 是合算的。
+solution: |
+  SMEM OOM 的根因永远是 `BLOCK_SIZE × num_buffers × num_stages × dtype_bytes` 超过 SM 限额。修复路径：
+
+  1. **算账**：用 `mini_infra/gpu/memory_model.py:GPU_PROFILES` 查目标硬件 SMEM 限额，与所需对比。
+  2. **优先级**：BLOCK_SIZE 减半 > num_stages 减少 > 复用 buffer > split-K > two-pass。
+     在 4090 上 BLOCK_SIZE=1024 + num_stages=2 + num_warps=4 是稳妥起点。
+  3. **保留 fp32 累加**：online softmax 的 `running_max`/`running_sum` 不能降精度，否则
+     `max_abs_err` 会从 1e-6 跳到 1e-2。降精度只能降"已经稳定的"x、e、output。
+  4. **报告里必须写**：原 BLOCK_SIZE / 报错的 Required 字节 / 你算账后的预估 / 修复后的
+     occupancy 与 bandwidth_gbs / 是否走 split-K 或 two-pass。
+  5. **跨硬件部署**：H200 上的 BLOCK_SIZE 配方搬到 4090 不一定可行；用 `next_power_of_2(n_cols)`
+     和 `triton.runtime.driver.active.utils.get_device_properties` 做硬件感知。
+
+  典型修复 diff：
+  ```diff
+  - BLOCK_SIZE = 2048
+  - num_stages = 4
+  + BLOCK_SIZE = 1024
+  + num_stages = 2
+  ```
+  甜区参考：`labs/l04_gpu_kernel/configs/default.yaml`。
+
+  参考：`mini_infra/gpu/memory_model.py:occupancy_estimate`、Triton autotune 文档、L01.7 README Stuck Checklist。

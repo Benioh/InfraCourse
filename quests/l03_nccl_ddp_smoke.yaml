@@ -1,0 +1,49 @@
+id: l03_nccl_ddp_smoke
+title: 手写 ManualDDP（grad all-reduce）
+level: L01.5
+act: 第 0 章：分布式系统基础
+role: NCCL/DDP 学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch Distributed
+
+patch:
+  description: |
+    不用 torch.nn.parallel.DistributedDataParallel，自己写 ManualDDP：
+    forward 不通信，backward 之后调 synchronize_grads() 把所有 rank 的
+    grad 用 dist.all_reduce(SUM) 求和再除以 world_size。
+  task_md: labs/l03_nccl_ddp_smoke/patch/task.md
+  starter_file: labs/l03_nccl_ddp_smoke/patch/starter/manual_ddp.py
+  reference_file: labs/l03_nccl_ddp_smoke/patch/reference/manual_ddp.py
+  test_command: make patch-test M=l03_nccl_ddp_smoke
+  status_file: labs/l03_nccl_ddp_smoke/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比（与 PyTorch DDP grad 等价）
+
+source_reading:
+  - title: PyTorch DDP reducer 设计
+    repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+    focus: 看 ParallelDims 如何把 DDP/TP/PP/CP 维度组装在一起
+  - title: MiniInfra collective 实现
+    repo_path: mini_infra/distributed/collectives.py
+    focus: all_reduce 在主线骨架里如何被调用
+
+mini_infra_targets:
+  - mini_infra/distributed/collectives.py
+
+notebooks:
+  - notebooks/n03_ddp_collectives.ipynb
+
+tickets:
+  - dist_wrong_world_size_001
+  - dist_rank_hang_002
+
+prereq: l02_pytorch_systems
+next_lab: l04_gpu_kernel
+
+gpu_modes:
+  local: CPU gloo 即可
+  cluster: 2×4090 / 8×H200 nccl 对照

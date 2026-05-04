@@ -1,0 +1,221 @@
+mission: l17_megatron_multimodal_data
+title: L06 Quiz · 多模态数据 / token 占位 / 序列拼接
+pass_threshold: 1.0
+description: |
+  这 5 题打中多模态数据管道最容易设计错的点：占位 token 策略、attention mask
+  与 modality mask 的关系、变长音频 padding、image patch 数量与 hidden dim 的关系、
+  以及 LLaVA / Qwen-VL / Qwen-Audio 的实际做法。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l17_megatron_multimodal_data/patch/task.md
+  - title: 读 LLaVA-1.5 paper Section 3 (visual instruction tuning)
+    kind: source
+    path: docs/术语表.md
+  - title: 读 mini_infra/data 数据流
+    kind: source
+    path: mini_infra/data/
+
+questions:
+  - id: q1_image_token_strategy
+    prompt: |
+      LLaVA / Qwen2-VL 处理图像时，把图像在 sequence 里"占多少个 token"？
+    options:
+      - id: a
+        text: 1 个特殊 [IMG] token（CLIP CLS embedding 直接当一个 token）
+      - id: b
+        text: 由图像分辨率和 patch_size 决定，比如 224×224 + patch=14 → 16×16=256 个 token；
+              这些 token 的 embedding 来自 image encoder 的 patch 特征
+        correct: true
+      - id: c
+        text: 整张图共享 1 个 token，但用 cross-attention 融入
+      - id: d
+        text: 多少个 token 是随机的，看模型大小
+    explanation: |
+      现代多模态 LLM 的标准做法（LLaVA / Qwen2-VL / Llama-3.2 Vision）：
+        - 图像通过 ViT/CLIP 输出 N 个 patch embedding（N = (H/patch_size)²）
+        - 文本里的 `<image>` 占位被替换为这 N 个 embedding
+        - LLM 看到的是一个长 sequence: `[image_embed_1, ..., image_embed_N, text_token_1, ...]`
+
+      具体数字：
+        - LLaVA-1.5：224×224 / 14 = 16×16 = **256 image tokens**（CLIP-ViT-L/14）
+        - LLaVA-1.6：动态分辨率，最多 5 × 256 = **1280 tokens** 一张图
+        - Qwen2-VL：dynamic resolution，14×14 patch + window pooling，token 数 ∝ 像素数
+        - 高分辨率 OCR：token 数可能 > 4000 单图
+
+      为什么这样：image 信息密度低（一个 patch ≈ 14×14×3 = 588 像素 → 1 个 embedding），
+      但语义需要保持空间结构。N 个 token 让 LLM 能 attention 到任意 patch。
+
+      面试金句："多模态 LLM 的 image token 不是 'image' 这个概念，而是 'image 的 N 个空间位置'。"
+
+  - id: q2_attention_mask_modal_mask
+    prompt: |
+      在多模态 sequence `[img_1..img_N, audio_1..audio_M, text_1..text_T]` 里，
+      `attention_mask` 和 `modal_type_ids` 的区别是什么？
+    options:
+      - id: a
+        text: 完全等价，叫法不同
+      - id: b
+        text: attention_mask 控制"哪些 token 在 attention 里被计算"（区分真实 vs padding）；
+              modal_type_ids 标识"每个真实 token 来自哪种模态"（image/audio/text），
+              用于在 forward 中应用不同的 embedding 替换、不同的 LayerNorm 等
+        correct: true
+      - id: c
+        text: attention_mask 是布尔，modal_type_ids 是 float
+      - id: d
+        text: attention_mask 只用于 inference，modal_type_ids 只用于 training
+    explanation: |
+      两个 mask 各管各的事，**正交但都必须**：
+
+      **attention_mask** (B, S) bool：
+        - True = 该位置是真实 token，参与 attention 计算
+        - False = padding，attention score 加上 -inf 后被 mask 掉
+        - 一旦决定，整个 forward 不再变
+
+      **modal_type_ids** (B, S) int：
+        - 0/1/2 三种模态标识，**真实 token 的额外属性**
+        - forward 第一步（embedding lookup）就用它分发：
+          ```python
+          emb = torch.zeros(B, S, hidden)
+          emb[modal_type_ids == 0] = text_embed(input_ids[modal_type_ids == 0])
+          emb[modal_type_ids == 1] = image_proj(pixel_features)  # 来自 ViT
+          emb[modal_type_ids == 2] = audio_proj(audio_features)  # 来自 Whisper enc
+          ```
+        - 也可以用于 modality-specific LayerNorm / position embedding
+
+      具体来源：
+        - input_ids 里 image 位置是 placeholder（如 IMAGE_TOKEN_ID=1），需要被替换
+        - pixel_values 才是真正的视觉信息，通过 ViT → projector → 替换到 emb 里
+
+      面试 trick：被问"多模态 LLM 怎么处理 placeholder token"，能说出这两个 mask 的
+      正交分工就是熟练工。
+
+  - id: q3_audio_padding
+    prompt: |
+      你的 collator 收到一个 batch：
+        item 0: audio 长 32 帧
+        item 1: audio 长 80 帧
+      `max_audio_frames = 64`。collate 之后两个 audio 各应该是什么形状？
+    options:
+      - id: a
+        text: 都是 (32, 80)（截到最短）
+      - id: b
+        text: 都是 (80, 80)（pad 到最长）
+      - id: c
+        text: item 0 → (64, 80) pad 到 max；item 1 → (64, 80) 截断到 max
+        correct: true
+      - id: d
+        text: 一个 (32, 80)，一个 (80, 80)，由 audio_mask 标记
+    explanation: |
+      `max_audio_frames` 是**全局上限**——超过就截断，不超过就 pad 到 max。
+
+      原因：训练时 batch 内所有 audio 必须同形状才能 stack，且 max 决定了模型能处理的
+      最长音频（推理时也一样）。
+
+      具体策略：
+        - item 0 (T=32 < max=64)：pad 到 64，audio_mask[:32]=True，[32:]=False
+        - item 1 (T=80 > max=64)：截到 64，audio_mask 全 True
+
+      Why pad to fixed size, not batch-max？因为：
+        1. 推理时一次只来一个 audio，没有 batch；用全局 max 才能复用 KV cache shape
+        2. 训练 throughput 一致（每 batch 都是 max 不会忽快忽慢）
+        3. modal_type_ids 设计简单（位置数固定）
+
+      代价：浪费一些计算（T=32 也要算 64 帧）。Whisper / Qwen-Audio 都接受这个 tradeoff。
+      高效版本（如 Whisper-Distil）会按 30 秒分桶 (chunked inference) 减少浪费。
+
+      面试金句："多模态 collator 的 max_seq 不是数学要求，是工程取舍——固定 shape
+      换 batch / KV cache 一致性。"
+
+  - id: q4_image_token_id_not_real
+    prompt: |
+      `IMAGE_TOKEN_ID = 1` 在 input_ids 里出现 N 次。LLM forward 时，这 N 个位置的
+      embedding 怎么算？
+    options:
+      - id: a
+        text: 用 LLM 的 token embedding lookup，把 IMAGE_TOKEN_ID 当成普通 vocab token
+      - id: b
+        text: 用 image encoder（CLIP / ViT）输出 N 个 patch embedding，**直接替换** input_embeds
+              里 IMAGE_TOKEN_ID 位置的 embedding；LLM 的 token embedding 表里没 IMAGE_TOKEN_ID
+        correct: true
+      - id: c
+        text: 用一个 learnable [IMG] embedding 复制 N 次
+      - id: d
+        text: 跳过这 N 个位置（attention_mask 设 False）
+    explanation: |
+      关键 insight：input_ids 里的 IMAGE_TOKEN_ID 是**占位符**，不是要被 LLM 直接 lookup 的。
+
+      Forward 流程：
+        ```python
+        input_ids   = (B, S) with IMG_ID at image positions
+        pixel_values = (B', C, H, W)  # 真实图片
+        modal_type_ids = (B, S)  # 标记哪里是 image
+
+        # Step 1: LLM 的 token embedding lookup
+        text_emb = llm.embed_tokens(input_ids)  # (B, S, hidden) but IMG_ID 位置是垃圾
+
+        # Step 2: 通过 vision encoder 算 image features
+        image_features = vision_encoder(pixel_values)  # (B', N_patches, vit_hidden)
+        image_emb = image_proj(image_features)         # (B', N_patches, llm_hidden)
+
+        # Step 3: 替换 IMG_ID 位置的 embedding
+        for batch_idx, img in zip(image_batch_indices, image_emb):
+            mask = modal_type_ids[batch_idx] == 1
+            text_emb[batch_idx, mask] = img  # 用 vision projection 替换
+
+        # Step 4: 这才是 LLM 真正看到的输入
+        out = llm(inputs_embeds=text_emb, attention_mask=...)
+        ```
+
+      关键点：
+        - `inputs_embeds` 与 `input_ids` 互斥，传 `inputs_embeds` 时 LLM 不会再做 token lookup
+        - IMAGE_TOKEN_ID 只是"占地标记"，可以是任何与 vocab 不冲突的整数
+        - 真正的图像理解发生在"替换"那一步
+
+      LLaVA / Qwen2-VL / Qwen-Audio 全部这样实现。HF transformers 的 `LlavaForConditionalGeneration`
+      就是把这个流程封装好。
+
+      面试金句："IMAGE_TOKEN_ID 不是 token id，是 mask id——它只用来标位置，
+      embedding 来自 vision encoder。"
+
+  - id: q5_data_loader_workers
+    prompt: |
+      你写好 collator 后，PyTorch DataLoader 用 `num_workers=8` 多进程加载。
+      collator 做的图像 / 音频 read + 解码很慢。下列哪个是**正确的优化方向**？
+    options:
+      - id: a
+        text: 加大 num_workers 到 32（越多越快）
+      - id: b
+        text: 把 collator 移到主进程（单线程）
+      - id: c
+        text: prefetch_factor 增大 + 用 WebDataset / Parquet 而不是单文件 jpg/wav；
+              CPU-heavy 解码放到 worker 进程，GPU-heavy 编码（CLIP/Whisper）放主进程
+        correct: true
+      - id: d
+        text: 关闭 dataloader，改成 sequential 加载
+    explanation: |
+      多模态训练的数据 IO 是经典瓶颈。优化要按**真实瓶颈**分类：
+
+      1. **磁盘 IO**：单 jpg/wav 文件 = 每次开销大
+         → 用 WebDataset (.tar) / Parquet 一个文件多个样本，sequential read 几十倍快
+      2. **CPU 解码**：jpg → tensor、wav → mel-spec 都是 CPU 重活
+         → DataLoader worker 进程多（num_workers=4-16，超过通常没收益）
+         → prefetch_factor=4-8 让 worker 提前算
+      3. **GPU 编码**：CLIP image encode、Whisper encode 是 GPU 操作
+         → **不要**在 worker 里做（worker 是 CPU 进程，会 fork CUDA context）
+         → 在主 train loop 里做，与 forward 同卡 overlap
+
+      错误模式：
+        - num_workers=64：进程多了之后 IPC 开销大于收益，反而变慢
+        - worker 里 import torch.cuda：CUDA fork bomb，OOM
+        - 同步 worker 等 GPU encode：worker 闲着，浪费 CPU
+
+      实际数字：LLaVA pre-train 600k 图文对，单 H100 8 卡训练，DataLoader 配置
+      `num_workers=8 prefetch_factor=4 persistent_workers=True`，吞吐 ~3000 sample/s。
+
+      Capstone 阶段你会真打这场仗——COCO 图 + LibriSpeech 音频 + tokenized 文本，
+      磁盘从 jpg/wav 读到 GPU forward 大约 1-3ms/sample，关键是不要让 GPU 等 CPU。
+
+      面试金句："多模态训练的 DataLoader 是 CPU 工厂——磁盘到 mel-spec 是 CPU，
+      到 embedding 是 GPU；混在一起的人都被打过脸。"

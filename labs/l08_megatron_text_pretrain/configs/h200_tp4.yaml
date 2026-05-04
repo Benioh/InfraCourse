@@ -1,0 +1,8 @@
+model_size: 1.3B
+seq_length: 2048
+micro_batch_size: 2
+global_batch_size: 64
+train_steps: 1000
+precision: bf16
+tp: 4
+pp: 1

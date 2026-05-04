@@ -1,0 +1,188 @@
+mission: l05_distributed_primitives
+title: L02 Quiz · Tensor Parallel 关键概念
+pass_threshold: 1.0  # 必须全对才解锁 patch
+description: |
+  这 5 题打中 Tensor Parallel 最容易混淆的点。如果有任何一题答错，
+  说明你对 Column/Row 切分维度、bias 处理、collective 位置之一的理解
+  还没到「能写代码」的程度。重读 mini_infra 同构源码 + Megatron 源码
+  之后再答一遍。
+
+prereq_checklist:
+  - title: 读 patch/task.md（必读，10min）
+    kind: read
+    path: labs/l05_distributed_primitives/patch/task.md
+  - title: 跑 notebook n03 · DDP collectives（30min）
+    kind: notebook
+    path: notebooks/n03_ddp_collectives.ipynb
+  - title: 跑 notebook n04 · Tensor Parallel Linear（30min）
+    kind: notebook
+    path: notebooks/n04_tensor_parallel_linear.ipynb
+  - title: 读 MiniInfra 同构 TP 骨架（15min）
+    kind: source
+    path: mini_infra/megatron/core/tensor_parallel/layers.py
+  - title: 读 Megatron 真实 ColumnParallelLinear（25min）
+    kind: source
+    path: github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
+
+questions:
+  - id: q1_split_dim
+    prompt: |
+      `nn.Linear` 的 weight shape 是 `(out_features, in_features)`。
+      在 `ColumnParallelLinear` 中，weight 沿哪个维度被切到不同 rank 上？
+    options:
+      - id: a
+        text: 输入维度 in_features
+      - id: b
+        text: 输出维度 out_features
+        correct: true
+      - id: c
+        text: 两个维度都切
+      - id: d
+        text: 由 process_group 类型决定，没有固定答案
+    explanation: |
+      Column 并行切的是 **输出维度 out_features**：每张 rank 持有完整的 in_features
+      输入，但只产出 out_features // world_size 大小的输出片段。
+
+      命名陷阱：因为 PyTorch `nn.Linear` 的 weight 是 `(out, in)`，切 out 维度等价于切
+      weight 的「行」。Row 并行反过来——切 in，等价于切 weight 的「列」。这就是为什么
+      初学者常把 Column / Row 弄反。
+
+      记忆口诀：**Column = 切 OUT、Row = 切 IN**。
+
+  - id: q2_row_bias
+    prompt: |
+      在 `RowParallelLinear` 的 forward 中，bias 必须加在哪一步？
+      （已知 bias 是 replicated 的，每张卡都持有相同副本。）
+    options:
+      - id: a
+        text: 直接传入 `F.linear(x_local, weight, bias)` 一步算完
+      - id: b
+        text: all_reduce 之前每个 rank 都加
+      - id: c
+        text: all_reduce 之后只加一次
+        correct: true
+      - id: d
+        text: 在 backward hook 里加
+    explanation: |
+      关键不变量：**all_reduce 是 SUM 操作**。
+
+      如果你在 `F.linear(x_local, W_local, bias)` 里把 bias 加进去（选项 A 或 B），
+      每个 rank 的 local 输出都会带上一份 bias。SUM 起来以后，最终输出会被加
+      `bias × world_size` —— 数学上是错的。
+
+      正确流程：
+      ```
+      out_local = F.linear(x_local, W_local)        # 不带 bias
+      out       = all_reduce(out_local)             # SUM 各 rank
+      out       = out + self.bias                   # 只加一次
+      ```
+
+      Megatron 的 `RowParallelLinear` 也是这样做的。本关 test_row_bias_added_once
+      就是来抓这个 bug：如果你写错了，输出会比单卡 nn.Linear 多 `(ws-1) * bias`。
+
+  - id: q3_column_backward
+    prompt: |
+      `ColumnParallelLinear` 的 forward 是 `out_local = F.linear(x, W_local)`，
+      其中 `x` 在所有 rank 都是相同的（identity copy）。
+      那么 backward 时，**grad_x（对输入的梯度）必须经过什么 collective**？
+    options:
+      - id: a
+        text: all_gather grad_output 沿最后一维
+      - id: b
+        text: reduce_scatter grad_output
+      - id: c
+        text: all_reduce grad_x 求和
+        correct: true
+      - id: d
+        text: 不需要任何 collective，PyTorch 自动处理
+    explanation: |
+      因为 forward 时输入 `x` 在每张 rank 都相同，autograd 把 `x` 看作多个分支
+      的共同输入：rank 0 用 `x` 算了 `out_local_0 = x @ W_local_0^T`，
+      rank 1 用同一个 `x` 算了 `out_local_1 = x @ W_local_1^T`……
+
+      根据链式法则，grad_x 应该是各 rank `grad_x_local` 的 **总和**：
+      ```
+      grad_x = Σ grad_x_local_i = Σ grad_out_local_i @ W_local_i
+      ```
+
+      所以 backward 必须 `all_reduce(grad_x, op=SUM)`。如果跳过这一步，每张 rank
+      只看到自己那一片 weight 贡献的梯度，参数更新方向是错的。
+
+      这就是为什么标准实现里有一个 `_CopyToParallelRegion` autograd.Function：
+      forward 是 identity，backward 触发 all-reduce。
+
+  - id: q4_ckpt_ts_change
+    prompt: |
+      你用 TP=2 训练完一个模型，保存了 checkpoint（每张 rank 把自己持有的本地
+      weight 分片直接 `torch.save`）。第二天换成 TP=4 的集群，加载这份 checkpoint，
+      会发生什么？
+    options:
+      - id: a
+        text: 完美兼容，因为 PyTorch 自动处理形状
+      - id: b
+        text: 加载时形状不匹配 / KeyError，必须先做 ckpt 转换才能换 TP
+        correct: true
+      - id: c
+        text: 加载成功，但 loss 会偏高几个百分点
+      - id: d
+        text: 加载成功，且性能更好（更细粒度并行）
+    explanation: |
+      这是 TP 最关键的工程边界之一。
+
+      TP=2 时每张 rank 持有 weight shape `(out/2, in)`；
+      TP=4 时每张 rank 应该持有 `(out/4, in)`。
+
+      如果你只是简单地把 4 个 rank 都加载同一份 TP=2 的 ckpt 切片，shape 直接错。
+      即使你做了简单的"再切一次"也不对——因为每张卡需要拿原始 (out, in) 矩阵的
+      不同 1/4，必须先 **gather → reshape → re-split**。
+
+      Megatron 提供了 `tools/checkpoint/util.py` 做这件事：先把 TP=N 的分片合并成
+      完整 weight，再按 TP=M 重新切分。SLiME / vLLM 接 Megatron ckpt 时也都需要
+      做这一步。
+
+      课程主线把这件事推迟到 L05（Megatron 扩展）才正面打。
+
+  - id: q5_correct_implementation
+    prompt: |
+      下列三个 `RowParallelLinear.forward` 实现，哪个**只有一个**是正确的？
+      （假设 input_is_parallel=False，bias 已 replicate 同步过。）
+
+      ```python
+      # 实现 A
+      x_local = x.chunk(ws, dim=-1)[rank]
+      out = F.linear(x_local, self.weight)
+      out = _ReduceFromRegion.apply(out, group)
+      return out + self.bias
+
+      # 实现 B
+      x_local = x.chunk(ws, dim=-1)[rank]
+      out = F.linear(x_local, self.weight, self.bias)
+      out = _ReduceFromRegion.apply(out, group)
+      return out
+
+      # 实现 C
+      x_local = x.chunk(ws, dim=-1)[rank]
+      out = F.linear(x_local, self.weight)
+      out = _ReduceFromRegion.apply(out, group) + self.bias
+      return out
+      ```
+    options:
+      - id: a
+        text: 只有 A 正确
+      - id: b
+        text: A 和 C 等价正确，B 错（bias 被加 ws 次）
+        correct: true
+      - id: c
+        text: 三个都正确，等价
+      - id: d
+        text: 三个都错
+    explanation: |
+      A 和 C **完全等价**：都是先做 local linear（不带 bias），然后 all_reduce SUM，
+      最后加一次 bias。区别只是把 `+ self.bias` 写在哪一行。autograd 会得到相同的
+      计算图。
+
+      B 是经典 bug：`F.linear(x_local, W, bias)` 把 bias 嵌进了 local 输出，
+      all_reduce 之后 bias 被加 world_size 次。test_row_bias_added_once 会立刻抓住。
+
+      面试重点：被问 "你的 RowParallel 怎么处理 bias？" 时，答 "bias replicate，all_reduce
+      之后加一次" 就是工程师答案；答 "传到 F.linear 里" 就被淘汰。

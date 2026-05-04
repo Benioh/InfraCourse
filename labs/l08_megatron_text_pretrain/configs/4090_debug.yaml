@@ -1,0 +1,8 @@
+model_size: 125M
+seq_length: 1024
+micro_batch_size: 1
+global_batch_size: 8
+train_steps: 200
+precision: bf16_or_fp16
+tp: 1
+pp: 1

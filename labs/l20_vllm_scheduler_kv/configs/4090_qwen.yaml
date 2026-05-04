@@ -1,0 +1,25 @@
+profile: 4090_qwen
+scheduler:
+  num_blocks: 256
+  max_num_running_reqs: 32
+workload_seed: 7
+workload_size: 64
+workload_prompt_tokens_range: [128, 1024]
+workload_max_tokens_range: [32, 256]
+acceptance:
+  min_p50_kv_usage: 0.4
+  must_terminate: true
+  waiting_must_grow_under_pressure: true
+vllm_serve_command: >
+  python -m vllm.entrypoints.openai.api_server
+  --model Qwen/Qwen2.5-0.5B-Instruct
+  --max-model-len 4096
+  --gpu-memory-utilization 0.85
+  --max-num-seqs 32
+  --enable-prefix-caching
+bench_prompts:
+  - "用一句话解释 paged attention。"
+  - "比较 vLLM 与 SGLang 调度器的核心差异。"
+  - "Qwen2.5-0.5B 适合做哪些 demo？"
+  - "解释 KV cache block 的换入换出策略。"
+  - "什么是 chunked prefill？"

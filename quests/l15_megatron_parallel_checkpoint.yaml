@@ -1,0 +1,55 @@
+id: l15_megatron_parallel_checkpoint
+title: Megatron-shaped Distributed Checkpointing
+level: L05.8
+act: 第 1 章：训练框架
+role: Megatron 并行状态学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+
+frameworks:
+  - Megatron-LM
+  - PyTorch Distributed
+
+patch:
+  description: |
+    实现 Megatron-shaped checkpoint save/load，保存 scheduler_state 和 parallel_state，
+    并在 resume 时校验并行状态兼容性。
+  task_md: labs/l15_megatron_parallel_checkpoint/patch/task.md
+  starter_file: labs/l15_megatron_parallel_checkpoint/patch/starter/checkpointing.py
+  reference_file: labs/l15_megatron_parallel_checkpoint/patch/reference/checkpointing.py
+  test_command: make patch-test M=l15_megatron_parallel_checkpoint
+  status_file: labs/l15_megatron_parallel_checkpoint/patch/.last_run.json
+  test_count: 5
+  test_kind: checkpoint resume 语义验证
+
+source_reading:
+  - title: Megatron parallel_state
+    repo_path: github_repo/Megatron-LM/megatron/core/parallel_state.py
+    focus: TP/PP/DP/CP/EP group 创建与查询
+  - title: Megatron distributed optimizer
+    repo_path: github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
+    focus: optimizer state 切分、reduce-scatter、all-gather
+  - title: Megatron checkpointing
+    repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+    focus: checkpoint metadata 与并行切片
+
+mini_infra_targets:
+  - mini_infra/megatron/core/optimizer/distrib_optimizer.py
+  - mini_infra/megatron/training/checkpointing.py
+
+notebooks:
+  - notebooks/n04_tensor_parallel_linear.ipynb
+  - notebooks/n05_pipeline_parallel_bubble.ipynb
+
+tickets:
+  - mgt_tp_mismatch_004
+  - mgt_checkpoint_slow_006
+  - mgt_recompute_tradeoff_007
+
+prereq: l13_moe_ep
+next_lab: l17_megatron_multimodal_data
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 多卡 checkpoint 转换验证

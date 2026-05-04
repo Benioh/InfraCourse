@@ -1,0 +1,184 @@
+mission: l03_nccl_ddp_smoke
+title: L01.5 Quiz · DDP 数据并行核心概念
+pass_threshold: 1.0
+description: |
+  这 5 题打中"PyTorch DDP 怎么工作、为什么这么工作"最容易混淆的点。
+  答错说明你对"同步什么、什么时候同步、为什么除以 world_size"
+  还没建立起 mental model。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l03_nccl_ddp_smoke/patch/task.md
+  - title: 跑 notebook n03 · DDP collectives
+    kind: notebook
+    path: notebooks/n03_ddp_collectives.ipynb
+  - title: 读 PyTorch DDP 源码 reducer.cpp 注释
+    kind: source
+    path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+  - title: 读 mini_infra distributed/collectives 实现
+    kind: source
+    path: mini_infra/distributed/collectives.py
+
+questions:
+  - id: q1_what_ddp_syncs
+    prompt: |
+      `torch.nn.parallel.DistributedDataParallel` 在 backward 后同步的是什么？
+    options:
+      - id: a
+        text: 模型参数 (parameters)
+      - id: b
+        text: 梯度 (gradients)
+        correct: true
+      - id: c
+        text: 优化器状态 (optimizer states)
+      - id: d
+        text: 全部以上三项
+    explanation: |
+      DDP 同步的是 **梯度**，不是参数也不是 optimizer state。
+
+      原理：
+        - 训练开始时所有 rank 的参数已经 broadcast 同步过一次（`broadcast(rank=0)`）。
+        - 之后每个 rank 都跑相同的优化器（同 lr、同 betas）。
+        - 只要所有 rank 在同一 step 看到的梯度相同，optimizer.step() 后参数自然保持一致。
+
+      所以 DDP 在 backward 时把每个 rank 的 local grad 用 all-reduce 求和取平均；
+      optimizer.step() 是各 rank 自己跑，不需要再同步。
+
+      这就是为什么 DDP 训练时 optimizer state 在每个 rank 都有完整一份——
+      ZeRO/Distributed Optimizer (L05) 的核心 insight 就是"既然 optimizer state 重复，
+      何不把它切到不同 rank？"
+
+  - id: q2_divide_by_world_size
+    prompt: |
+      ManualDDP 的 synchronize_grads() 必须把 grad 除以 world_size。如果你忘了
+      除，会发生什么（假设训练目标是 minimize loss）？
+    options:
+      - id: a
+        text: 没影响，optimizer 自动处理
+      - id: b
+        text: loss 不变，但 grad 变 ws 倍 → 等效于 lr × ws，训练可能爆炸
+        correct: true
+      - id: c
+        text: loss 自动变 ws 倍，可见从 wandb
+      - id: d
+        text: PyTorch 会抛 RuntimeError
+    explanation: |
+      DDP 的数学合同是："多卡训练每 step 看到 ws × batch_size 个样本，等效于
+      单卡用 ws × batch_size 训练；为了梯度等价，必须取均值（不是和）。"
+
+      如果你忘了除以 world_size：
+        - grad 大了 ws 倍
+        - optimizer.step() 等效于用 ws × lr 在更新
+        - 在 lr=1e-4 + ws=8 的标准设置下，等效于 lr=8e-4，**很可能爆炸**
+
+      真实 PyTorch DDP 实现里，这一步在 `reducer.cpp` 的 `mark_variable_ready` 之后，
+      `divisor` 默认是 world_size。你可以通过 `gradient_as_bucket_view` + 自定义
+      hook 改成手动控制。
+
+      面试金句："DDP 的 grad averaging 是数学合同的一部分，不是性能优化。"
+
+  - id: q3_overlap_compute_comm
+    prompt: |
+      PyTorch DDP 默认在 backward **进行中** 就触发 all-reduce（不等 backward
+      全部跑完）。这种 overlap 主要节省什么？
+    options:
+      - id: a
+        text: 显存（grads 用完就释放）
+      - id: b
+        text: 通信带宽（合并多个 reduce）
+      - id: c
+        text: 时间（通信与计算并行执行，吞吐提升）
+        correct: true
+      - id: d
+        text: 数值精度（多次 reduce 累加误差更小）
+    explanation: |
+      关键是 **通信与计算并行执行**——backward 还在算第一层时，最后一层的 grad
+      已经在做 all-reduce。bucketing（25MB 默认）让多个 grad 合并成一次 reduce，
+      减少 NCCL 启动开销。
+
+      时间公式：
+        no overlap：T = T_compute + T_comm
+        full overlap：T = max(T_compute, T_comm)
+
+      对小模型 T_comm 占大头，overlap 能近 2× 加速；对 7B+ 模型 T_compute 主导，
+      overlap 收益变小但仍 +5–15%。
+
+      显存：overlap 不省显存（grad 还得占着）。
+      带宽：overlap 不省带宽（同样总字节数）。
+
+      面试坑：被问"DDP 加速从哪来"，答 "通信和计算 overlap" 是 70 分；
+      继续答 "并且通过 bucket 合并 NCCL 启动开销" 是 90 分。
+
+  - id: q4_grad_accumulation
+    prompt: |
+      你想用梯度累积（gradient accumulation）实现"等效大 batch"。下列哪种与
+      DDP 配合**最高效**？
+    options:
+      - id: a
+        text: 每个 micro-step 都正常 forward+backward+sync_grads
+      - id: b
+        text: 用 `model.no_sync()` context manager 在前 N-1 个 micro-step 跳过 grad sync，
+              最后一个 micro-step 才正常 sync
+        correct: true
+      - id: c
+        text: 全程关闭 DDP 通信，只在最后一步 manual all_reduce
+      - id: d
+        text: 每个 micro-step 用 model.zero_grad()
+    explanation: |
+      A 错：每个 micro-step 都 sync 一次 → ws 倍通信开销，浪费。
+      B 对：`with ddp_model.no_sync():` 禁用 DDP 的 grad hook，只在累积结束才 sync 一次。
+            这是 PyTorch 官方推荐做法，HF Trainer / DeepSpeed 都这样做。
+      C 错：用 model.no_sync() 比手动管理通信简单且正确。
+      D 错：zero_grad 是清梯度，与 sync 时机无关。
+
+      记忆口诀：**累积期间 no_sync，最后一步正常 backward。**
+
+      实战：当你看到 "DDP 训练吞吐为什么这么低？" → 检查梯度累积代码，
+      90% 是没用 no_sync。
+
+  - id: q5_grad_avg_position
+    prompt: |
+      下列两种 ManualDDP 写法，哪个**对**？
+
+      ```python
+      # 写法 A: 先 all_reduce 再除
+      def synchronize_grads_A(self):
+          for p in self.module.parameters():
+              if p.grad is None: continue
+              dist.all_reduce(p.grad, op=SUM)
+              p.grad /= self.world_size
+
+      # 写法 B: 先除再 all_reduce
+      def synchronize_grads_B(self):
+          for p in self.module.parameters():
+              if p.grad is None: continue
+              p.grad /= self.world_size
+              dist.all_reduce(p.grad, op=SUM)
+      ```
+    options:
+      - id: a
+        text: 只有 A 对
+      - id: b
+        text: 只有 B 对
+      - id: c
+        text: A 和 B 数学等价，都对
+        correct: true
+      - id: d
+        text: 都错
+    explanation: |
+      数学上：
+        A: (Σ g_i) / ws
+        B: Σ (g_i / ws) = (Σ g_i) / ws
+
+      **完全等价**，因为除法对加法分配律成立。所以选哪个不重要。
+
+      工程上有微小差异：
+        - A 通信的是原始 grad，每个 rank 单独算除法（每个数算 1 次除法 × 1/ws）。
+        - B 通信前先除，每个 rank 算 1 次除法，all-reduce 求和。除法发生在 reduce 之前。
+
+      数值精度：fp16/bf16 下 B 更稳一点（先除避免中间值溢出）；fp32 几乎无差。
+      性能：基本没差。
+
+      面试 trick：被问"如何在 DDP 里平均 grad"，能说出"先除再 reduce"是熟练工，
+      能说出 "fp16 时先除更稳"是真懂。

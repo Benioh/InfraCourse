@@ -1,0 +1,3 @@
+gpu_mode: 8x H200
+torchrun_nproc_per_node: 8
+distributed_backend: nccl

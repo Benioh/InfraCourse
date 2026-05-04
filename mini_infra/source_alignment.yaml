@@ -1,0 +1,115 @@
+principle: MiniInfra modules are minimal, runnable extractions of real project skeletons;
+  they preserve lifecycle names and boundaries while shrinking model/data/runtime
+  size.
+megatron:
+  mini_root: mini_infra/megatron
+  real_root: github_repo/Megatron-LM
+  aligned_files:
+    mini_infra/megatron/pretrain_gpt.py: github_repo/Megatron-LM/pretrain_gpt.py
+    mini_infra/megatron/training/training.py: github_repo/Megatron-LM/megatron/training/training.py
+    mini_infra/megatron/training/arguments.py: github_repo/Megatron-LM/megatron/training/arguments.py
+    mini_infra/megatron/training/initialize.py: github_repo/Megatron-LM/megatron/training/initialize.py
+    mini_infra/megatron/training/checkpointing.py: github_repo/Megatron-LM/megatron/training/checkpointing.py
+    mini_infra/megatron/core/datasets/indexed_dataset.py: github_repo/Megatron-LM/megatron/core/datasets/indexed_dataset.py
+    mini_infra/megatron/core/tensor_parallel/layers.py: github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
+    mini_infra/megatron/core/pipeline_parallel/schedules.py: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+    mini_infra/megatron/core/optimizer/distrib_optimizer.py: github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
+vllm:
+  mini_root: mini_infra/vllm
+  real_root: github_repo/vllm
+  aligned_files:
+    mini_infra/vllm/entrypoints/openai/api_server.py: github_repo/vllm/vllm/entrypoints/openai/api_server.py
+    mini_infra/vllm/v1/engine/llm_engine.py: github_repo/vllm/vllm/v1/engine/llm_engine.py
+    mini_infra/vllm/v1/core/sched/scheduler.py: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+    mini_infra/vllm/v1/core/kv_cache_manager.py: github_repo/vllm/vllm/v1/core/kv_cache_manager.py
+sglang:
+  mini_root: mini_infra/sglang
+  real_root: github_repo/sglang
+  aligned_files:
+    mini_infra/sglang/srt/mem_cache/radix_cache.py: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+    mini_infra/sglang/srt/managers/scheduler.py: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+    mini_infra/sglang/srt/managers/disagg_service.py: github_repo/sglang/python/sglang/srt/managers/disagg_service.py
+slime:
+  mini_root: mini_infra/slime
+  real_root: github_repo/slime
+  aligned_files:
+    mini_infra/slime/train.py: github_repo/slime/train.py
+    mini_infra/slime/ray/rollout.py: github_repo/slime/slime/ray/rollout.py
+    mini_infra/slime/ray/train_actor.py: github_repo/slime/slime/ray/train_actor.py
+new_half_missions:
+- mini_infra: mini_infra/gpu/triton_softmax.py
+  real: github_repo/triton/python/tutorials/02-fused-softmax.py
+  preserves: online softmax, BLOCK 切分, mask, occupancy 概念
+  drops: autotune cache, dtype dispatch, fp8 路径
+- mini_infra: mini_infra/gpu/microbench.py
+  real: github_repo/Megatron-LM/tools/report_theoretical_memory.py
+  preserves: peak HBM bandwidth roofline 比对
+  drops: 多硬件兼容、多 kernel 套件
+- mini_infra: mini_infra/megatron/core/context_parallel/ring_attention.py
+  real: github_repo/Megatron-LM/megatron/core/transformer/attention.py
+  preserves: Q stationary + KV ring, mask 重新计算
+  drops: flash-attn 后端集成、多类 mask 优化
+- mini_infra: mini_infra/megatron/core/context_parallel/rope.py
+  real: github_repo/Megatron-LM/megatron/core/models/common/embeddings/rotary_pos_embedding.py
+  preserves: 频率计算、Q/K 旋转
+  drops: 多 layout 兼容、缓存
+- mini_infra: mini_infra/megatron/core/context_parallel/yarn.py
+  real: github_repo/Megatron-LM/megatron/core/models/common/embeddings/rotary_pos_embedding.py
+  preserves: YaRN scale 公式与温度
+  drops: alibi/linear 等其他外推
+- mini_infra: mini_infra/megatron/core/transformer/moe/router.py
+  real: github_repo/Megatron-LM/megatron/core/transformer/moe/router.py
+  preserves: top-k softmax, aux loss, jitter
+  drops: 多种 routing 策略
+- mini_infra: mini_infra/megatron/core/transformer/moe/experts.py
+  real: github_repo/Megatron-LM/megatron/core/transformer/moe/experts.py
+  preserves: 专家 forward + gather
+  drops: grouped GEMM 后端、megablocks
+- mini_infra: mini_infra/megatron/core/transformer/moe/alltoall.py
+  real: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+  preserves: permute / all-to-all / unpermute
+  drops: capacity 自适应、padding 复用
+- mini_infra: mini_infra/megatron/core/transformer/moe/capacity.py
+  real: github_repo/Megatron-LM/megatron/core/transformer/moe/router.py
+  preserves: capacity factor + dropping
+  drops: 多种 dropping 策略
+- mini_infra: mini_infra/data/wds_pipeline.py
+  real: github_repo/webdataset/webdataset/dataset.py
+  preserves: ShardList → split_by_node → split_by_worker → decode → batch
+  drops: 多模态 decoder 兼容、压缩格式
+- mini_infra: mini_infra/data/minhash_dedup.py
+  real: github_repo/datasketch/datasketch/minhash.py
+  preserves: minhash + lsh 求近重复对
+  drops: 多哈希函数、增量索引
+- mini_infra: mini_infra/data/shard_resume.py
+  real: github_repo/Megatron-LM/megatron/core/datasets/blended_megatron_dataset_builder.py
+  preserves: shard 跳过 + 续读 + handler 模板
+  drops: blended weights、复杂数据混合
+- mini_infra: mini_infra/vllm/quant/awq_loader.py
+  real: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+  preserves: per-group scale & zero, packed dim 解包
+  drops: 多 backend kernel 路径
+- mini_infra: mini_infra/vllm/quant/fp8_kv.py
+  real: github_repo/vllm/vllm/model_executor/layers/quantization/fp8.py
+  preserves: e4m3 weights & act scale 路径
+  drops: 多硬件 fp8 kernel
+- mini_infra: mini_infra/vllm/quant/calibrator.py
+  real: github_repo/llm-compressor
+  preserves: SmoothQuant + AWQ scale 求解
+  drops: 多算子覆盖、saving format
+- mini_infra: mini_infra/sglang/quant/kv_int8.py
+  real: github_repo/sglang/python/sglang/srt/layers/quantization
+  preserves: KV 对称量化写入与读取
+  drops: 异步 dequant、fp8 KV
+- mini_infra: mini_infra/vllm/spec_decode/draft_runner.py
+  real: github_repo/vllm/vllm/spec_decode/spec_decode_worker.py
+  preserves: draft K-step + target verify + KV 回滚
+  drops: 多 draft 策略实现
+- mini_infra: mini_infra/vllm/spec_decode/ngram.py
+  real: github_repo/vllm/vllm/spec_decode/ngram_worker.py
+  preserves: prompt n-gram 候选生成
+  drops: 多模型 fallback
+- mini_infra: mini_infra/vllm/spec_decode/acceptance_tracker.py
+  real: github_repo/vllm/vllm/spec_decode/metrics.py
+  preserves: acceptance rate 计算与窗口
+  drops: 多 worker 聚合

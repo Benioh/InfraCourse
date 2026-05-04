@@ -1,0 +1,80 @@
+mission: l34_grpo
+title: L11.8 Quiz · GRPO / RLOO
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能讲清 GRPO 为什么 critic-free 还能稳定。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l34_grpo/patch/task.md
+  - title: 读 DeepSeek-R1 论文 GRPO 节
+    kind: source
+    path: https://arxiv.org/abs/2501.12948
+
+questions:
+  - id: q1_critic_free
+    prompt: GRPO 相对 PPO 的核心结构差异？
+    options:
+      - id: a
+        text: 不需要 value model；advantage 来自同 prompt 的 G 个 sample 间的相对 reward
+        correct: true
+      - id: b
+        text: 不再需要 reward
+      - id: c
+        text: 不需要 reference policy
+      - id: d
+        text: 必须用 fp8
+    explanation: "GRPO 用 group-relative baseline 替代 critic，节省一倍参数。"
+  - id: q2_advantage
+    prompt: GRPO 的 advantage 公式？
+    options:
+      - id: a
+        text: A_i = (r_i - mean(r)) / (std(r) + eps)
+        correct: true
+      - id: b
+        text: A_i = r_i
+      - id: c
+        text: A_i = r_i - V(s)
+      - id: d
+        text: A_i = log π(y|x)
+    explanation: "组内归一化是 GRPO 关键。"
+  - id: q3_rloo
+    prompt: RLOO 与 GRPO 的差异？
+    options:
+      - id: a
+        text: RLOO 用 leave-one-out 平均（A_i = r_i - mean_{j≠i} r_j），低偏差
+        correct: true
+      - id: b
+        text: RLOO 必须 fp16
+      - id: c
+        text: RLOO 不再需要 reward
+      - id: d
+        text: RLOO 与 PPO 完全一样
+    explanation: "RLOO 给 r_i 排除自己的 baseline，更 unbiased。"
+  - id: q4_clip
+    prompt: PPO/GRPO 的 ratio clip 目的是？
+    options:
+      - id: a
+        text: 防止单步策略漂移过大，trust-region 近似
+        correct: true
+      - id: b
+        text: 提升吞吐
+      - id: c
+        text: 改变 reward
+      - id: d
+        text: 替代 KL
+    explanation: "ratio = exp(log π - log π_old)；clip 在 [1-ε, 1+ε] 限制偏移。"
+  - id: q5_kl
+    prompt: GRPO 在 PPO 之外通常还加显式 KL（β·KL(π_θ || π_ref)）的原因？
+    options:
+      - id: a
+        text: 防止策略偏离 SFT 模型太远，对齐风格不丢
+        correct: true
+      - id: b
+        text: 只是为了好看
+      - id: c
+        text: 替代 advantage
+      - id: d
+        text: 让 loss 变小
+    explanation: "KL anchor 在 reward 不靠谱时仍能保持 base policy 行为。"

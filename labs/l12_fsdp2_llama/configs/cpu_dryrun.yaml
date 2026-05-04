@@ -1,0 +1,14 @@
+profile: cpu_dryrun
+mode: wrap_only
+model:
+  hidden_size: 64
+  num_layers: 4
+  num_attention_heads: 4
+  vocab_size: 256
+mp_policy:
+  param_dtype: float32
+  reduce_dtype: float32
+reshard_after_forward: true
+acceptance:
+  expect_wrapped_blocks: 4
+  expect_root_wrapped: true

@@ -1,0 +1,276 @@
+mission: l35_multimodal_capstone
+title: L12 Capstone Quiz · 多模态 LLM 系统设计
+pass_threshold: 1.0
+description: |
+  这 5 题打中你建多模态 omni 模型时必须做的设计决策——
+  encoder 冻结策略、projector 训练 vs LLM 微调、模态平衡、推理 batching、
+  RL reward 设计。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l35_multimodal_capstone/patch/task.md
+  - title: 读 CAPSTONE_PLAN.md
+    kind: read
+    path: labs/l35_multimodal_capstone/CAPSTONE_PLAN.md
+  - title: 读 LLaVA-1.5 / Qwen2-VL / Qwen-Audio 论文
+    kind: source
+    path: docs/术语表.md
+  - title: 复盘前 19 关 patch（核心组件即将集成）
+    kind: source
+    path: docs/能力矩阵.md
+
+questions:
+  - id: q1_freeze_strategy
+    prompt: |
+      Stage A 训练 mm-tiny-omni 时，正确的 freeze 策略是？
+    options:
+      - id: a
+        text: 全量微调（最准确）
+      - id: b
+        text: 冻结 image / audio encoder + LLM 全 32 层；只训练 projector
+      - id: c
+        text: 冻结 image / audio encoder；训练 projector + LLM 最后 ~4 层。
+              理由：encoder 已经预训练好（不动），projector 是新模块（必须训），
+              LLM 后几层是 alignment 的关键（小幅微调）
+        correct: true
+      - id: d
+        text: 全部冻结（只跑推理）
+    explanation: |
+      Multimodal LLM 的标准训练 stages（LLaVA / Qwen2-VL）：
+
+      **Stage 1 (Pre-training)**: 只训练 projector
+        - encoder 冻结：CLIP / Whisper 已经在大数据上预训练好
+        - LLM 冻结：保持语言能力
+        - projector 是新建的随机初始化模块
+        - 数据：~50万 image-caption 对
+        - 目标：projector 学会把视觉/音频 feature 映射到 LLM 能"读懂"的 embedding 空间
+
+      **Stage 2 (Instruction tuning)**: 解冻 LLM 后几层 + projector
+        - encoder 仍冻结（视觉知识不变）
+        - LLM 后 4-8 层解冻：跟随多模态指令
+        - 数据：visual instruction tuning（如 LLaVA-Instruct）
+        - 目标：模型学会按多模态 input 回答任务
+
+      **Stage 3 (RLHF)**: 全 LLM + projector 用 RL（本课程 Stage C）
+        - encoder 仍冻结
+        - PPO with reward model
+        - 进一步对齐人类偏好
+
+      为什么不直接全量微调：
+        - 显存爆炸（7B + visual encoder + Whisper > 100GB）
+        - 易破坏 encoder 的视觉知识（catastrophic forgetting）
+        - 训练时间 5-10× 长
+
+      Capstone Stage A 你做的是 Stage 1 + 简化版 Stage 2（前 4 层解冻），
+      省时省卡，1×H100 + 4 小时跑通。
+
+  - id: q2_modality_balance
+    prompt: |
+      训练数据：50k image-caption + 10k speech-transcription。直接 concat 后随机
+      shuffle 训练会有什么问题？
+    options:
+      - id: a
+        text: 没问题
+      - id: b
+        text: 模态不平衡：每 6 个样本里有 5 个 image、1 个 audio。模型会优先学 image projector，
+              audio projector 学得差。需要 oversample audio 或加 modality balanced sampler
+        correct: true
+      - id: c
+        text: 数据集要分开训
+      - id: d
+        text: 只能用 image 训
+    explanation: |
+      Multi-modality 数据不平衡的影响：
+        - 训练 step 里 image 多 → image_proj grad 多 → 学得快
+        - audio 少 → audio_proj grad 少 → 训练不充分
+        - 最后表现：模型对 image 任务好，对 audio 任务差
+
+      解决方案（按强度）：
+
+      1. **Oversample minority modality** (简单)：
+         ```
+         dataset = ImageDataset(50k) + AudioDataset(10k) * 5
+         ```
+         扩 5× 让 audio 数量与 image 一致
+
+      2. **Weighted sampler** (推荐)：
+         - PyTorch DataLoader 的 WeightedRandomSampler
+         - 每个 batch 内 image:audio:multimodal = 2:2:1（按设计目标）
+
+      3. **Round-robin scheduler**:
+         - 每个 step 强制按预算分模态
+         - 用于 Modality-Aware Curriculum learning
+
+      4. **Loss weighting**:
+         - audio sample 的 loss × N（手动放大）
+         - 对训练时长不敏感，但只能补救 grad，不补救数据多样性
+
+      Qwen2-VL paper：他们用 weighted sampler 让 image:video:text 大致平衡，
+      避免 video（少）被 image（多）主导。
+
+      Capstone Stage A 你需要 audio oversample 5× 或 weighted sampler。
+      不做这一步，audio quality 会很差，Stage C 的 WER reward 训不上去。
+
+  - id: q3_image_token_injection
+    prompt: |
+      Forward 时 LLM 输入是 input_ids（含 IMAGE_TOKEN_ID 占位），怎么把
+      projector 输出的真实 image embedding 注入？
+    options:
+      - id: a
+        text: 把 IMAGE_TOKEN_ID 加到 vocab，让 LLM 自己 lookup
+      - id: b
+        text: 不通过 input_ids，先 lookup 出 inputs_embeds，然后用 modal_type_ids
+              定位 image 位置，把 image_emb 替换进去；最后传 inputs_embeds 给 LLM
+        correct: true
+      - id: c
+        text: 用 cross-attention 在每层注入
+      - id: d
+        text: 把 image 转成文字 description 当 prompt
+    explanation: |
+      LLM forward 接受两种输入互斥：
+        - `input_ids` (tokens): LLM 内部 lookup embedding
+        - `inputs_embeds` (embeddings): 跳过 lookup，直接用
+
+      Multimodal LLM 流程（LLaVA / Qwen2-VL 实现）：
+
+      ```python
+      # Step 1: text embedding lookup
+      inputs_embeds = llm.embed_tokens(input_ids)  # (B, S, hidden)
+      # IMAGE_TOKEN_ID 位置的 embedding 是垃圾值（vocab 里没有这个 token 的训练）
+
+      # Step 2: 算图像 features → projector 投影
+      image_features = vit(pixel_values)  # (B', N, vit_hidden)
+      image_emb = projector(image_features)  # (B', N, llm_hidden)
+
+      # Step 3: 替换 IMAGE_TOKEN_ID 位置的 embedding
+      for batch_idx, img_idx_in_batch in enumerate(image_batch_indices):
+          mask = modal_type_ids[img_idx_in_batch] == MODAL_IMAGE
+          inputs_embeds[img_idx_in_batch, mask] = image_emb[batch_idx]
+
+      # Step 4: 用 inputs_embeds 跑 LLM
+      out = llm(inputs_embeds=inputs_embeds, attention_mask=...)
+      ```
+
+      关键点：
+        - IMAGE_TOKEN_ID 只是"占位标记"，**永远不会被 LLM 真正 lookup 出有意义的 embedding**
+        - 替换发生在 embed_tokens 之后、第一个 Transformer 层之前
+        - LLM 看到的是混合 embedding sequence，自然处理 cross-modal attention
+
+      Audio 也是同样模式（AUDIO_TOKEN_ID + audio_emb）。
+
+      Capstone Stage A 你需要在 forward 函数里实现这个 "embedding injection"。
+
+  - id: q4_inference_batch
+    prompt: |
+      Stage B 多模态服务接到一个 batch：4 个请求里 2 个有图、1 个有音频、1 个纯文。
+      推理引擎应该怎么处理？
+    options:
+      - id: a
+        text: 把 4 个请求串行处理（避免不一致）
+      - id: b
+        text: 分两个 batch（有图的 + 没图的）
+      - id: c
+        text: 用一个 batch：先用 ViT 处理 2 张图、Whisper 处理 1 段音频，再把所有
+              embedding 注入对应 input_ids 位置；LLM 只跑一次 forward
+        correct: true
+      - id: d
+        text: 用 cross-attention 单独处理每模态
+    explanation: |
+      高吞吐 multimodal serving 的关键：**异质 batch 也能一次 LLM forward**。
+
+      具体步骤（vLLM 0.7+ / SGLang 0.4+ 已实现）：
+
+      1. **Prepare modality**: 提取 batch 中所有图、所有音频
+         ```
+         pixel_values: (2, 3, 224, 224)   # 来自请求 0, 2
+         audio_mel:    (1, T, 80)         # 来自请求 1
+         ```
+
+      2. **Encode 各模态**:
+         ```
+         image_emb = vit(pixel_values)        # batch 处理 2 张
+         audio_emb = whisper(audio_mel)        # batch 处理 1 段
+         ```
+         这两个 encoder 各算一次，吞吐高于串行。
+
+      3. **Build inputs_embeds**: 与训练 forward 同样的 injection 逻辑
+         ```
+         text_emb = llm.embed_tokens(input_ids)  # (4, S, hidden)
+         inject image_emb to requests 0, 2
+         inject audio_emb to request 1
+         request 3 unchanged
+         ```
+
+      4. **LLM forward**:
+         ```
+         logits = llm(inputs_embeds=text_emb, attention_mask=...)
+         ```
+         一次 forward 跑 4 请求，full continuous batching。
+
+      为什么不分开 batch：
+        - LLM 是最慢部分（特别是 prefill），多次跑浪费
+        - 各模态 encoder（ViT/Whisper）相对小，并行化收益有限
+        - 一次 LLM forward 的 throughput 约 = N × per-request throughput
+
+      实施细节：image / audio 的 prefill 阶段会比纯文本多 N 个 token（image_num_patches +
+      audio_T），但 PagedAttention 早就处理了变长 input。
+
+      面试金句："Multimodal serving 的 throughput 关键是 LLM 一次 forward
+      处理异质 batch；encoder 计算只是 prelude。"
+
+  - id: q5_reward_design
+    prompt: |
+      Stage C RL 阶段，下列哪个 reward 设计**最合理**？
+    options:
+      - id: a
+        text: 只用一个 reward = bleu(hypothesis, ground_truth)
+      - id: b
+        text: 多个 reward 组合：CLIP score（image-text grounding）+ WER（audio transcription）
+              + length penalty（防 reward hacking）+ reference KL；按任务自动加权
+        correct: true
+      - id: c
+        text: 不用 reward，用 cross-entropy 训
+      - id: d
+        text: 让人工逐个打分
+    explanation: |
+      Multi-task RL reward 设计原则：
+
+      **多任务 → 多 reward**:
+        - image task: CLIP score (image-text alignment)
+        - audio task: WER (transcription accuracy)
+        - 二者**不能用同一个 reward**——CLIP 不能评 audio，WER 不能评 image
+
+      **Reward shaping**:
+        ```
+        total_reward = 0.5 × clip_score + 0.5 × (1 - wer)  # 主 reward
+                       - 0.01 × length_penalty             # 辅助 reward
+                       - β × KL(π || π_ref)                # 防漂移
+        ```
+        - 主 reward 按任务挑选（image 用 clip，audio 用 wer）
+        - 辅助 reward 防 reward hacking（如生成超长无意义文本）
+        - KL penalty 防 policy 漂移过远（L10 你写的）
+
+      **任务路由**:
+        - 同 batch 既有 image-only 又有 audio-only，每个 sample 用对应 reward
+        - 没图的 sample 不算 clip_score
+        - 没音频的 sample 不算 WER
+
+      **Off-the-shelf reward model**:
+        - 用 pretrained CLIP（直接 inference，不训练）
+        - 用 jiwer 或自己写的 WER（已是 patch 一部分）
+        - 不需要训独立的 reward LLM（省卡）
+
+      错误模式：
+        - A: BLEU 不够，无视 image grounding
+        - C: cross-entropy 是 SFT 不是 RL
+        - D: 人工打分太贵，离线时是合理的，在线 RL 不可行
+
+      Capstone Stage C：
+        - 50 PPO steps
+        - 每 step 32 prompts，混合 image/audio
+        - reward = 任务条件 reward + KL，每 step adaptive 调 KL coef
+        - 一晚上能跑完
+
+      面试金句："Multi-task RL 没有 universal reward，每任务单独设计 + KL 防漂移
+      + length penalty 防 hack——这就是 RLHF 的工程艺术。"

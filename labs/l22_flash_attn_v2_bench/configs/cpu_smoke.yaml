@@ -1,0 +1,10 @@
+profile: cpu_smoke
+device: cpu
+dtype: float32
+shapes:
+  - {seq_len: 64, num_heads: 2, head_dim: 16}
+  - {seq_len: 128, num_heads: 4, head_dim: 32}
+causal: true
+num_iters: 5
+acceptance:
+  max_abs_diff_below: 1.0e-4

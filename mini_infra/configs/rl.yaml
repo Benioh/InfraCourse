@@ -1,0 +1,6 @@
+rollout:
+  max_new_tokens: 64
+  prompt_source: mini_infra/data/toy_math.jsonl
+reward:
+  parser: final_number
+  tolerance: 0.000001

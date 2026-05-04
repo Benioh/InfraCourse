@@ -1,0 +1,83 @@
+mission: l30_dpo_loss
+title: L10.3 Quiz · DPO 推导与实现细节
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能从 Bradley-Terry 推导出 DPO loss，并理解 reference 的作用。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l30_dpo_loss/patch/task.md
+  - title: 读 DPO 论文
+    kind: source
+    path: https://arxiv.org/abs/2305.18290
+  - title: 读 TRL DPOTrainer 实现
+    kind: source
+    path: github_repo/trl/trl/trainer/dpo_trainer.py
+
+questions:
+  - id: q1_form
+    prompt: DPO loss 的核心数学形式是？
+    options:
+      - id: a
+        text: -E[log σ(β·(log π(yw|x) - log π(yl|x) - log π_ref(yw|x) + log π_ref(yl|x)))]
+        correct: true
+      - id: b
+        text: 直接 cross-entropy on yw
+      - id: c
+        text: KL(policy || reference) 单独项
+      - id: d
+        text: MSE(policy, reward)
+    explanation: "DPO 是 Bradley-Terry 闭式解；reference 提供 implicit reward baseline。"
+  - id: q2_ref
+    prompt: reference policy 在 DPO 中的角色是？
+    options:
+      - id: a
+        text: 提供 implicit reward 的 baseline，使 policy 在 SFT 附近做改动
+        correct: true
+      - id: b
+        text: 直接被训练
+      - id: c
+        text: 提供 LR schedule
+      - id: d
+        text: 提供 tokenizer
+    explanation: "reference 通常是 SFT model；它充当 KL anchor。"
+  - id: q3_logsigmoid
+    prompt: 为什么实现要用 `F.logsigmoid` 而不是 `torch.log(torch.sigmoid(...))`？
+    options:
+      - id: a
+        text: logsigmoid 数值稳定，避免 sigmoid 饱和后 log(0)=-inf
+        correct: true
+      - id: b
+        text: 速度差很多
+      - id: c
+        text: 后者会改变梯度
+      - id: d
+        text: 没区别
+    explanation: "对 |x| 大时 sigmoid 饱和，log 会下溢；logsigmoid 走稳定路径。"
+  - id: q4_beta
+    prompt: β 越大代表？
+    options:
+      - id: a
+        text: 越靠近 reference policy（KL 约束更强）
+        correct: true
+      - id: b
+        text: 完全脱离 reference
+      - id: c
+        text: lr 必须更大
+      - id: d
+        text: tokenizer 改变
+    explanation: "β 是 implicit reward scaling；β 大 → 更紧地约束在 ref 附近。"
+  - id: q5_logp_extract
+    prompt: 计算 `log π(y|x)` 时常见错误是？
+    options:
+      - id: a
+        text: 把 prompt token 的 log-prob 也加进去
+        correct: true
+      - id: b
+        text: 用 fp16
+      - id: c
+        text: 用 logsumexp
+      - id: d
+        text: 用 attention_mask
+    explanation: "DPO 的 logp 必须只在 completion token 上累加，prompt 要 mask。"

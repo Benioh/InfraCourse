@@ -1,0 +1,9 @@
+flowchart LR
+  Env[L00 Environment evidence] --> Data[L06 Multimodal data]
+  Data --> Train[L04/L05 Megatron training]
+  Train --> Ckpt[Checkpoint + tokenizer/processor]
+  Ckpt --> Serving[L07/L08/L09 serving]
+  Ckpt --> RL[L10/L10.5/L11 RL rollout]
+  Serving --> Metrics[metrics/logs/traces]
+  RL --> Metrics
+  Metrics --> Report[L12 final_readme + risk_register]

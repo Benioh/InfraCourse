@@ -1,0 +1,216 @@
+mission: l09_long_context_cp
+title: L04.5 Quiz · 长上下文 / Ring Attention 关键概念
+pass_threshold: 1.0
+description: |
+  这 5 题打中 ring attention / FlashAttention 最容易模糊的点：
+  online softmax 的数学等价性、显存复杂度、与 causal mask 的交互、
+  ring exchange 与 chunk 的对应。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l09_long_context_cp/patch/task.md
+  - title: 跑 notebook n14 · Context parallel ring attention
+    kind: notebook
+    path: notebooks/n14_context_parallel_ringattn.ipynb
+  - title: 读 FlashAttention paper section 3
+    kind: source
+    path: docs/术语表.md
+
+questions:
+  - id: q1_online_softmax_math
+    prompt: |
+      在 online softmax 累加时，看到一个新 chunk，发现它的 max 比 running_max 大。
+      为什么必须用 `exp(running_max - new_max)` 重新缩放旧的 `running_out` 和 `running_denom`？
+    options:
+      - id: a
+        text: 不需要，新 chunk 的影响自然会被算上
+      - id: b
+        text: 因为旧状态是用 `exp(scores - running_max)` 算的，max 变了之后这部分
+              的"参考点"也要改成 new_max，否则 max-shift 不一致
+        correct: true
+      - id: c
+        text: 这是优化技巧，不是必须的
+      - id: d
+        text: 缩放是为了防止 overflow
+    explanation: |
+      Softmax 的等价数学：
+        ```
+        softmax(s)_j = exp(s_j) / Σ exp(s_k) = exp(s_j - c) / Σ exp(s_k - c)
+        ```
+        c 是任意常数（通常取 max 防溢出）。
+
+      在线累加时，**所有项必须用同一个常数 c**。如果第 1 chunk 用 c=m_1 算，
+      第 2 chunk 用 c=m_2 算，简单加起来是错的。
+
+      解决：每次 max 上升到 m_new，把"旧帐"按 `exp(m_old - m_new)` 缩放：
+        ```
+        out_old / l_old = exp(s - m_old) @ V / Σ exp(s - m_old)
+                       = exp(s - m_new + m_new - m_old) @ V / Σ exp(s - m_new + m_new - m_old)
+                       = exp(m_new - m_old) * [exp(s - m_new) @ V] / [exp(m_new - m_old) * Σ exp(s - m_new)]
+        ```
+      所以：
+        ```
+        out_new = out_old * exp(m_old - m_new) + exp(scores_new - m_new) @ V_new
+        l_new   = l_old   * exp(m_old - m_new) + Σ exp(scores_new - m_new)
+        ```
+      二者同时缩放 → 比值（最终 softmax 输出）保持不变。
+
+      这是 FlashAttention 唯一的"trick"——把 softmax 拆成 streaming 形式。
+      面试金句："Online softmax 之所以等价，是因为分子分母用了同一个 max-shift。"
+
+  - id: q2_memory_complexity
+    prompt: |
+      Full attention 的显存复杂度（不算输入输出）是多少？Ring attention 用 N 块时是多少？
+    options:
+      - id: a
+        text: O(S²) 对 O(S²)，没区别
+      - id: b
+        text: O(S²) 对 O(S)，因为 ring 不存完整 attention 矩阵，只存当前 chunk
+        correct: true
+      - id: c
+        text: O(S) 对 O(S/N)，按 chunk 数缩
+      - id: d
+        text: O(S²) 对 O(S × log S)，logN 来自 chunking
+    explanation: |
+      Full attention：
+        - 必须显式构造 `attn_weights = QK^T`，shape (B, H, Sq, Sk)
+        - 显存占用：B × H × Sq × Sk × 字节 → S² 项
+        - 这就是 vanilla attention 在 S=4K, B=4, H=32 时炸掉 H100 80G 的原因
+
+      Ring / Flash attention：
+        - 一次只处理 1 个 chunk：`scores_chunk` shape (B, H, Sq, chunk_len)
+        - chunk_len = Sk / num_chunks，总 chunk 显存 = (B, H, Sq, Sk/N)
+        - 加上 running_max / running_denom (B, H, Sq, 1)，几乎可忽略
+        - **复杂度 O(S × chunk_len) = O(S)** 当 num_chunks = O(S)
+
+      实际数字：S=8K, B=1, H=32, fp16
+        - Full: 8K × 8K × 32 × 2B = 4 GB（光 attention weights）
+        - Flash with chunks=128: 8K × 64 × 32 × 2B = 32 MB
+
+      时间上 ring 与 full 相似（都要算完所有 QK^T），但**HBM IO** 是 ring 的真正
+      优势——在 SRAM 内部计算，避免反复读写 HBM。
+
+      课程脉络：L01.7 你写过 Triton softmax 知道 SRAM/HBM 分层；L04.5 这关把
+      softmax 切块的核心思想用到 attention 上。
+
+  - id: q3_causal_mask
+    prompt: |
+      Ring attention forward 怎么处理 causal mask（autoregressive 训练用）？
+    options:
+      - id: a
+        text: 在最终 softmax 上 mask
+      - id: b
+        text: 在每个 chunk 内：跳过完全在 query 之后的 chunk；部分重叠的 chunk 内部
+              加 -inf 掩码
+        correct: true
+      - id: c
+        text: causal mask 与 ring 不兼容，必须用 full attention
+      - id: d
+        text: 用 attention bias 在外面加
+    explanation: |
+      Causal: position i 只能看到 ≤ i 的 token。
+
+      Ring attention forward 处理时按 chunk 分类：
+        - **完全在 query 范围之前**（chunk_end ≤ query_start）：正常累加
+        - **完全在 query 范围之后**（chunk_start > query_end）：**跳过整个 chunk**
+          （所有位置都 mask 掉，对 softmax 没贡献）
+        - **部分重叠**：在 chunk 内部用 -inf 掩盖 future positions，再正常计算
+
+      优化点：跳过 future chunks 节省 ~50% 计算（causal attention 本来就只用一半三角）。
+      FlashAttention 2 论文专门优化这一点。
+
+      实际代码（伪码）：
+        ```python
+        for i, k_chunk in enumerate(chunks):
+            chunk_start = i * chunk_len
+            chunk_end = chunk_start + chunk_len
+            # query positions covered by this iteration
+            q_start, q_end = ...
+            if chunk_start > q_end:
+                continue  # future, skip
+            scores = q @ k_chunk^T / sqrt(d)
+            # apply causal mask within overlap
+            mask = make_causal_mask(q_start, q_end, chunk_start, chunk_end)
+            scores = scores.masked_fill(~mask, float('-inf'))
+            # ... online softmax update
+        ```
+
+      本关 starter 不要求实现 causal（避免分支复杂度爆炸）；L08.7 spec decode 那关
+      会再次接触。
+
+  - id: q4_ring_exchange
+    prompt: |
+      在分布式 Context Parallel 里，每个 rank 持有 K/V 的 1/world_size。完成一次
+      ring attention forward 需要 rank 之间交换几次？
+    options:
+      - id: a
+        text: 1 次（所有 rank 一起 all-gather）
+      - id: b
+        text: world_size - 1 次（每个 chunk 在 ring 上传递一圈）
+        correct: true
+      - id: c
+        text: log(world_size) 次（butterfly all-reduce）
+      - id: d
+        text: world_size 次（包括自己）
+    explanation: |
+      Ring 设计：每个 rank 持有 1/ws 的 K/V chunk。
+      要让所有 rank 见过所有 chunk，把 chunk 沿环传递 ws-1 次。
+
+      ```
+      step 0: rank r 计算自己的 chunk r
+      step 1: rank r 收到 rank (r-1) 传来的 chunk (r-1)，计算
+      step 2: 收到 chunk (r-2)
+      ...
+      step ws-1: 收到 chunk (r+1) mod ws
+      ```
+
+      第 ws 次传递自己的 chunk 又回来了，停止。所以**总通信次数 = ws-1**。
+
+      为什么不 all-gather？all-gather 需要每个 rank 持有完整 K/V，显存膨胀 ws 倍——
+      就放弃了 CP 的初衷（用切分省显存）。Ring 的妙处是任何时刻每个 rank 只持有
+      2/ws 的 chunk（自己一份 + 流转一份），显存稳定 O(S/ws)。
+
+      代价：通信延迟随 ws-1 累加。但通信和计算可以 overlap（rank 算 chunk i 时，
+      chunk i+1 已在路上）。
+
+      Megatron 实现：`megatron/core/parallel_state.py` 的 `get_context_parallel_group()`，
+      forward kernel 是 `flash_attn_func` 加 ring 通信 hook。
+
+  - id: q5_backward_strategy
+    prompt: |
+      Ring attention 的 **backward** 如果不用 PyTorch autograd 自动算，
+      手写时会遇到什么挑战？
+    options:
+      - id: a
+        text: 没挑战，与 forward 一样
+      - id: b
+        text: 必须把 forward 的中间状态（max, denom）保存或 recompute；
+              backward 也要做 ring 通信遍历所有 chunk
+        correct: true
+      - id: c
+        text: backward 不需要 ring，可以一次 all-reduce 搞定
+      - id: d
+        text: backward 必须用 fp32（数值稳定性要求）
+    explanation: |
+      Forward 维护 `m, l, out`，丢失了 attention weights 和中间 score。
+      Backward 需要 dQ, dK, dV，这要求知道 attention weights 在每个位置的值。
+
+      两种方案：
+        A) **保存所有 score**：显存复杂度退化为 O(S²)，违背 ring 初衷
+        B) **Recompute**：backward 时再做一次 forward 算 score，立即用立即丢
+           ↑ FlashAttention 的选择，**显存 O(S)**，时间多一次 forward
+
+      Ring 部分：backward 也要遍历所有 chunk 反向传播 dK, dV。但 dQ 可以本地
+      算完（Q 完整持有）。最终 dK, dV 通过 ring 通信回到各自的 owner rank。
+
+      工程实现：FlashAttention 的 backward 是 ~1500 行 CUDA，比 forward 难多了。
+      自己手写的版本通常依赖 PyTorch autograd 自动算（本关采用），代价是
+      autograd 会保留所有中间 tensor，**实际显存退回 O(S²)**——只在测试小 seq
+      时不出问题。
+
+      生产用 ring：必须自己写 backward kernel（FlashAttention 库提供），autograd
+      自动版只用于教学。
+
+      面试金句："Forward online softmax 是数学技巧，backward 是工程苦力——
+      靠 recompute 才能保持 O(S) 显存。"

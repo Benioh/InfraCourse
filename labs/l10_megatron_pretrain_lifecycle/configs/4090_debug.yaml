@@ -1,0 +1,35 @@
+profile: 4090_debug
+mode: lifecycle
+model:
+  hidden_size: 768
+  num_layers: 12
+  num_attention_heads: 12
+  vocab_size: 32000
+  size_label: 125M
+training:
+  micro_batch_size: 2
+  global_batch_size: 16
+  seq_length: 1024
+  train_steps: 500
+  precision: bf16
+parallel:
+  tp: 1
+  pp: 1
+  dp: 1
+optimizer:
+  name: adamw
+  lr: 3.0e-4
+  min_lr: 3.0e-5
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+scheduler:
+  name: cosine_with_restarts
+  restart_steps: [200]
+  total_steps: 500
+checkpoint:
+  save_every: 250
+  save_dir: artifacts/checkpoints
+acceptance:
+  loss_drop_first_50_steps: 0.5
+  loss_at_step_500_below: 6.5
+  must_observe_restart_at_step: 200

@@ -1,0 +1,7 @@
+profile: local_stub
+mode: stub
+n_shots: 4
+n_eval: 16
+acceptance:
+  must_complete: true
+  exact_match_min: 0.0

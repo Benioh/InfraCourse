@@ -1,0 +1,83 @@
+mission: l27_sglang_pd_cache
+title: L09.5 Quiz · SGLang PD route / KV transfer
+pass_threshold: 1.0
+description: |
+  检查学习者是否理解 SGLang prefill/decode 分离后，route、prefix cache、KV transfer 为什么成为新的系统边界。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l27_sglang_pd_cache/patch/task.md
+  - title: 读 SGLang DisaggregationService
+    kind: source
+    path: github_repo/sglang/python/sglang/srt/managers/disagg_service.py
+  - title: 读 PD disaggregation
+    kind: source
+    path: github_repo/sglang/docs/advanced_features/pd_disaggregation.md
+
+questions:
+  - id: q1_transfer_boundary
+    prompt: PD disaggregation 中 KV transfer 的系统边界是什么？
+    options:
+      - id: a
+        text: prefill worker 计算出的 KV 被传给 decode worker 继续生成
+        correct: true
+      - id: b
+        text: 文本语义相似度
+      - id: c
+        text: GPU 型号
+      - id: d
+        text: optimizer state
+    explanation: "PD 把 prefill 和 decode 放到不同 worker 后，KV 交接就是关键边界。"
+  - id: q2_metrics
+    prompt: DisaggregationService 至少应该暴露什么指标？
+    options:
+      - id: a
+        text: kv_transfers、tokens_transferred、prefill/cache tokens、worker load
+        correct: true
+      - id: b
+        text: 减少 checkpoint 文件数
+      - id: c
+        text: 增大 LR
+      - id: d
+        text: 改变 tokenizer vocab
+    explanation: "没有 prefill/decode/transfer 的拆分指标，很难判断 PD 分离是优化还是瓶颈。"
+  - id: q3_pd
+    prompt: PD disaggregation 把什么执行阶段分开？
+    options:
+      - id: a
+        text: prefill worker 和 decode worker
+        correct: true
+      - id: b
+        text: README 和 quiz
+      - id: c
+        text: Adam m 和 v
+      - id: d
+        text: image token 和 text token
+    explanation: "prefill/decode 资源画像不同，分离后可独立扩缩容。"
+  - id: q4_risk
+    prompt: PD 分离的新增风险是什么？
+    options:
+      - id: a
+        text: KV transfer、router misroute、decode starvation
+        correct: true
+      - id: b
+        text: Python 不能 import
+      - id: c
+        text: 所有请求都会变快
+      - id: d
+        text: 不再需要 metrics
+    explanation: "PD 不是免费午餐，路由和 KV 传递会引入新瓶颈。"
+  - id: q5_metrics
+    prompt: prefix cache 命中对 PD 请求的直接影响是什么？
+    options:
+      - id: a
+        text: 减少需要 prefill 计算的新 token 数，但仍要看 decode 侧 KV 交接和负载
+        correct: true
+      - id: b
+        text: 自动让所有 KV transfer 消失
+      - id: c
+        text: 改变 optimizer state
+      - id: d
+        text: 不再需要 metrics
+    explanation: "prefix cache 降低 prefill 计算量，但 PD 性能仍需要拆 prefill、decode、transfer 三层看。"

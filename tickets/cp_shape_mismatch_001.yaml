@@ -1,0 +1,133 @@
+id: cp_shape_mismatch_001
+title: CP 切分后 Q/K shape 与 attention mask 不一致（assertion / NaN / 数值偏差）
+mission: l09_long_context_cp
+severity: high
+symptom: |
+  开了 CP=2 或 CP=4 后训练立即报错，或者跑通但 loss 立刻发散。常见症状：
+  (a) `assert q.shape == k.shape` 在 attention 入口失败；
+  (b) `RuntimeError: The size of tensor a (8192) must match the size of tensor b (16384)` 出现在 attention mask 那一行；
+  (c) loss 第一步就 NaN（不是渐变发散，是直接爆）；
+  (d) 跑通了 forward，但与 CP=1 同 seed 同数据的输出不一致（max_abs_err > 1e-2）。
+error_signatures:
+- "RuntimeError: The size of tensor a ... must match the size of tensor b ... at non-singleton dimension"
+- "AssertionError: q.shape[1] != attention_mask.shape[2]"
+- "loss=nan in step 1"（CP=1 时同样数据是正常 loss）
+- "ring_attention partial softmax max_abs_err > 0.01"
+- ranks 0/1 看到的 step_time / loss 不一致
+classification_questions:
+- 是 forward 报错（shape）还是 loss 错（数值）？
+- causal mask 是按"全局 seq_len"切了还是按"chunk seq_len"切了？这是 CP 最常错的地方
+- ring step 数对吗？CP=N 应该有 N 次 K/V rotation
+- partial softmax 累加用的是不是同一个 max？每个 ring step 的 partial output 是否都用 final_max 重归一
+- CP 与 SP/TP 同时开了吗？切分顺序是 [SP→TP→CP] 还是 [CP→TP→SP]？
+likely_causes:
+- causal mask 没切：CP=N 时本地 chunk 是 seq_len/N，但 mask 还是 (seq_len, seq_len)
+- ring rotation 多走一步或少走一步：正确步数是 N 步（含初始本地步）
+- partial softmax 用了 local_max 而不是 final_max 来归一
+- CP group 与 DP group 弄反：本应在 CP group 内 ring，结果在 DP group ring
+- KV 在 TP 内已切再上 CP 重复切：CP 应作用于 attention 维而不是 head 维
+- attention dropout 在 CP 下未同步 RNG，不同 chunk 拿不到同一 mask
+minimal_checks:
+- 跟 CP=1 比较：同 seed 同数据，CP=1 与 CP=2 forward 输出 max_abs_err 应 < 1e-5（fp32）
+- 打印 shape：`print(rank, "q", q.shape, "kv", kv.shape, "mask", mask.shape)`
+  正确情况：所有 rank 的 q.shape[seq_dim] 应该是 seq_len // CP
+- 用 `mini_infra/megatron/core/context_parallel/ring_attention.py:ring_attention_plan` 输出
+  每个 ring step 的 (q_rank, kv_rank, seq_start, seq_end)，与你 kernel 里实际跑的对照
+- 在 ring 累加循环里 `tl.print` 或 `print` 每步的 partial_max / partial_sum，确认是用 final 重归一
+- CP=2 跑 seq=4 的 toy（可手算）验证数值等价性
+minimal_fixes:
+- 切 mask：`local_mask = mask[:, :, cp_rank * chunk : (cp_rank + 1) * chunk, :]`
+  causal 时还要考虑 chunk 间的因果关系
+- 改 ring step 数为 `range(cp_size)`，而不是 `range(cp_size - 1)` 或 `range(cp_size + 1)`
+- partial output 重归一：在所有 ring step 完成后用 final_max 重新算 exp/sum
+- CP group 显式：`cp_group = parallel_state.get_context_parallel_group()`，
+  ring 通信只在该 group 内，不要混入 DP group
+- 把 attention dropout 关掉做 ablation：如果 CP=1 与 CP=2 输出一致 → dropout 是 confounder
+what_not_to_do:
+- 不要为了"绕开" shape error 直接 reshape——你只是把错误推到下一层
+- 不要在出现 NaN 后调 lr——CP shape 错时 NaN 是结构性的，调超参没用
+- 不要在 CP 错的情况下信 loss 曲线——它是垃圾数据
+- 不要把 CP 改成 1 当作 fix——你 lab 的目的就是验证 CP，CP=1 退化版不算交付
+- 不要只看 rank0 的 shape——其他 rank 可能完全不同，导致 collective hang
+hint_1: |
+  90% 的 CP shape mismatch 是 mask 没切。先做这个 5 分钟检查：
+  ```python
+  import torch
+  cp_size = 2  # 你实际用的 CP size
+  cp_rank = torch.distributed.get_rank() % cp_size  # 简化，真实代码用 parallel_state
+  seq_len = 16384  # 全局 seq_len
+  chunk = seq_len // cp_size
+
+  q_local = q[:, cp_rank * chunk : (cp_rank + 1) * chunk]
+  kv_local = kv[:, cp_rank * chunk : (cp_rank + 1) * chunk]
+
+  print(f'rank={cp_rank} q_local={q_local.shape} kv_local={kv_local.shape}')
+  assert q_local.shape[1] == chunk, '本地 Q 必须是 chunk 大小'
+  ```
+  如果打印出来某个 rank 仍然是 seq_len 而不是 chunk → 你的代码漏切了 Q（或 K/V）。
+
+  接下来检查 mask：
+  ```python
+  if mask.shape[-2] != chunk or mask.shape[-1] != seq_len:
+      print('mask 没切对：本地 Q chunk × 全局 K seq_len')
+  ```
+  Causal CP attention 的正确 mask shape 是 `[B, H, chunk, seq_len]`（Q 是本地，K 仍要看全局历史）。
+hint_2: |
+  Shape 都对了仍 NaN 或数值偏差，问题在 ring 累加。
+
+  用 `ring_attention_plan` 把 CP=2 的预期路径打印出来：
+  ```python
+  from mini_infra.megatron.core.context_parallel.ring_attention import ring_attention_plan
+  plan = ring_attention_plan(seq_len=16, cp_size=2, hidden_size=4, dtype_bytes=2)
+  for step in plan['steps']:
+      print(step)
+  ```
+  期待看到：
+  - step 0: q_rank=0, kv_rank=0；q_rank=1, kv_rank=1
+  - step 1: q_rank=0, kv_rank=1；q_rank=1, kv_rank=0
+  共 cp_size=2 步、每步 cp_size=2 个 (q, kv) 对。
+
+  如果你的实现 step 数不对 → 调 ring 循环的 range。
+
+  partial softmax 累加的关键：
+  ```python
+  # 每步算 partial output 时只算 partial_max / partial_sum
+  partial_max_i = ...
+  partial_sum_i = ...
+  partial_out_i = ...
+
+  # 所有步收集完后，用全局 max 重归一
+  final_max = max(partial_max_i for i in range(cp_size))
+  final_sum = sum(partial_sum_i * exp(partial_max_i - final_max) for i in range(cp_size))
+  final_out = sum(partial_out_i * exp(partial_max_i - final_max) for i in range(cp_size)) / final_sum
+  ```
+  如果你直接把 `partial_out_i` 加起来除 `partial_sum_i` 总和 → 数值偏差。
+solution: |
+  CP shape/数值错的修复路径是固定的：**切 Q → 切 K/V → 切 mask → 验 ring 步数 → 验 partial softmax 重归一**。
+
+  1. **切分要彻底**：Q、K、V、mask 都按 CP rank 切。Q 切后是 chunk × hidden；K/V 也切但每个 ring step 会换；
+     mask 是 chunk × seq_len（不是 chunk × chunk，causal 仍要看全局历史）。
+
+  2. **ring 步数 = CP size**：CP=2 走 2 步；CP=4 走 4 步。第一步是本地（kv_rank == q_rank）。
+
+  3. **partial softmax 必须重归一**：用 `mini_infra/.../ring_attention.py` 的 `ring_attention_plan`
+     画出预期路径作 ground truth。partial_max 取全局后，重算 partial_sum 与 partial_out 的指数缩放。
+
+  4. **CP group 显式**：
+     ```python
+     from megatron.core.parallel_state import get_context_parallel_group
+     cp_group = get_context_parallel_group()
+     # 在 cp_group 内做 K/V send/recv
+     ```
+
+  5. **数值验证**：
+     - 同 seed 同数据，CP=1 vs CP=2 forward 输出 max_abs_err < 1e-5 (fp32) 或 < 1e-3 (fp16)
+     - 用 `mini_infra/.../ring_attention.py` 的最小同构在 CPU 上验证你 GPU kernel 的预期输出
+
+  6. **报告里必须写**：
+     - 失败 shape 的截图（含每个 rank）
+     - 用 ring_attention_plan 算出的预期 step 与实际 step 对照
+     - 修复后 CP=1 vs CP=2 的 max_abs_err 数值
+     - causal mask 切分的 diagram（哪些位置可以看，哪些 mask 掉）
+
+  参考：`mini_infra/megatron/core/context_parallel/ring_attention.py`、L04.5 README、Megatron CP 文档。

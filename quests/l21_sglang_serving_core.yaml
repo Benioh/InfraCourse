@@ -1,0 +1,51 @@
+id: l21_sglang_serving_core
+title: RadixCache 前缀缓存
+level: L08
+act: 第 3 章：推理服务
+role: SGLang 学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+
+frameworks:
+  - Python stdlib
+  - SGLang (对照)
+
+patch:
+  description: |
+    实现 RadixCache：trie-based 前缀缓存，支持 match_prefix / insert / LRU evict。
+    多轮 chat 共享 system prompt + 历史 KV，OpenAI / Anthropic 的 "prompt caching"
+    背后就是这个机制。
+  task_md: labs/l21_sglang_serving_core/patch/task.md
+  starter_file: labs/l21_sglang_serving_core/patch/starter/radix_cache.py
+  reference_file: labs/l21_sglang_serving_core/patch/reference/radix_cache.py
+  test_command: make patch-test M=l21_sglang_serving_core
+  status_file: labs/l21_sglang_serving_core/patch/.last_run.json
+  test_count: 7
+  test_kind: 行为契约 + 结果对比
+
+source_reading:
+  - title: SGLang RadixCache 真实实现
+    repo_path: github_repo/sglang/python/sglang/srt/managers/
+    focus: 看 path compression、reference count、与 PagedAttention 集成
+  - title: SGLang paper section 3
+    repo_path: docs/术语表.md
+
+mini_infra_targets:
+  - mini_infra/sglang/
+
+notebooks:
+  - notebooks/n09_prefix_cache.ipynb
+
+tickets:
+  - sglang_high_ttft_001
+  - sglang_cache_miss_002
+  - sglang_port_conflict_003
+  - sglang_model_load_004
+
+prereq: l20_vllm_scheduler_kv
+next_lab: l23_quant_serving
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 真 SGLang serving 验证

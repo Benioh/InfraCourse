@@ -1,0 +1,191 @@
+id: awq_load_fail_001
+title: AWQ 权重加载失败：group_size 与 hidden 不整除 / 解包 dim 错
+mission: l23_quant_serving
+severity: high
+symptom: |
+  从 HuggingFace 下载或自己量化的 AWQ 权重，启动 vLLM/SGLang 时立即报错：
+  (a) `AssertionError: hidden_size 4096 not divisible by group_size 128`；
+  (b) `RuntimeError: shape '[4096, 4096]' is invalid for input of size <X>`；
+  (c) `KeyError: 'qweight' / 'qzeros' / 'scales'` 找不到字段；
+  (d) 加载成功但首次推理输出全是同一 token。
+error_signatures:
+- "AssertionError: hidden_size .* not divisible by group_size"
+- "RuntimeError: shape .* is invalid for input of size"
+- "KeyError: 'qweight' / 'qzeros' / 'scales'"
+- "AWQ marlin kernel: weight_bits != 4"
+- "推理 logits.argmax 总是同一 token id"
+classification_questions:
+- 量化是你自己做的还是别人提供的（HuggingFace）？
+- group_size 是多少？128 / 64 / 32？
+- 模型 hidden_size 多少？group_size 整除吗？
+- AWQ 版本：原版 awq, autoawq 还是 vLLM 内置？
+- packed dim 顺序：qweight 是 (in_features, out_features) 还是反过来？
+likely_causes:
+- group_size 与 hidden_size 不整除：如 group=128 但 hidden=3072 → 24 group OK，但某些层 hidden=8192 OK，其他层 hidden=11008 不行
+- packed dim 反了：原 awq 是 (in_features // 8, out_features)（int4 packed 进 int32），有些库期望反过来
+- scales / zeros 形状错：应是 (in_features // group_size, out_features)
+- weight_bits != 4：AWQ marlin kernel 只支持 4-bit
+- 模型架构不兼容：某些 GLU MLP 的 gate/up 合并 packing 与 vLLM 期望不一致
+- HF 模型的 quantization_config 缺字段
+minimal_checks:
+- 用 `mini_infra/vllm/quant/awq_loader.py:awq_summary` 看预算：
+  ```python
+  from mini_infra.vllm.quant.awq_loader import awq_summary, group_layout
+  s = awq_summary(hidden_size=4096, group_size=128, weight_bits=4)
+  print(s)
+  ```
+- 检查模型 config：
+  ```python
+  from transformers import AutoConfig
+  cfg = AutoConfig.from_pretrained('your-awq-model')
+  print(cfg.quantization_config)
+  print(cfg.hidden_size, cfg.intermediate_size)
+  ```
+  确认所有 hidden / intermediate 都被 group_size 整除
+- dump 实际权重 shape：
+  ```python
+  import torch
+  ckpt = torch.load('model.safetensors')
+  for k, v in ckpt.items():
+      if 'qweight' in k:
+          print(k, v.shape, v.dtype)
+  ```
+  qweight 形状应是 (in_features // 8, out_features) 或 (out_features, in_features // 8) 看实现
+- 用 transformers 直接 load 看是否报错：能 load → vLLM/SGLang 集成问题；不能 → 权重本身坏
+minimal_fixes:
+- group_size 改用 hidden 的因子：32, 64, 128 中选与所有层 hidden 整除的
+- 重量化时确保 GLU split：对 LLaMA 这类 gate/up 合并，要么单独量化每个，要么明确指明 packing 顺序
+- 把 packing dim 转一下（如果库期望反向）：
+  ```python
+  qweight_t = qweight.t().contiguous()
+  ```
+- 升级 awq / vLLM 到匹配版本（HuggingFace AWQ 经常 break）
+- 用 autoawq 重新量化：
+  ```python
+  from awq import AutoAWQForCausalLM
+  model.quantize(tokenizer, quant_config={'group_size': 128, 'w_bit': 4, 'version': 'gemm'})
+  ```
+- 检查 dtype：scales 应为 fp16，qzeros 应为 int32（packed）
+what_not_to_do:
+- 不要直接改 hidden_size 或 group_size 后又用旧 ckpt——必须重新量化
+- 不要把 AWQ 量化结果当成 ground truth——如果 acc 大跌可能是量化本身坏，不是 load 坏
+- 不要无脑 `pip install -U autoawq`——版本与 vLLM/SGLang 强耦合
+- 不要忽略 marlin kernel 的硬件要求（compute capability ≥ 8.0，4090/A100/H100）
+- 不要在 group_size=32 上跑大模型——精度好但显存收益不及 128
+hint_1: |
+  3 分钟法：先用 mini_infra 算预算确认配置可行：
+  ```python
+  from mini_infra.vllm.quant.awq_loader import group_layout, awq_summary
+
+  hidden_size = 4096
+  intermediate_size = 11008  # LLaMA 风格
+  group_size = 128
+
+  try:
+      groups_attn = group_layout(hidden_size, group_size)
+      print(f'attention layers OK: {len(groups_attn)} groups')
+  except ValueError as e:
+      print(f'attention BAD: {e}')
+
+  try:
+      groups_mlp = group_layout(intermediate_size, group_size)
+      print(f'MLP layers OK: {len(groups_mlp)} groups')
+  except ValueError as e:
+      print(f'MLP BAD: {e}  → 必须改 group_size')
+  ```
+  如果任一层 ValueError → group_size 不可用。可选方案：
+  - 改 group_size 到 hidden 的因子（如 11008 = 2^7 × 86，找不到完美整除 → 用 32）
+  - 或者重新量化到不同 group_size
+
+  快查 group 与 hidden 整除关系：
+  ```python
+  for hidden in [3072, 4096, 8192, 11008, 14336]:
+      ok = [g for g in (32, 64, 128, 256) if hidden % g == 0]
+      print(f'hidden={hidden}: divisible group_sizes = {ok}')
+  ```
+hint_2: |
+  group_size 整除 OK 但仍然 load 失败时，问题在 packing 或字段名。
+
+  Dump 权重看实际格式：
+  ```python
+  from safetensors import safe_open
+
+  with safe_open('model-00001-of-00003.safetensors', framework='pt') as f:
+      for key in sorted(f.keys()):
+          tensor = f.get_tensor(key)
+          if 'qweight' in key or 'scales' in key or 'qzeros' in key:
+              print(f'{key:60s}  shape={tuple(tensor.shape)}  dtype={tensor.dtype}')
+  ```
+  期望格式（vLLM AWQ 风格）：
+  - `*.qweight`: shape=(in_features // 8, out_features), dtype=int32
+  - `*.scales`: shape=(in_features // group_size, out_features), dtype=fp16
+  - `*.qzeros`: shape=(in_features // group_size, out_features // 8), dtype=int32
+
+  如果 shape 反了：
+  ```python
+  # 方法 1: 转置后保存
+  for key in qweight_keys:
+      tensor = ckpt[key]
+      ckpt[key] = tensor.t().contiguous()
+  save_file(ckpt, 'model_fixed.safetensors')
+
+  # 方法 2: 修改 vLLM AWQ loader 配置
+  # 在 quantization_config 中指定 packing
+  ```
+
+  字段名不对（如 weights 而不是 qweight）：通常是 awq 旧版 vs 新版差异。
+  - 旧版: `weight`, `weight_scale`, `weight_zero_point`
+  - 新版: `qweight`, `scales`, `qzeros`
+  用 mapping rename 或重新量化。
+
+  推理输出全同 token 但 load 没报错：scales/zeros 加载到错位置，dequant 全 0。
+  Sanity test：
+  ```python
+  out = model.dequantize_layer('model.layers.0.mlp.gate_proj')
+  print('std:', out.std().item())   # 期望 > 0.01
+  ```
+solution: |
+  AWQ load 失败的修复路径：**(1) 算 group_size 整除性 → (2) 用 mini_infra 验配置 → (3) dump 权重 shape → (4) 必要时重新量化**。
+
+  **推荐量化配置**（按模型族）：
+  ```yaml
+  # LLaMA / Mistral 类（hidden=4096, intermediate=11008/14336）
+  awq:
+    w_bit: 4
+    group_size: 128         # 与 hidden 4096, 8192 整除
+    zero_point: true
+    version: gemm           # marlin 在 4090/A100/H100
+
+  # Qwen / GLM 类（hidden=4096, intermediate=22016）
+  # group_size=128 仍可（22016 = 128 × 172）
+
+  # 自定义 hidden 不整除 128 → 用 64 或 32
+  ```
+
+  **重量化命令**（autoawq）：
+  ```python
+  from awq import AutoAWQForCausalLM
+  from transformers import AutoTokenizer
+  model_path = 'meta-llama/Llama-3-8B-Instruct'
+  quant_config = {'zero_point': True, 'q_group_size': 128, 'w_bit': 4, 'version': 'gemm'}
+  model = AutoAWQForCausalLM.from_pretrained(model_path, safetensors=True)
+  tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+  model.quantize(tokenizer, quant_config=quant_config)
+  model.save_quantized('llama3-8b-awq-w4g128')
+  ```
+
+  **必做 checklist**：
+  1. ✓ `awq_summary(hidden, group_size)` 不报 ValueError
+  2. ✓ 模型每个 hidden / intermediate 都被 group_size 整除
+  3. ✓ qweight / scales / qzeros 三字段都存在且 shape 正确
+  4. ✓ vLLM / autoawq / marlin 版本兼容
+  5. ✓ Sanity test: dequant 后某 layer std > 0.01
+  6. ✓ 推理 1 题 GSM8K 看是否合理输出（vs fp16 baseline）
+
+  **报告里必须写**：
+  - 模型 config 中 hidden_size / intermediate_size 列表
+  - 选的 group_size 与理由
+  - 量化命令完整 dump
+  - load 成功后 acc_drop_pp 数值
+
+  参考：`mini_infra/vllm/quant/awq_loader.py`、L08.5 README、autoawq docs、vLLM AWQ docs。

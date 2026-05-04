@@ -1,0 +1,88 @@
+id: mgt_tp_mismatch_004
+title: Megatron tensor parallel 配置不匹配（checkpoint 恢复或 shape assert 失败）
+mission: l11_megatron_scale_optimization
+severity: high
+symptom: "改了 TP size 后启动报 shape mismatch 或 checkpoint 加载失败；或者跑起来了但 loss 异常（上升、不下降、断点恢复后突然跳高）；或者 assert `hidden_size % tp == 0` 直接挂了。"
+error_signatures:
+- "AssertionError: hidden_size (4096) must be divisible by tensor_model_parallel_size (3)"
+- "AssertionError: num_attention_heads (32) must be divisible by tensor_model_parallel_size (6)"
+- "RuntimeError: Error(s) in loading state_dict for ColumnParallelLinear: size mismatch for weight: copying a param with shape ... from checkpoint, the shape in current model is ..."
+- "could not load checkpoint: tp rank 4 missing（恢复时 TP size 变大，找不到新 rank 对应的 shard）"
+- loss 从 checkpoint resume 后 loss 突然 ×2 或 NaN
+classification_questions:
+- 错误发生在 `build_model` 阶段（整除性 assert）、`load_checkpoint` 阶段（shape mismatch / 文件缺失）、还是训练跑起来后（loss 跳）？
+- 本次改了什么：`--tensor-model-parallel-size`、`--pipeline-model-parallel-size`、`--hidden-size`、`--num-attention-heads`、checkpoint 路径，是不是同时改了多个？
+- Checkpoint 目录里的 `iter_xxxxxx/mp_rank_XX_YY/` 一共有多少个？`XX * YY * ...` 是否等于当前 TP*PP？
+- 有没有跑过 `tools/checkpoint/convert.py` 之类的 shape 转换？
+likely_causes:
+- TP 整除性违反：`hidden_size / num_attention_heads / ffn_hidden_size` 之一不被新 TP size 整除。
+- Checkpoint 按旧 TP shape 保存，直接用新 TP 加载 → shape mismatch。Megatron 的 checkpoint 目录是 `mp_rank_{tp:02d}_{pp:03d}`，数量必须匹配。
+- PP 也一起改了但没注意：原来是 TP=2 PP=4，改成 TP=4 PP=2 后 checkpoint 分片数一样但 shape 全变。
+- 用了 virtual pipeline（`--num-layers-per-virtual-pipeline-stage`），转 checkpoint 时漏掉了 VP 维度。
+- 多机实验时某台机器的 `--tensor-model-parallel-size` 配置和别的不一致（通过 MPI/launcher 误传）。
+minimal_checks:
+- "`ls <checkpoint>/iter_0010000/` 看目录名的 `mp_rank_XX_YY` 格式，统计 TP×PP 组合数，与当前 config 比较。"
+- "日志搜 `number of parameters on (tensor, pipeline) model parallel rank (0, 0)`，每个 rank 打一行；shape 不对称立即可见。"
+- "用 Megatron 自带 `tools/checkpoint/convert.py`（新版）或 `util.py` 做 dry-run 转换，输出目标 TP shape 一致性。"
+- |
+  临时用**原 TP** 恢复跑 1 步确认 checkpoint 本身没坏：
+  ```bash
+  torchrun --nproc_per_node=<old_tp> pretrain_gpt.py \
+    --tensor-model-parallel-size <old_tp> --load <ckpt> ...
+  ```
+  能恢复说明 checkpoint OK，问题是 TP 转换；不能恢复说明 checkpoint 本身坏了。
+minimal_fixes:
+- 保证整除：`hidden_size`、`num_attention_heads`、`ffn_hidden_size`、`num_query_groups`（GQA）都能被新 TP size 整除。
+- 跨 TP size 迁移用 Megatron 的 checkpoint 转换工具：
+  ```bash
+  python tools/checkpoint/convert.py \
+    --model-type GPT \
+    --load-dir old_ckpt --save-dir new_ckpt \
+    --target-tensor-parallel-size 4 --target-pipeline-parallel-size 2
+  ```
+  产出新 shard 再加载。
+- 如果只是 smoke 验证，可以 `--no-load-optim --finetune` 丢掉 optimizer state，避免 optimizer shard shape 不匹配。
+- 多机一致性：所有节点传相同 env var / launcher args，避免 TP 配置漂移。
+what_not_to_do:
+- 不要直接改 TP size 后用 `--load` 加载旧 checkpoint——shape 一定对不上。
+- 不要手动 `mv mp_rank_00_000 mp_rank_00_001` 去凑目录数，shape 不会因此改变。
+- 不要把 assert 删掉或 patch 掉让它跑起来——跑得起来的几乎一定是错乱的权重。
+- 不要同时改 TP 和 PP 再 load checkpoint，诊断会爆炸；一次只改一个维度。
+hint_1: |
+  先锁定是哪一类错误：
+  ```
+  AssertionError hidden_size / num_heads not divisible by TP
+    → 纯配置问题。TP size 必须整除 hidden_size、num_attention_heads、ffn_hidden_size、num_query_groups。
+      选一个能整除的 TP，或改网络参数。
+
+  size mismatch for weight ... copying a param with shape A from checkpoint, current shape B
+    → Checkpoint 是在另一组 TP/PP 下保存的。看 A 和 B 的比例，通常就是 new_tp / old_tp。
+      需要做 checkpoint 转换，不能直接 load。
+
+  could not load checkpoint: tp rank X missing
+    → 目录里 shard 数量与当前 TP*PP 不符。先做 checkpoint 转换。
+  ```
+hint_2: |
+  确认 checkpoint 本身没坏，先用**原 TP** 加载 1 步：
+  ```bash
+  # 假设旧 checkpoint 是 TP=2 PP=2
+  torchrun --nproc_per_node=4 pretrain_gpt.py \
+    --tensor-model-parallel-size 2 --pipeline-model-parallel-size 2 \
+    --load /path/to/old_ckpt --exit-interval 1 ...
+  ```
+  能 resume 就说明 checkpoint OK。然后做正式转换：
+  ```bash
+  python tools/checkpoint/convert.py \
+    --model-type GPT --loader megatron --saver megatron \
+    --load-dir /path/to/old_ckpt --save-dir /path/to/new_ckpt \
+    --target-tensor-parallel-size 4 --target-pipeline-parallel-size 1
+  ```
+  再用新 TP 加载 `new_ckpt`。若 resume 后 loss 跳 ×2，多半漏了 `--no-load-optim`；optimizer state 按旧 shape 存，转换时常单独处理。
+solution: |
+  TP mismatch 的核心不变量：**并行度改变 → checkpoint shape 改变 → 必须显式转换**。诊断与修复模板：
+  1. 先区分三类：整除性 assert / shape mismatch / shard 数量不匹配。对应三种固定修复路径（见 hint_1）。
+  2. 整除性要同时满足 `hidden_size`、`num_attention_heads`、`ffn_hidden_size`、GQA 时的 `num_query_groups` 全部可被 TP 整除。
+  3. 跨 TP/PP 迁移权重用 `tools/checkpoint/convert.py`，不要手动搬目录。optimizer state 如果转换工具不支持当前版本，先 `--no-load-optim --finetune` smoke 验证权重正确再重建 optimizer state。
+  4. 每次只改一个并行维度，分别 smoke：先 TP=a→b 保持 PP，再 PP 调整；便于定位问题。
+  5. 报告里必须有：原 TP/PP → 目标 TP/PP、checkpoint 目录 shard 数、`convert.py` 命令、转换前后 1 step 的 loss 对比（差距 < 1%）。
+  参考：`github_repo/Megatron-LM/tools/checkpoint/`、labs/l11_megatron_scale_optimization、notebooks/n04_tensor_parallel_linear 的 checkpoint 分片段。

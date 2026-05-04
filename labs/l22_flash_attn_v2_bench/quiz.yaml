@@ -1,0 +1,83 @@
+mission: l22_flash_attn_v2_bench
+title: L08.3 Quiz · FlashAttention v2
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能解释 FA 的内存复杂度优势 + SDPA backend 切换语义。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l22_flash_attn_v2_bench/patch/task.md
+  - title: 读 PyTorch SDPA backend
+    kind: source
+    path: github_repo/pytorch/torch/nn/functional.py
+  - title: 读 FlashAttention v2 论文
+    kind: source
+    path: https://arxiv.org/abs/2307.08691
+
+questions:
+  - id: q1_complexity
+    prompt: FA2 相对 eager attention 的核心优势？
+    options:
+      - id: a
+        text: 内存 O(N) 而不是 O(N²)，由于不实例化全 N×N attention matrix
+        correct: true
+      - id: b
+        text: 计算复杂度更低
+      - id: c
+        text: 只支持 fp16
+      - id: d
+        text: 只能用一个 head
+    explanation: "FA tile-by-tile 计算 softmax，从未把 N×N attention 实例化进 HBM。"
+  - id: q2_sdpa_backend
+    prompt: PyTorch `scaled_dot_product_attention` 默认怎么选 backend？
+    options:
+      - id: a
+        text: 按 (head_dim, dtype, mask, device) 自动选 flash / mem-efficient / math
+        correct: true
+      - id: b
+        text: 总是用 math
+      - id: c
+        text: 总是用 flash
+      - id: d
+        text: 报错
+    explanation: "PyTorch 有 dispatcher；torch.backends.cuda.sdp_kernel 可以强制。"
+  - id: q3_fp16
+    prompt: FA 通常要求 dtype 是？
+    options:
+      - id: a
+        text: bf16 / fp16（fp32 会 fall back 到 math）
+        correct: true
+      - id: b
+        text: 必须 int8
+      - id: c
+        text: 必须 fp64
+      - id: d
+        text: 必须 complex64
+    explanation: "FA kernel 只为 half/bf16 做了高度优化。"
+  - id: q4_causal
+    prompt: causal mask 在 FA 里怎么处理？
+    options:
+      - id: a
+        text: 由 kernel 内部 skip 上三角块，不显式构造 mask
+        correct: true
+      - id: b
+        text: 必须显式 attn_mask
+      - id: c
+        text: 不能用 causal
+      - id: d
+        text: 必须先做 transpose
+    explanation: "FA causal=True 在 tile 边界判断；省去 N×N mask 内存。"
+  - id: q5_paged
+    prompt: vLLM 的 PagedAttention 与 FA 的关系？
+    options:
+      - id: a
+        text: PagedAttention 是 FA 思路的 KV-cache 版本，把"按需 tile"扩展到分页 KV
+        correct: true
+      - id: b
+        text: 完全无关
+      - id: c
+        text: PagedAttention 取代了 FA
+      - id: d
+        text: PagedAttention 只在 fp32 工作
+    explanation: "PagedAttention 沿 KV 维度分块，FA 沿 Q×K 分块；两者经常组合。"

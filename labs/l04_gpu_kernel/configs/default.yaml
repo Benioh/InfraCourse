@@ -1,0 +1,3 @@
+mission: l04_gpu_kernel
+mode: smoke
+hardware_boundary: validation-only by default

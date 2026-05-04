@@ -1,0 +1,13 @@
+profile: h200_pp4
+num_stages: 4
+num_microbatches: 64
+forward_time: 1.0
+backward_time: 2.0
+acceptance:
+  bubble_ratio_max: 0.07
+megatron_command: >
+  torchrun --nproc_per_node=8 github_repo/Megatron-LM/pretrain_gpt.py
+  --pipeline-model-parallel-size 4
+  --num-microbatches-per-virtual-pipeline-stage 1
+  --num-layers 32 --hidden-size 4096 --num-attention-heads 32
+  --train-iters 1000

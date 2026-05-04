@@ -1,0 +1,51 @@
+id: l04_gpu_kernel
+title: Triton 行 softmax（数值稳定）
+level: L01.7
+act: 第 0 章：分布式系统基础
+role: GPU kernel 学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: false  # 需要 GPU + Triton
+
+frameworks:
+  - Triton
+  - CUDA / GPU memory hierarchy
+
+patch:
+  description: |
+    用 triton.jit 写一个行 softmax kernel，与 F.softmax(x, dim=-1) 在 fp32/fp16
+    上数值等价。必须减 max 再 exp（数值稳定）；用 mask + other=-inf 处理 padding。
+  task_md: labs/l04_gpu_kernel/patch/task.md
+  starter_file: labs/l04_gpu_kernel/patch/starter/triton_softmax.py
+  reference_file: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+  test_command: make patch-test M=l04_gpu_kernel
+  status_file: labs/l04_gpu_kernel/patch/.last_run.json
+  test_count: 5
+  test_kind: 结果对比（与 F.softmax 等价）
+
+source_reading:
+  - title: Triton 官方 02-fused-softmax 教程
+    repo_path: docs/术语表.md
+    focus: 看官方教程的 BLOCK_SIZE 选择策略
+  - title: FlashAttention online softmax (paper section 3)
+    repo_path: docs/术语表.md
+    focus: 对照本关的"减 max"与 FA 的"分块累加 max/sum"
+
+mini_infra_targets:
+  - mini_infra/gpu/
+
+notebooks:
+  - notebooks/n11_gpu_memory_hierarchy.ipynb
+  - notebooks/n12_triton_softmax_walkthrough.ipynb
+
+tickets:
+  - kernel_low_bw_003
+  - kernel_oom_smem_002
+  - kernel_shape_mismatch_001
+
+prereq: l03_nccl_ddp_smoke
+next_lab: l05_distributed_primitives
+
+gpu_modes:
+  local: 1×4090（必需）
+  cluster: 1×H200 跑 perf gate

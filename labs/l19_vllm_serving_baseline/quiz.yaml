@@ -1,0 +1,218 @@
+mission: l19_vllm_serving_baseline
+title: L07 Quiz · 采样策略 / vLLM 推理基础
+pass_threshold: 1.0
+description: |
+  这 5 题打中 LLM 采样最容易混淆的点：top_p / typical_p / top_k / temperature
+  的差别、KV cache 的工作机制、PagedAttention 的核心 idea、prefill vs decode
+  的资源 profile。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l19_vllm_serving_baseline/patch/task.md
+  - title: 跑 notebook n07 · KV cache
+    kind: notebook
+    path: notebooks/n07_kv_cache.ipynb
+  - title: 跑 notebook n08 · prefill / decode
+    kind: notebook
+    path: notebooks/n08_prefill_decode.ipynb
+  - title: 读 vLLM PagedAttention paper / blog
+    kind: source
+    path: docs/术语表.md
+
+questions:
+  - id: q1_typical_vs_top_p
+    prompt: |
+      `top_p` (nucleus sampling) 和 `typical_p` (locally typical sampling) 都做"截断采样"，
+      区别是什么？
+    options:
+      - id: a
+        text: 完全等价
+      - id: b
+        text: top_p 按 **概率从大到小** 累加 mass 截断；typical_p 按 **|surprisal - entropy|**
+              的偏离度排序，保留接近期望信息量的 token
+        correct: true
+      - id: c
+        text: top_p 用于 chat，typical_p 用于 base
+      - id: d
+        text: typical_p 必须配合 temperature 使用
+    explanation: |
+      **top_p (nucleus)**：
+        - 把 token 按 prob 从大到小排
+        - cumsum 直到 ≥ p 截断
+        - 偏向"最可能"的 token；相当于动态 top_k
+
+      **typical_p (Meister 2022)**：
+        - 算每个 token 的 surprisal: -log p
+        - 算 batch 整体的 entropy = E[surprisal]
+        - 按 |surprisal - entropy| 升序排（接近期望的优先）
+        - cumsum prob 直到 ≥ p 截断
+        - 同时排除"过分确定"和"过分意外"的 token
+
+      为什么 typical_p 有时更好：
+        - top_p=0.9 仍可能选到极高频的 "the" / 重复 / 模板化 token
+        - typical_p=0.9 倾向选 surprisal 接近平均的 token，输出更自然
+        - 在创作场景（小说、诗）效果更好；事实问答 top_p 仍占优
+
+      实际工业用法：
+        - GPT-4 / Claude：默认 top_p + temperature
+        - Hugging Face 默认提供 typical_p 参数
+        - vLLM `SamplingParams(typical_p=0.95)` 可选
+
+      面试金句："top_p 选最可能的，typical_p 选最自然的——前者保险，后者有趣。"
+
+  - id: q2_kv_cache_purpose
+    prompt: |
+      KV cache 在 LLM 推理里是干什么的？为什么没有 KV cache 的话生成速度慢成数量级？
+    options:
+      - id: a
+        text: 缓存生成的 token，避免重复采样
+      - id: b
+        text: 缓存每层 attention 的 K/V 张量；下一步生成时只需算 query × 缓存的 KV，
+              不需要重新跑前面所有 token 的 forward
+        correct: true
+      - id: c
+        text: 缓存 model weights，让多请求共享
+      - id: d
+        text: 缓存 logits，避免重复 softmax
+    explanation: |
+      Auto-regressive 生成：
+        Step 1: 输入 [t1, t2, t3, t4]，生成 t5
+        Step 2: 输入 [t1, t2, t3, t4, t5]，生成 t6
+        ...
+
+      没有 KV cache：每步都对完整 sequence 跑一次 forward。第 N 步成本 O(N × hidden²)。
+      生成 1000 token 总成本 ≈ 1+2+...+1000 = 500K × hidden²。
+
+      有 KV cache：每层 attention 的 K_i, V_i 缓存住。第 N 步只算：
+        Q_new = x_new @ W_q                    # (1, hidden)
+        K_cache = [K_1, ..., K_{N-1}]; append K_new
+        V_cache = [V_1, ..., V_{N-1}]; append V_new
+        attn = softmax(Q_new @ K_cache^T / √d) @ V_cache  # (1, hidden)
+      成本 O(N × hidden) per step，**第 N 步 N 倍快于 no-cache**。
+
+      代价：KV cache 占显存。每 token 每层 2 × hidden × 2B（fp16） bytes。
+      LLaMA-7B (32 层, hidden=4096)：每 token KV cache = 32 × 2 × 4096 × 2 = 512KB
+      生成 1000 token = 512MB 单 sequence；并发 32 = 16GB。
+
+      这就是为什么 vLLM / SGLang 全部围绕 KV cache 优化（PagedAttention / RadixCache）。
+
+  - id: q3_paged_attention
+    prompt: |
+      vLLM 的 PagedAttention 比 huggingface naive KV cache 节省显存的核心原因是？
+    options:
+      - id: a
+        text: 用 fp8 而不是 fp16 存 KV
+      - id: b
+        text: 把 KV cache 切成 16 token 大小的"page"，按需分配；不预留连续大块显存，
+              而是像 OS 的 paging 一样分散管理 → 消除内部碎片，并发请求共享 page table
+        correct: true
+      - id: c
+        text: 通过算法压缩 KV
+      - id: d
+        text: 把 KV 移到 CPU
+    explanation: |
+      Naive KV cache 问题：
+        - 推理引擎为每个 sequence **预留 max_seq_len 大小的连续显存**
+        - 实际生成 100 token 但 max_seq_len=2048 → 浪费 95% 显存
+        - 32 个并发请求 × 2GB max KV = 64GB 显存，绝大多数闲置
+
+      PagedAttention：
+        - KV cache 按 16-token page 分块（block_size=16）
+        - 每个 sequence 维护一个 **page table**：sequence 的逻辑 token 位置 → 物理 page id
+        - 生成时按需分配新 page；释放后归还到 free pool
+        - 不同 sequence 的 page 可以**共享**（用于 prefix caching、parallel sampling 等）
+
+      效果：
+        - 显存利用率 90%+（vs naive 30%）
+        - 同样硬件能跑 4-10× 并发请求数
+        - 但增加了 attention kernel 复杂度（需要 gather 散落的 page）
+
+      vLLM 论文（Kwon 2023）显示 throughput 比 baseline 提高 2-4×，
+      主要来自更高的 batch size。
+
+      面试金句："PagedAttention 不是 attention 算法的创新，是显存管理的创新——
+      把 KV cache 当 OS 的 page 来管，消除碎片。"
+
+  - id: q4_prefill_vs_decode
+    prompt: |
+      LLM 推理的 prefill 阶段和 decode 阶段的 GPU 资源利用模式有什么本质区别？
+    options:
+      - id: a
+        text: 没区别，都一样
+      - id: b
+        text: prefill 是 compute-bound（一次处理整个 prompt，矩阵乘大）；
+              decode 是 memory-bound（每步只生成 1 token，矩阵乘小，瓶颈在加载 KV cache）
+        correct: true
+      - id: c
+        text: prefill memory-bound，decode compute-bound
+      - id: d
+        text: 两阶段都 latency-bound
+    explanation: |
+      **Prefill**（处理输入 prompt）：
+        - 输入 [t1, ..., t_N] 一次性 forward
+        - 每层 attention：Q,K,V shape = (1, N, hidden)，矩阵乘 = N × hidden²
+        - N 较大（典型 100-2000），算术强度高 → **compute-bound**
+        - GPU 利用率 ~80%+
+        - 每 token 的成本主要是 FLOP
+
+      **Decode**（生成阶段，autoregressive）：
+        - 每步只生成 1 个 token；输入 (1, 1, hidden)
+        - 每层 attention：Q (1,1,h)，K_cache (1,N,h)，V_cache (1,N,h)
+        - 主要操作是 Q × K_cache^T → 加载整个 K_cache 是瓶颈
+        - 算术强度低：FLOP/byte 比 prefill 低 ~100×
+        - **memory-bound**：GPU FLOP 利用率 ~5-15%，瓶颈在 HBM 带宽
+
+      为什么这个区别重要：
+        - prefill 用 batch size 1 也能打满 GPU FLOP（大 N 即可）
+        - decode 必须用 batch size > 1 才能复用 weights load → continuous batching 是 vLLM 核心
+        - Speculative decoding（L08.7）专门优化 decode 阶段
+
+      因此 SGLang / vLLM 的 PD disaggregation（L09 半关）：
+        - 把 prefill 放在一组卡（高 FLOP 利用率，无需大 batch）
+        - 把 decode 放在另一组卡（高 batch，最大化吞吐）
+        - 分开调度避免互相影响 latency
+
+      面试金句："prefill 算的多 FLOPs 而 decode 多在等 HBM——
+      不能用同一种调度。"
+
+  - id: q5_continuous_batching
+    prompt: |
+      "Continuous batching"（vLLM 的核心 trick）解决什么问题？
+    options:
+      - id: a
+        text: 减少 batch 间的 kernel launch
+      - id: b
+        text: 不像传统 static batching 等待整个 batch 完成才下一批，
+              而是每生成一个 token 就检查"哪些 sequence 完成了，哪些新请求来了"，
+              动态替换 batch 中的"slot"，让 GPU 永不空闲
+        correct: true
+      - id: c
+        text: 把 batch 大小连续调整以匹配 GPU 利用率
+      - id: d
+        text: 让 token 在 GPU 间连续流动
+    explanation: |
+      **Static batching 的问题**：
+        Batch 4 个请求生成。请求 A 输出 50 token，请求 B 输出 1000 token。
+        Static：A 完成后必须等 B（其他 slot 空着 950 step），GPU 大量闲置。
+
+      **Continuous batching**：
+        每步 decode 后：
+          1. 检查每个 sequence 是否生成 EOS / 达到 max_tokens
+          2. 完成的释放 slot
+          3. 新请求填入 slot，立即开始 prefill
+        每步 batch 都不一样，但永远满。
+
+      Throughput 收益：
+        - 平均每秒服务的请求数提升 5-15×（取决于序列长度方差）
+        - Tail latency 改善：短请求不再被长请求阻塞
+
+      实现复杂度：
+        - 需要支持任意时刻插入新 prefill 到 ongoing decode batch
+        - PagedAttention 是先决条件（KV cache 必须能动态分配/释放）
+        - SGLang 在此基础上加 RadixCache（L08）做 prefix 复用
+
+      vLLM 论文（Kwon 2023）：continuous batching + PagedAttention 是 throughput 提升的双引擎。
+
+      面试金句："Static batching 等长尾，continuous batching 不等——是大模型 serving
+      系统设计的分水岭。"

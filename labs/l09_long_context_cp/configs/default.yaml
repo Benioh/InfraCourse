@@ -1,0 +1,3 @@
+mission: l09_long_context_cp
+mode: smoke
+hardware_boundary: validation-only by default

@@ -1,0 +1,13 @@
+name: sglang
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch
+  - pyyaml
+  - pip:
+      - sglang
+      - openai

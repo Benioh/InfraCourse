@@ -1,0 +1,56 @@
+id: l33_rl_rollout_freshness
+title: SLiME-shaped Versioned Rollout Manager
+level: L11.5
+act: 第 4 章：RL 与对齐
+role: RL 系统主线学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+
+frameworks:
+  - SLiME
+  - verl
+  - SGLang
+
+patch:
+  description: |
+    实现带 weight_version 的 SLiME-shaped RolloutManager，避免从 stale rollout
+    engine 生成样本，并支持全量/局部 update_weights。
+  task_md: labs/l33_rl_rollout_freshness/patch/task.md
+  starter_file: labs/l33_rl_rollout_freshness/patch/starter/rollout_manager.py
+  reference_file: labs/l33_rl_rollout_freshness/patch/reference/rollout_manager.py
+  test_command: make patch-test M=l33_rl_rollout_freshness
+  status_file: labs/l33_rl_rollout_freshness/patch/.last_run.json
+  test_count: 5
+  test_kind: versioned rollout manager 行为验证
+
+source_reading:
+  - title: SLiME train loop
+    repo_path: github_repo/slime/train.py
+    focus: rollout manager、actor_model.update_weights、训练循环
+  - title: SLiME rollout
+    repo_path: github_repo/slime/slime/ray/rollout.py
+    focus: RolloutServer/Manager、SGLang engine、update_weights
+  - title: SLiME TrainRayActor
+    repo_path: github_repo/slime/slime/ray/train_actor.py
+    focus: actor train、save_model、update_weights 边界
+
+mini_infra_targets:
+  - mini_infra/slime/train.py
+  - mini_infra/slime/ray/rollout.py
+  - mini_infra/slime/ray/train_actor.py
+
+notebooks:
+  - notebooks/n10_rl_kl_reward.ipynb
+
+tickets:
+  - slime_weight_sync_003
+  - slime_rollout_bottleneck_001
+  - slime_reward_collapse_002
+
+prereq: l32_slime_rl_core
+next_lab: l35_multimodal_capstone
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 可对照 SLiME rollout/actor 集群实验

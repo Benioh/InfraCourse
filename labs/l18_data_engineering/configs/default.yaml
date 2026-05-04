@@ -1,0 +1,3 @@
+mission: l18_data_engineering
+mode: smoke
+hardware_boundary: validation-only by default

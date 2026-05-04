@@ -1,0 +1,12 @@
+profile: cpu_smoke
+servers: [s0, s1, s2, s3]
+max_staleness: 1
+total_steps: 50
+update_rate: 0.5
+update_subset_size: 2
+prompts: ["state-1", "state-2", "state-3", "state-4"]
+seed: 0
+acceptance:
+  no_runtime_error_when_update_rate_geq: 0.6
+  must_raise_when_update_rate: 0.0
+  p99_staleness_max: 3

@@ -1,0 +1,12 @@
+profile: h200_bench
+device: cuda
+dtype: bfloat16
+shapes:
+  - {seq_len: 2048, num_heads: 16, head_dim: 64}
+  - {seq_len: 4096, num_heads: 16, head_dim: 64}
+  - {seq_len: 8192, num_heads: 16, head_dim: 128}
+causal: true
+num_iters: 30
+acceptance:
+  speedup_min_at_seq_4096: 3.0
+  max_abs_diff_below: 1.0e-2

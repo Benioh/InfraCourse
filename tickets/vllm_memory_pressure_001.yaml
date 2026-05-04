@@ -1,0 +1,79 @@
+id: vllm_memory_pressure_001
+title: vLLM KV cache 显存压力（preemption 频繁 / 启动 OOM）
+mission: l19_vllm_serving_baseline
+severity: medium
+symptom: vLLM 服务启动时 OOM，或启动 OK 但在高并发下频繁 preempt / swap / recompute，TTFT 抖动剧烈；吞吐远低于预期，`num_preemptions_total` 快速增长。
+error_signatures:
+- "ValueError: The model's max seq len (X) is larger than the maximum number of tokens that can be stored in KV cache (Y)"
+- "torch.OutOfMemoryError: CUDA out of memory 出现在 `LLMEngine` 初始化 KV cache 分配时"
+- "Sequence group ... is preempted by ... mode 频繁出现"
+- metrics 中 `num_preemptions_total` 持续增长、`gpu_cache_usage_perc` 长期 > 95%
+- "WARN: KV cache usage is high, swapping sequence groups"
+classification_questions:
+- OOM 是在**引擎启动**（profile_run 阶段）还是**处理请求时**发生？
+- "`gpu_memory_utilization`、`max_model_len`、`max_num_batched_tokens`、`max_num_seqs` 这四个参数你实际设的多少？"
+- 请求的 seq 长度分布：短 prompt 多还是长 prompt 多？一次多少并发？
+- 有没有开 `--enable-prefix-caching`？命中率怎么样（看 `prefix_cache_hit_rate`）？
+- TP size 和实际可见卡数一致吗？
+likely_causes:
+- "`gpu_memory_utilization` 默认 0.9 偏高；在卡上还有其它进程时 vLLM profile_run 算出的 KV cache block 数过大，实际分配 OOM。"
+- "`max_model_len` 设到了模型理论上限但卡不够大，KV cache 只够装少量 seq，并发一上来就 preempt。"
+- "`max_num_batched_tokens` 调得比 `max_model_len` 小，单个长 prompt 都装不进，必须 chunked prefill；关了就直接拒收。"
+- TP size 比可见 GPU 少（如 2 卡只开 TP=1），另一张卡完全没用，KV 容量减半。
+- 请求并发高 × 平均 seq 长 × 层数 × hidden × 2 (K,V) × bytes 超过实际 KV cache 可容纳，进入 swap/recompute 循环。
+minimal_checks:
+- "启动日志里找：`Maximum concurrency for X tokens per request: Y requests` 和 `# GPU blocks: Z`，Z 很小就是 KV 容量不足。"
+- "`nvidia-smi` 看 vLLM 启动后显存占用。如果 < `gpu_memory_utilization * total`，说明 profile_run 保守；如果 ≈ total，说明没余量给峰值激活。"
+- "发 1 个最长 prompt 请求，看能不能 happily 处理——不能就是 `max_model_len` / `max_num_batched_tokens` 不够。"
+- "压测（locust / hey）并发 10→50→100，观察 `gpu_cache_usage_perc` 和 `num_preemptions_total`。preempt 出现的并发就是你这套配置的上限。"
+- "开 `--enable-prefix-caching` 再跑相同 workload，看 hit rate；如果 workload 有共享前缀（system prompt、few-shot），命中后能释放大量 block。"
+minimal_fixes:
+- 启动 OOM：先把 `--gpu-memory-utilization 0.85` 降一档；给其它进程留余量。
+- KV 不够：降低 `--max-model-len` 到真实需要的长度（4k/8k），或升 TP size 把 KV shard 到更多 GPU。
+- 并发 preempt：减小 `--max-num-seqs`（同时活跃的 seq 上限）或增大 `--swap-space`（CPU swap 作为 overflow）。
+- 长 prompt：开 chunked prefill `--enable-chunked-prefill`，并把 `--max-num-batched-tokens` 调到 prompt 平均长度的 2-4 倍而不是满值。
+- 有共享 system prompt 的 workload：`--enable-prefix-caching`，通常命中 30-80% KV。
+- 量化模型（AWQ/GPTQ/FP8）或 KV cache 量化（`--kv-cache-dtype fp8`）直接把 KV 容量翻倍。
+what_not_to_do:
+- 不要直接把 `--gpu-memory-utilization` 拉到 0.98 挤最后一点空间——profile_run 估不准峰值，稳定性崩溃。
+- 不要在 preempt 严重时盲目 `--max-num-seqs` 拉大，只会加剧 swap。
+- 不要关掉 `--enable-chunked-prefill` 然后抱怨长 prompt 塞不下。
+- 不要忽略 `num_preemptions_total` 的持续增长，它是性能下降的领先指标。
+hint_1: |
+  从 `vllm serve` 启动日志抓三个关键数字：
+  ```
+  INFO ... # GPU blocks: 8192    <- 可用 KV block 总数
+  INFO ... # CPU blocks: 4096    <- swap 容量
+  INFO ... Maximum concurrency for 32768 tokens per request: 3.05x
+  ```
+  block 数 × block_size(默认 16) = 总 token 容量。
+  - 容量 / `max_model_len` < 2 → 并发基本只能 1，长 prompt 就会 preempt。
+  - 容量 / `max_model_len` ≥ 10 → KV 充裕，若还 preempt 就是 `max_num_seqs` 限制。
+hint_2: |
+  确定修复方向：
+  ```
+  # GPU blocks 太少
+    → --gpu-memory-utilization 0.85-0.9（给余量）
+    → --max-model-len 调到实际需要（不要给满）
+    → TP 加卡 shard KV
+    → --kv-cache-dtype fp8  KV 容量 ~2×
+    → 量化模型到 AWQ/FP8  腾出更多 KV 空间
+
+  # GPU blocks 够但 num_preemptions 仍高
+    → --max-num-seqs 调小到 GPU_blocks * block_size / avg_seq_len
+    → 开 --enable-prefix-caching（共享前缀 workload 立刻见效）
+    → --swap-space 16  （CPU overflow 缓冲）
+
+  # 长 prompt 塞不进
+    → --enable-chunked-prefill
+    → --max-num-batched-tokens 8192  （不要设成 max_model_len）
+  ```
+  每改一项跑一次 fixed workload 压测，记录 TTFT p50/p99、throughput、num_preemptions。
+solution: |
+  vLLM 的 KV cache 不变量是「启动时 profile_run 算出 GPU blocks → 运行时 block 被 seq 持有 → 不够则 preempt（recompute / swap）」。
+  诊断三步：
+  1. 从启动日志读 GPU blocks 总量，与 `max_model_len × max_num_seqs` 对比，估出理论并发。
+  2. 固定 workload 压测，观察 `gpu_cache_usage_perc` 和 `num_preemptions_total`，定位是容量瓶颈还是调度上限。
+  3. 对症下药：容量不够 → 降 max_model_len / 加 TP / KV 量化 / 模型量化；并发过高 → 降 max_num_seqs 或开 prefix cache。
+  最终报告里必须贴：启动日志的 GPU blocks/CPU blocks/Max concurrency 三行、压测 workload 描述、修复前后 TTFT p50/p99、throughput、preemption_rate 对比。
+  参考：`github_repo/vllm/vllm/engine/arg_utils.py`（参数定义）、`github_repo/vllm/vllm/core/scheduler.py`（preempt 逻辑）、labs/l19_vllm_serving_baseline、notebooks/n07_kv_cache。

@@ -1,0 +1,83 @@
+mission: l20_vllm_scheduler_kv
+title: L07.5 Quiz · vLLM scheduler / KV cache
+pass_threshold: 1.0
+description: |
+  检查学习者是否理解 vLLM 请求生命周期和 KV block 调度边界。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l20_vllm_scheduler_kv/patch/task.md
+  - title: 读 vLLM engine
+    kind: source
+    path: github_repo/vllm/vllm/v1/engine/llm_engine.py
+  - title: 读 vLLM scheduler
+    kind: source
+    path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+
+questions:
+  - id: q1_lifecycle
+    prompt: OpenAI 请求进入 vLLM 后通常先被转换成什么？
+    options:
+      - id: a
+        text: engine request / internal request
+        correct: true
+      - id: b
+        text: Megatron optimizer state
+      - id: c
+        text: WebDataset shard
+      - id: d
+        text: PPO advantage
+    explanation: "OpenAI facade 不是核心调度层，请求会进入 engine/scheduler。"
+  - id: q2_kv_pressure
+    prompt: KV block 不足最直接影响什么？
+    options:
+      - id: a
+        text: waiting 请求能否 prefill / running 请求能否继续
+        correct: true
+      - id: b
+        text: tokenizer vocab 是否存在
+      - id: c
+        text: README 渲染
+      - id: d
+        text: optimizer warmup
+    explanation: "KV cache 是 serving scheduler 的核心资源约束。"
+  - id: q3_ttft
+    prompt: 长 prompt 的 TTFT 通常主要受哪一阶段影响？
+    options:
+      - id: a
+        text: prefill
+        correct: true
+      - id: b
+        text: checkpoint save
+      - id: c
+        text: Adam moment update
+      - id: d
+        text: MinHash
+    explanation: "首 token 前要先完成 prompt prefill。"
+  - id: q4_itl
+    prompt: ITL 更直接对应哪个阶段？
+    options:
+      - id: a
+        text: decode step
+        correct: true
+      - id: b
+        text: data preprocess
+      - id: c
+        text: LR restart
+      - id: d
+        text: tar shard 写入
+    explanation: "Inter-token latency 是 decode token 间隔。"
+  - id: q5_debug
+    prompt: 如果服务吞吐下降且 waiting 队列增长，最应该同时看什么？
+    options:
+      - id: a
+        text: token budget、KV free blocks、running/waiting 队列和请求长度分布
+        correct: true
+      - id: b
+        text: 只看 HTTP 200 状态码
+      - id: c
+        text: 只看 README
+      - id: d
+        text: 只看训练 loss
+    explanation: "serving 性能问题需要看 scheduler 资源和请求分布。"

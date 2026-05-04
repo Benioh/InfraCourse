@@ -1,0 +1,7 @@
+profile: h200_pp8
+num_stages: 8
+num_microbatches: 128
+forward_time: 1.0
+backward_time: 2.0
+acceptance:
+  bubble_ratio_max: 0.07

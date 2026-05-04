@@ -1,0 +1,50 @@
+id: l02_pytorch_systems
+title: 显存账本（params/grads/optimizer states）
+level: L01
+act: 第 0 章：分布式系统基础
+role: PyTorch 系统学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+
+patch:
+  description: |
+    实现 3 个显存计数函数：count_param_bytes / count_grad_bytes /
+    count_optimizer_state_bytes。写完之后能精确回答「7B 模型用 Adam
+    训练要多少显存」。
+  task_md: labs/l02_pytorch_systems/patch/task.md
+  starter_file: labs/l02_pytorch_systems/patch/starter/memory_probe.py
+  reference_file: labs/l02_pytorch_systems/patch/reference/memory_probe.py
+  test_command: make patch-test M=l02_pytorch_systems
+  status_file: labs/l02_pytorch_systems/patch/.last_run.json
+  test_count: 7
+  test_kind: 结果对比
+
+source_reading:
+  - title: PyTorch optim 的 Adam state 结构
+    repo_path: github_repo/torchtitan/torchtitan/optim/__init__.py
+    focus: 看 Adam 的 state["exp_avg"] / state["exp_avg_sq"] 在哪一步分配
+  - title: TorchTitan ParallelDims 与 state_dict 边界
+    repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+    focus: 理解 state_dict 与 named_parameters 的关系
+
+mini_infra_targets:
+  - mini_infra/gpu/
+
+notebooks:
+  - notebooks/n01_gpu_memory_anatomy.ipynb
+
+tickets:
+  - pt_oom_001
+  - pt_dataloader_slow_002
+  - pt_nan_loss_003
+
+prereq: l01_env_conda_cuda
+next_lab: l03_nccl_ddp_smoke
+
+gpu_modes:
+  local: CPU 即可
+  cluster: 1×4090 / 1×H200 跑 GPU 标记测试

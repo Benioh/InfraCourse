@@ -1,0 +1,81 @@
+mission: l28_sft_qwen_alpaca
+title: L09.8 Quiz · SFT loss mask 与 chat template
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能解释 SFT 为什么必须屏蔽 prompt token 的 loss，以及 chat
+  template 的细节。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l28_sft_qwen_alpaca/patch/task.md
+  - title: 读 HuggingFace Trainer 文档
+    kind: source
+    path: github_repo/transformers/src/transformers/trainer.py
+
+questions:
+  - id: q1_loss_mask
+    prompt: SFT 训练为什么不能在 prompt token 上算 loss？
+    options:
+      - id: a
+        text: 因为 prompt 不是模型应该"产生"的内容，只把 assistant 回答作为目标更稳定
+        correct: true
+      - id: b
+        text: 反过来才对
+      - id: c
+        text: 不影响结果
+      - id: d
+        text: prompt token 必须 fp32
+    explanation: "若 prompt 也算 loss，模型会试图复述 prompt，对话能力下降。"
+  - id: q2_ignore_index
+    prompt: PyTorch `F.cross_entropy(ignore_index=-100)` 的语义？
+    options:
+      - id: a
+        text: labels==-100 的位置不计入 loss，也不进入分母
+        correct: true
+      - id: b
+        text: 把对应位置 logits 置零
+      - id: c
+        text: 抛 RuntimeError
+      - id: d
+        text: 当作 padding token
+    explanation: "ignore_index 既不计 loss 也不计样本数。"
+  - id: q3_chat_template
+    prompt: Qwen2.5 / Llama-3 等 chat template 的核心目的是？
+    options:
+      - id: a
+        text: 让 tokenizer 在 system / user / assistant 之间插入特殊分隔符，便于 SFT 与推理一致
+        correct: true
+      - id: b
+        text: 让 model 自动输出 markdown
+      - id: c
+        text: 强制使用 fp16
+      - id: d
+        text: 固定 max_length
+    explanation: "chat template = 消息 → 一段拼好的 prompt 字符串 + 特殊分隔符。"
+  - id: q4_eos
+    prompt: SFT 数据里 assistant 回答末尾要不要加 EOS？
+    options:
+      - id: a
+        text: 必须加，否则推理时模型不知道何时停止
+        correct: true
+      - id: b
+        text: 一定不能加
+      - id: c
+        text: 加了会报错
+      - id: d
+        text: 与 model 无关
+    explanation: "EOS 是 assistant 段的最后一个学习目标，对应推理 stop。"
+  - id: q5_lr
+    prompt: SFT 推荐 lr 量级（相对 pretrain）？
+    options:
+      - id: a
+        text: 比 pretrain lr 小一到两个数量级（如 1e-5 ~ 5e-5）
+        correct: true
+      - id: b
+        text: 比 pretrain 大 10×
+      - id: c
+        text: 与 pretrain 完全一致
+      - id: d
+        text: 必须固定为 0.1
+    explanation: "SFT 不要破坏 pretrain 知识；lr 通常 1e-5 ~ 5e-5。"

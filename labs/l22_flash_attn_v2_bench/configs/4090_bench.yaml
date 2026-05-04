@@ -1,0 +1,12 @@
+profile: 4090_bench
+device: cuda
+dtype: bfloat16
+shapes:
+  - {seq_len: 512, num_heads: 8, head_dim: 64}
+  - {seq_len: 1024, num_heads: 8, head_dim: 64}
+  - {seq_len: 2048, num_heads: 8, head_dim: 64}
+causal: true
+num_iters: 20
+acceptance:
+  speedup_min_at_seq_2048: 2.0
+  max_abs_diff_below: 1.0e-2

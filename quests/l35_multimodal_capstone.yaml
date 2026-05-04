@@ -1,0 +1,52 @@
+id: l35_multimodal_capstone
+title: ★★ MM-Tiny-Omni 多模态 Capstone
+level: L12
+act: 第 5 章：Capstone
+role: 多模态系统工程师
+priority: ★★ Capstone（最高）
+estimated_minutes: 1800  # 三阶段总计 30 小时
+no_gpu_friendly: false  # 需要 1×H100 至少
+
+frameworks:
+  - PyTorch
+  - Megatron-LM (Stage A 训练)
+  - SGLang (Stage B 推理)
+  - SLiME (Stage C RL)
+  - CLIP-ViT-B/32
+  - Whisper-tiny
+
+patch:
+  description: |
+    Capstone Bronze：实现 mm-tiny-omni 三个核心组件：
+      MultimodalProjector（Stage A 图像 / 音频投影到 LLM 空间）
+      wer_score（Stage C audio reward）
+      clip_score（Stage C image reward）
+    完成 patch + 通过 7 个测试 = Bronze。Silver/Gold 见 CAPSTONE_PLAN.md。
+  task_md: labs/l35_multimodal_capstone/patch/task.md
+  starter_file: labs/l35_multimodal_capstone/patch/starter/mm_omni.py
+  reference_file: labs/l35_multimodal_capstone/patch/reference/mm_omni.py
+  test_command: make patch-test M=l35_multimodal_capstone
+  status_file: labs/l35_multimodal_capstone/patch/.last_run.json
+  test_count: 7
+  test_kind: 结果对比 + 形状契约 + 数值校验
+
+source_reading:
+  - title: LLaVA-1.5 paper / Qwen2-VL paper / Qwen-Audio paper
+    repo_path: docs/术语表.md
+    focus: 看真实多模态 LLM 的训练阶段、token 占位策略、推理优化
+  - title: 整门课 19 个 patch 的整合方式
+    repo_path: docs/能力矩阵.md
+
+mini_infra_targets:
+  - mini_infra/
+
+notebooks: []
+
+tickets: []
+
+prereq: l33_rl_rollout_freshness
+next_lab: ""  # 终关
+
+gpu_modes:
+  local: 1×H100 (Stage A 训练 4h)
+  cluster: 1×H100 完整三阶段 30h

@@ -1,0 +1,8 @@
+profile: cpu_smoke
+num_stages: 4
+num_microbatches: 8
+forward_time: 1.0
+backward_time: 2.0
+acceptance:
+  bubble_eq: 6
+  total_ops_eq: 64

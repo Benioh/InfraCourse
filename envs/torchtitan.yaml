@@ -1,0 +1,14 @@
+name: torchtitan
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pyyaml
+  - pip:
+      - torchtitan

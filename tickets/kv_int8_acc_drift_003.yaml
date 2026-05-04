@@ -1,0 +1,166 @@
+id: kv_int8_acc_drift_003
+title: KV-int8 低并发 acc 正常，高并发出现累积漂移
+mission: l23_quant_serving
+severity: medium
+symptom: |
+  开 KV-cache int8 量化后：
+  (a) batch=1 单请求 acc 与 fp16 几乎一样；
+  (b) batch=16 时 acc 微降（<1pp）；
+  (c) batch=64+ 高并发时 acc 显著漂移（3-8pp）；
+  (d) 长 ctx (4K+) 比短 ctx 更糟；
+  (e) 同一 prompt 在不同 batch composition 下输出不一致。
+error_signatures:
+- "kv_int8 acc_drop_pp > 3 at batch=64+, < 1 at batch=1"
+- "long prompt (>4K) acc drop > short prompt acc drop"
+- "同 prompt 不同 batch 输出 token 序列不一致"
+- "KV cache hit rate 突然下降（dequant 浮点偏差让 hash 不命中）"
+- "logits.std() 在 decode 阶段单调下降（信息累积损失）"
+classification_questions:
+- KV 量化是 per-token 还是 per-channel 还是 per-tensor？
+- 对称量化还是非对称？scale 怎么算？
+- 高并发时 KV 总量是否超 GPU memory（被 evict）？
+- prefix cache 是否与 KV-int8 兼容？
+- decode step 数与 acc 漂移是否相关（长 decode 漂移更大）？
+likely_causes:
+- per-tensor scale：单一 scale 不能覆盖所有 token / channel 的动态范围
+- 对称量化：8-bit 仅 -127 到 127，对正激活分布浪费一半范围
+- 累积量化误差：每 decode step 都 quant + dequant 一次，长序列累积
+- batch 内 KV 共享 scale：不同请求的 K/V 范围差异大
+- prefix cache key 用 dequantized KV → 浮点偏差让 hit rate 下降
+- KV evict 策略与量化交互：evict 后重 prefill，量化误差再发生一次
+minimal_checks:
+- 用 `mini_infra/sglang/quant/kv_int8.py` 看量化精度：
+  ```python
+  from mini_infra.sglang.quant.kv_int8 import kv_int8_summary  # 假设存在
+  print(kv_int8_summary(num_tokens=4096))
+  ```
+- 跑 batch sweep（1/4/16/64/128）看 acc 曲线
+- 同 prompt 不同 batch composition 跑 10 次，看 output 一致性
+- dump KV cache 的 max/min 历史：看不同 token 范围差距
+- 测 prefix cache hit rate 在 fp16 vs int8 下的差异
+- 长 decode 测试：让模型生成 500 token，看 logits.std 是否单调降
+minimal_fixes:
+- 改 per-token scale：每个 token 的 KV 单独 scale
+  ```python
+  scale_per_token = K.abs().max(dim=-1, keepdim=True)  # (B, H, T, 1)
+  ```
+- 用非对称量化：保留 zero point，提高动态范围利用
+- KV cache 用 fp8 而不是 int8：fp8 范围更广（e4m3 ±240）
+- 限制并发到 acc 可接受范围（如 batch ≤ 32）
+- prefix cache key 用量化后整数值而非 dequant 浮点
+- 关键 layer（最后几层）KV 不量化，只量化中间层
+what_not_to_do:
+- 不要在 batch=1 测 acc OK 后就上 batch=128 上线——必须并发 sweep
+- 不要忽略累积误差——decode 步数越多漂移越大，长生成必测
+- 不要 per-tensor scale 然后说 "int8 不行"——根因是 scale 选择
+- 不要把 KV-int8 与 prefix cache 直接组合而不验证 hit rate
+- 不要在 acc_drop_pp > 3 的情况下仍宣布 "KV-int8 部署成功"
+hint_1: |
+  3 分钟法：先验证 scale 策略：
+  ```python
+  import torch
+
+  # 模拟 KV 张量（B, H, T, D）
+  kv = torch.randn(64, 32, 4096, 128)
+
+  # per-tensor scale
+  scale_pt = kv.abs().max() / 127.0
+  q_pt = (kv / scale_pt).round().clamp(-127, 127).to(torch.int8)
+  err_pt = (q_pt.float() * scale_pt - kv).abs().max()
+
+  # per-token scale
+  scale_pte = kv.abs().max(dim=-1, keepdim=True).values / 127.0
+  q_pte = (kv / scale_pte).round().clamp(-127, 127).to(torch.int8)
+  err_pte = (q_pte.float() * scale_pte - kv).abs().max()
+
+  # per-channel scale
+  scale_pc = kv.abs().amax(dim=(0, 2), keepdim=True) / 127.0
+  q_pc = (kv / scale_pc).round().clamp(-127, 127).to(torch.int8)
+  err_pc = (q_pc.float() * scale_pc - kv).abs().max()
+
+  print(f'per-tensor max_err   = {err_pt:.4f}')
+  print(f'per-token max_err    = {err_pte:.4f}  (推荐)')
+  print(f'per-channel max_err  = {err_pc:.4f}')
+  ```
+  per-token 通常误差最小。如果你当前用 per-tensor → 改 per-token。
+
+  在你的 SGLang 配置：
+  ```yaml
+  kv_quant:
+    dtype: int8
+    scale_strategy: per_token   # 关键
+    asymmetric: true            # 非对称提精度
+  ```
+hint_2: |
+  per-token 仍漂移，问题在累积误差或 prefix cache 交互。
+
+  累积误差检测：
+  ```python
+  # 让模型生成 500 token，每 100 token dump logits
+  prompt = "Solve: 2 + 3 = "
+  outputs_fp16 = model_fp16.generate(prompt, max_new_tokens=500, return_logits=True)
+  outputs_int8 = model_int8.generate(prompt, max_new_tokens=500, return_logits=True)
+
+  for step in [0, 100, 200, 300, 400]:
+      kl = kl_divergence(outputs_fp16.logits[step], outputs_int8.logits[step])
+      print(f'step {step}: KL = {kl:.4f}')
+  ```
+  期望：KL 应该不显著增长。如果 KL 单调上升 → 累积误差。
+
+  解决：
+  - 选择性量化：只量化 attention layer 的 KV，最后 4 层不量化
+  - 限制 max_new_tokens（应用层限制）
+  - KV 用 fp8 替代 int8（fp8 累积误差小得多）
+
+  Prefix cache 交互检查：
+  ```python
+  # 同 prompt 跑 100 次，看 cache hit rate
+  hits_fp16 = run_with_kv_dtype('fp16', prompts=[prompt]*100)
+  hits_int8 = run_with_kv_dtype('int8', prompts=[prompt]*100)
+  print(f'fp16 hit rate: {hits_fp16["cache_hit"]/100}')
+  print(f'int8 hit rate: {hits_int8["cache_hit"]/100}')
+  ```
+  如果 int8 hit rate 显著低 → cache key 用了 dequant 浮点，改用整数值。
+
+  极端 fallback：
+  - KV 不量化，仅 weight 量化（acc 几乎无损）
+  - 或者用 KV-fp8（H100/H200 上速度也快）
+solution: |
+  KV-int8 漂移的修复路径：**(1) per-token scale → (2) 非对称量化 → (3) 限并发或换 fp8 → (4) 选择性量化 → (5) 修 prefix cache 交互**。
+
+  **推荐配置**：
+  ```yaml
+  kv_quant:
+    dtype: int8
+    scale_strategy: per_token
+    symmetric: false              # 非对称
+    skip_layers: [-1, -2, -3, -4] # 最后 4 层不量化
+    cache_key_strategy: integer   # 用 quantized 整数做 cache key
+  ```
+
+  **acc-throughput 决策树**（按硬件）：
+  - **4090 / A100**：KV-int8 per-token，限 batch ≤ 32
+  - **H100 / H200**：直接用 KV-fp8（e4m3），不用 int8
+  - **极端 acc 敏感**：KV 不量化，仅 weight quant
+
+  **必做 checklist**：
+  1. ✓ per-token scale（不是 per-tensor）
+  2. ✓ 非对称量化
+  3. ✓ batch sweep（1/4/16/64/128）的 acc 曲线
+  4. ✓ 长 decode（500+ token）累积误差测试
+  5. ✓ prefix cache hit rate 与 fp16 对比
+  6. ✓ acc_drop_pp < 2 at target batch size
+
+  **报告里必须写**：
+  - scale 策略 + 理由
+  - batch sweep acc 表（5 档以上）
+  - 累积误差 KL 曲线（横轴 decode step）
+  - prefix cache hit rate 对比
+  - 你最终选的部署 batch 上限 + acc 边界
+
+  **危险信号**（任一触发就该重新设计）：
+  - batch=128 acc_drop > 5pp
+  - decode 500 步 KL > 0.5
+  - prefix cache hit rate 下降 > 10%
+
+  参考：`mini_infra/sglang/quant/kv_int8.py`、`docs/术语表.md#kv-cache-量化`、L08.5 README。

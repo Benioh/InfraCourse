@@ -1,0 +1,80 @@
+mission: l25_serve_eval_lm_eval
+title: L08.8 Quiz · evaluation harness
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能解释为什么单一 metric 不可靠、few-shot 顺序为什么影响 GSM8K 分数。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l25_serve_eval_lm_eval/patch/task.md
+  - title: 读 lm-evaluation-harness
+    kind: source
+    path: github_repo/lm-evaluation-harness/lm_eval/api/task.py
+
+questions:
+  - id: q1_metric
+    prompt: GSM8K 同时报 exact_match 和 first_number_match 的目的是？
+    options:
+      - id: a
+        text: 区分"格式错（数字对了但带$/句号）"和"实质错"
+        correct: true
+      - id: b
+        text: 让 metric 看起来更多
+      - id: c
+        text: 强制 fp32
+      - id: d
+        text: 保护 tokenizer
+    explanation: "格式 robustness 是评测 noise 的主要来源；double metric 能把它隔离。"
+  - id: q2_few_shot
+    prompt: GSM8K few-shot 示例顺序为什么影响分数？
+    options:
+      - id: a
+        text: 模型对 prompt 顺序敏感（recency bias）+ token 总长影响 attention
+        correct: true
+      - id: b
+        text: 数据 shuffle 一定不影响
+      - id: c
+        text: 与 LR 有关
+      - id: d
+        text: 与 vocab 有关
+    explanation: "few-shot ordering 已被多篇论文证实显著影响分数。"
+  - id: q3_temperature
+    prompt: 评测时常用 temperature?
+    options:
+      - id: a
+        text: 0（greedy）以保证可重复
+        correct: true
+      - id: b
+        text: 1.0
+      - id: c
+        text: 必须 nucleus
+      - id: d
+        text: 必须 beam=4
+    explanation: "GSM8K 类 deterministic 评测一般 greedy；少数任务用 majority voting。"
+  - id: q4_stop
+    prompt: 评测必须设置 stop sequence 的原因？
+    options:
+      - id: a
+        text: 防止模型继续生成下一题，污染答案
+        correct: true
+      - id: b
+        text: 提升吞吐
+      - id: c
+        text: 与 KV cache 无关
+      - id: d
+        text: 让 logits 变 fp32
+    explanation: "few-shot prompt 末尾要 'Question:' 之类 stop，否则模型会自问自答。"
+  - id: q5_endpoint
+    prompt: vLLM 与 SGLang 的 OpenAI 兼容接口共用什么 schema？
+    options:
+      - id: a
+        text: /v1/chat/completions、/v1/completions
+        correct: true
+      - id: b
+        text: 私有二进制
+      - id: c
+        text: gRPC only
+      - id: d
+        text: 必须用 streaming
+    explanation: "两者都暴露 OpenAI 兼容 REST，便于 lm-eval-harness 直接打。"

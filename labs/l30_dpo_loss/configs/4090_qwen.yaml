@@ -1,0 +1,16 @@
+profile: 4090_qwen
+mode: hf
+beta: 0.1
+model_hf: Qwen/Qwen2.5-0.5B-Instruct
+ref_hf: Qwen/Qwen2.5-0.5B-Instruct
+preference_dataset: HuggingFaceH4/ultrafeedback_binarized
+num_pairs: 5000
+training:
+  lr: 5.0e-6
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  num_train_steps: 200
+  precision: bf16
+  max_length: 1024
+acceptance:
+  reward_accuracy_min: 0.6

@@ -1,0 +1,59 @@
+id: pt_nan_loss_003
+title: 学习率过高导致 NaN loss
+mission: l02_pytorch_systems
+severity: medium
+symptom: 训练初期或某个 step 后 loss 从合理值突然变 `nan` / `inf`，grad norm 一起爆炸；restart 后可能再发生。
+error_signatures:
+- "loss=nan 或 \"loss=inf\" 连续出现"
+- "FloatingPointError / \"Assertion `!isnan(x)` failed\""
+- "grad_norm=inf 或 \"gradient overflow\" 日志"
+- amp 下 "Gradient overflow. Skipping step, loss scaler" 反复出现
+classification_questions:
+- NaN 出现在第一步、前 N 步、还是训练中段？训练中段的 NaN 与 lr schedule、warmup 结束点对得上吗？
+- 是 forward 的 loss 先 NaN，还是 backward 后 grad 先 NaN？中间层的 activation 是否已经 NaN？
+- 是否刚打开 bf16/fp16 autocast？loss scaler 是否频繁 skip？
+- 输入数据是否已经含 inf/nan（破图、破 tokenizer、空 label）？
+likely_causes:
+- 学习率过大或 warmup 太短：梯度第一轮就把参数推出合理区间。
+- Loss 函数数值不稳：`log(0)`、softmax 未减 max、attention score 未 scale by `1/sqrt(d_k)`。
+- Mixed precision 溢出：fp16 动态范围不足，attention logits 或 loss 超出 65504。
+- 数据侧 NaN：图像/音频未归一化、label 越界、tokenizer 输出非法 id。
+- grad clip 阈值过大或被注释掉。
+minimal_checks:
+- 在 forward 后立即 `assert torch.isfinite(logits).all()`，找到第一个 NaN 源头是输入、forward、还是 loss。
+- 把 lr 降到 1e-5 重跑 50 步；能稳定 → 是 lr / warmup 问题；仍爆 → 数值稳定性或数据。
+- 打印每层 activation 的 `max().abs()`，定位哪一层先溢出（通常是 attention scores 或 layernorm 之后）。
+- 切到 fp32（关掉 autocast）重跑；如果 fp32 正常、bf16/fp16 爆，就是精度问题。
+minimal_fixes:
+- 加 grad clipping：`torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)`，必须在 `optimizer.step()` 之前。
+- 缩 lr 或延长 warmup；transformer 类一般首个 warmup `max_lr * 0.1` 起步。
+- 用 bf16 代替 fp16（动态范围更大），或给 loss scale 设上限避免反复 skip。
+- 数据侧：`torch.nan_to_num`、label mask、检查 tokenizer special token 映射。
+what_not_to_do:
+- 不要直接 `loss = torch.nan_to_num(loss)` 继续训练——梯度已经污染。
+- 不要把 NaN step 的 log 删掉或 `try/except` 吞掉。
+- 不要只调 lr 不加 grad clip，爆一次就可能污染 optimizer state。
+hint_1: |
+  在训练 loop 的 forward 后、backward 前各插一个断言：
+  ```
+  assert torch.isfinite(logits).all(), f"step={step} logits has nan"
+  assert torch.isfinite(loss), f"step={step} loss={loss.item()}"
+  ```
+  backward 后再打印 `grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1e9)`（用超大阈值只观测不裁剪）。
+  第一个触发的断言告诉你是输入、forward、还是 backward 侧先坏。
+hint_2: |
+  如果 logits 先 NaN：
+  - 关掉 autocast 跑纯 fp32，同一组数据 / 同一 seed 重跑。fp32 稳 → fp16/bf16 溢出，换 bf16 或加 LayerNorm eps 到 1e-5。
+  - attention scores 用 `scale = 1/sqrt(d_k)` 放在 softmax 前。
+  如果 loss 先 NaN 但 logits OK：
+  - 看 label：CrossEntropy 中 label 越界直接 NaN；加 `assert (labels >= 0).all() and (labels < vocab_size).all()`。
+  如果 backward 后 grad NaN 但 forward OK：
+  - 学习率 / warmup 问题。把 lr 折 10 倍 + 前 500 步线性 warmup，加 grad clip 1.0。
+solution: |
+  NaN 的根本诊断顺序是**数据 → forward → loss → backward**，每一层隔离再下结论。
+  1. 先 `assert isfinite` 锁定第一个 NaN 出现位置。
+  2. 如果是精度：fp32 对照一次，换 bf16 解决大多数 transformer 情况。
+  3. 如果是 lr：把 lr×0.1、warmup ×3、加 `clip_grad_norm_(1.0)` 三件套一起上。
+  4. 如果是数据：在 collate_fn 加 `torch.nan_to_num(..., posinf=1e4, neginf=-1e4)` 和 label 越界断言。
+  5. 修复后必须**从上一个健康 checkpoint 重启**，不要在已污染的 optimizer state 上继续。
+  参考：labs/l02_pytorch_systems、notebooks/n01_gpu_memory_anatomy、Megatron 默认 `--clip-grad 1.0`。

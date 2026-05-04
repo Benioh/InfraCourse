@@ -1,0 +1,84 @@
+mission: l07_dataset_megatron_bin
+title: L03.5 Quiz · Megatron IndexedDataset 文件格式
+pass_threshold: 0.8
+description: |
+  这 5 题确认你能解释 Megatron 为什么用自定义 .bin/.idx 而不是 HuggingFace
+  Arrow / WebDataset。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l07_dataset_megatron_bin/patch/task.md
+  - title: 读 Megatron preprocess_data.py
+    kind: source
+    path: github_repo/Megatron-LM/tools/preprocess_data.py
+  - title: 读 IndexedDataset 实现
+    kind: source
+    path: github_repo/Megatron-LM/megatron/core/datasets/indexed_dataset.py
+
+questions:
+  - id: q1_layout
+    prompt: Megatron `.bin/.idx` 的核心设计目标是什么？
+    options:
+      - id: a
+        text: 通过 mmap 在多 worker 之间零拷贝、低开销随机读，兼容 GPT-style packing
+        correct: true
+      - id: b
+        text: 强制使用 fp16
+      - id: c
+        text: 替代 tokenizer
+      - id: d
+        text: 只支持单卡训练
+    explanation: ".bin/.idx 的关键是 mmap + offset/length 表，方便 streaming + multi-worker。"
+  - id: q2_idx_header
+    prompt: idx 文件头里通常包含什么？
+    options:
+      - id: a
+        text: magic + version + dtype + sample_count + total_tokens
+        correct: true
+      - id: b
+        text: 完整 tokenizer vocab
+      - id: c
+        text: 完整 model state
+      - id: d
+        text: HTTP header
+    explanation: "idx 头携带元数据；样本本身在 bin 文件。"
+  - id: q3_dtype
+    prompt: 32k vocab 推荐 token id dtype？
+    options:
+      - id: a
+        text: int32（uint16 也可，32k 刚好临界）
+        correct: true
+      - id: b
+        text: float64
+      - id: c
+        text: bool
+      - id: d
+        text: complex64
+    explanation: "32k vocab 要 ≥ 16 bit；常用 int32 留余量给特殊 token。"
+  - id: q4_random_access
+    prompt: IndexedDataset[i] 必须 O(1) 随机读，靠的是？
+    options:
+      - id: a
+        text: idx 文件里 offsets 表 + bin 文件 mmap
+        correct: true
+      - id: b
+        text: 全量 load 到内存
+      - id: c
+        text: 调用 HTTP 接口
+      - id: d
+        text: 实时 tokenize
+    explanation: "offset 表把第 i 条直接 seek 到 bin 偏移。"
+  - id: q5_mistake
+    prompt: 做数据 dedup 后再 tokenize 的常见错误？
+    options:
+      - id: a
+        text: dedup 用 raw text 但 tokenize 后某些 token 序列高度重复，未做 sequence-level dedup
+        correct: true
+      - id: b
+        text: dedup 一定要用 SHA256
+      - id: c
+        text: tokenize 必须用 GPU
+      - id: d
+        text: dedup 必须删除 BOS token
+    explanation: "高质量 pretrain 数据需要 raw + tokenized 两层 dedup。"

@@ -1,0 +1,163 @@
+mission: l02_pytorch_systems
+title: L01 Quiz · 显存账本基础
+pass_threshold: 1.0
+description: |
+  这 5 题打中"显存四件套"（params / grads / activations / optimizer states）
+  最容易被忽略的细节。答错说明你对 Adam 的状态构成、grad 与 param 的关系
+  还没有定量直觉，复习 notebook n01 之后再答。
+
+prereq_checklist:
+  - title: 读 patch/task.md（10min）
+    kind: read
+    path: labs/l02_pytorch_systems/patch/task.md
+  - title: 跑 notebook n01 · GPU memory anatomy（30min）
+    kind: notebook
+    path: notebooks/n01_gpu_memory_anatomy.ipynb
+  - title: 读 PyTorch optim 源码 SGD/Adam 状态结构（15min）
+    kind: source
+    path: github_repo/torchtitan/torchtitan/optim/__init__.py
+
+questions:
+  - id: q1_adam_state
+    prompt: |
+      训练一个 7B fp32 模型时，Adam 的 optimizer states 占多少显存？
+      （只算 optimizer.state，不含 param 自身和 grad）
+    options:
+      - id: a
+        text: 7 × 4 = 28 GB（≈ 1× param_bytes）
+      - id: b
+        text: 7 × 4 × 2 = 56 GB（≈ 2× param_bytes，存 m + v）
+        correct: true
+      - id: c
+        text: 7 × 4 × 3 = 84 GB（存 m + v + step）
+      - id: d
+        text: 0 GB，optimizer 自己不占显存
+    explanation: |
+      Adam 维护两个移动平均：一阶矩 `exp_avg (m)` 和二阶矩 `exp_avg_sq (v)`。
+      二者形状都与 param 完全一样，dtype 也一致（fp32 训练时都是 fp32）。
+      所以 optimizer_state_bytes ≈ 2 × param_bytes。
+
+      `step` 是一个 Python int，不占显存，可以忽略。
+
+      面试金句："Adam 训练 7B fp32 模型，光 optimizer states 就要 56GB——
+      这就是为什么 Megatron 必须用 distributed optimizer (zero-1) 把状态切到不同 rank。"
+
+  - id: q2_grad_dtype_mixed_precision
+    prompt: |
+      在 fp16 混合精度训练（amp）中，model 的 weight 是 fp16，但 backward 之后
+      `param.grad` 是什么 dtype？
+    options:
+      - id: a
+        text: 永远是 fp16，与 weight 一致
+      - id: b
+        text: 默认是 fp16，但通过 GradScaler 之后会被 unscale 成 fp32
+      - id: c
+        text: 默认就是 fp32，因为 master weights 是 fp32
+        correct: true
+      - id: d
+        text: dtype 由 GradScaler 决定，与 model 无关
+    explanation: |
+      标准 amp 流程是这样的：
+
+      1. **Master weights** 维护一份 fp32 副本（autocast 启用前你看到的就是它）。
+      2. forward 时 autocast 自动把 weight 转 fp16/bf16 算 matmul。
+      3. backward 在 fp16 上算，再写回 master weights 的 `param.grad`，**dtype 是 fp32**。
+      4. GradScaler 只是为了避免 fp16 underflow，做 loss × scale，不改 grad dtype。
+
+      所以混合精度训练里，grad 占的是 fp32 字节数，与 fp32 训练一样大。这是
+      "混合精度只省 activations，不省 grads/params/optimizer" 的根本原因。
+
+  - id: q3_zero_grad_set_to_none
+    prompt: |
+      `optimizer.zero_grad(set_to_none=True)` 与 `set_to_none=False` 在显存上
+      有什么区别？
+    options:
+      - id: a
+        text: 完全等价，只是写法不同
+      - id: b
+        text: True 把 grad 置成 None（释放显存）；False 把 grad 填 0（保留显存）
+        correct: true
+      - id: c
+        text: True 释放 param + grad；False 只清 grad
+      - id: d
+        text: 只影响数值，不影响显存
+    explanation: |
+      `set_to_none=True`（PyTorch 1.7+ 默认）把 `param.grad` 直接设成 None，
+      下次 backward 时再分配。这能让 grad 显存被回收。
+
+      `set_to_none=False`（旧默认）只 fill_(0)，grad tensor 还在原地，显存不释放。
+
+      生产代码里 `set_to_none=True` 通常更优——省一次显存峰值，且 None grad
+      会被 PyTorch 自动跳过梯度运算。
+
+      这也是为什么本关 test_count_grad_bytes_zero_when_none 里：
+      ```python
+      for p in model.parameters():
+          p.grad = None
+      ```
+      之后 grad_bytes 必须返回 0。
+
+  - id: q4_activation_dominant
+    prompt: |
+      训练 LLaMA-7B（hidden=4096, layers=32, seq=2048, batch=1，fp16 amp），
+      显存四件套（params + grads + optimizer + activations）哪一项最大？
+    options:
+      - id: a
+        text: params（14 GB）
+      - id: b
+        text: grads（28 GB，因为是 fp32）
+      - id: c
+        text: optimizer states（56 GB）
+      - id: d
+        text: activations（数百 GB，与 batch × seq × layers × hidden 成正比）
+        correct: true
+    explanation: |
+      固定（与 batch 无关）的部分：
+        - params: 7B × 2B = 14 GB（fp16 weight）
+        - master weights (fp32): 28 GB
+        - grads (fp32): 28 GB
+        - Adam states: 56 GB
+      合计约 **126 GB** —— 已经爆 H100 80GB 了。
+
+      可变（与 batch × seq 成正比）的 activations：
+        - 单层 attention activation ≈ batch × seq × hidden × layers × 系数
+        - LLaMA-7B 默认 seq=2048 batch=1 fp16，activation 约 **数百 GB**
+
+      所以 activation checkpointing（recompute）才是 7B+ 训练能跑起来的根本原因。
+      L03 TorchTitan 这一关你会亲自给 framework 加一个 selective ckpt policy。
+
+      记忆口诀：**模型大看 4×params，batch 大看 activations。**
+
+  - id: q5_state_dict_vs_optimizer_state
+    prompt: |
+      下列说法哪个**对**？（关于 optimizer.state vs model.state_dict）
+    options:
+      - id: a
+        text: model.state_dict() 包含 optimizer state
+      - id: b
+        text: optimizer.state_dict() 等于 model.state_dict() 加上 optimizer 的元信息
+      - id: c
+        text: 两者完全独立。model.state_dict() 只含 params + buffers；
+              optimizer.state_dict() 含 optimizer.state（每个 param 的 m/v 等）+ param_groups（lr 等超参）
+        correct: true
+      - id: d
+        text: PyTorch 已经统一成一个 dict，不存在区别
+    explanation: |
+      这是 ckpt 处理最常见的误解，也是 L04 Megatron / L11 SLiME 写 ckpt 时
+      最容易出 bug 的地方。
+
+      `model.state_dict()` 包含：
+        - `param_name → param_tensor`
+        - 也包含 `nn.Module.register_buffer` 注册的 buffer（如 BN running_mean）
+        - **不**包含 grad，**不**包含 optimizer state
+
+      `optimizer.state_dict()` 包含：
+        - `state`: `{param_id → {m, v, step, ...}}`
+        - `param_groups`: lr / weight_decay / betas 等超参
+
+      两者**完全独立**。Resume 训练必须分别保存 + 分别加载。Megatron 的
+      checkpoint 实际上是 4 个文件：model.pt（model state）、optimizer.pt
+      （optimizer state）、scheduler.pt（lr schedule）、rng.pt（随机种子）。
+
+      面试金句："如果你只 load 了 model checkpoint 没 load optimizer，Adam
+      的动量从 0 重启，loss 会先抖一下再恢复——一眼能从 wandb 看出来。"

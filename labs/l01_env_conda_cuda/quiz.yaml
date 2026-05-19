@@ -1,0 +1,149 @@
+mission: l01_env_conda_cuda
+title: L00 Quiz · 环境四件套与 rank/device 映射
+pass_threshold: 1.0
+description: |
+  这 4 题打中"接手陌生机器最先暴雷"的四类失败：CUDA wheel、PYTHONPATH 污染、
+  CUDA_VISIBLE_DEVICES 重映射、torchrun rank 语义。答错说明你对环境证据链的
+  最小不变量还没有直觉，先回去读 scripts/env/check_cuda.py 与本关 task.md。
+
+prereq_checklist:
+  - title: 读 patch/task.md（10min）
+    kind: read
+    path: labs/l01_env_conda_cuda/patch/task.md
+  - title: 读 CUDA / PyTorch wheel 体检脚本（10min）
+    kind: source
+    path: scripts/env/check_cuda.py
+  - title: 读 torchrun rank 演示脚本（10min）
+    kind: source
+    path: labs/l01_env_conda_cuda/scripts/torchrun_hello.py
+
+questions:
+  - id: q1_torch_cuda_false
+    prompt: |
+      `torch.cuda.is_available()` 返回 False，但 `nvidia-smi` 看得到 GPU。
+      下面哪个是**最可能**的根因？
+    options:
+      - id: a
+        text: GPU 物理坏了，需要换硬件
+      - id: b
+        text: pip 装的 PyTorch wheel 是 cpu-only / CUDA ABI 与 driver 不匹配
+        correct: true
+      - id: c
+        text: CUDA_VISIBLE_DEVICES 设成了空串
+      - id: d
+        text: 进程没有以 root 运行
+    explanation: |
+      `nvidia-smi` 用的是 driver 层（`/dev/nvidia*`），它能看到 GPU 不代表你
+      Python 进程能用上 GPU。`torch.cuda.is_available()` 走的是 PyTorch wheel
+      自带的 CUDA runtime（cudart），它需要：
+
+      1. 这台机器装的是 GPU 版 PyTorch（不是 `pip install torch` 默认那个 cpu-only）
+      2. PyTorch 的 CUDA major/minor 与 driver 的 CUDA ABI 兼容
+      3. `libcuda.so` 能被 `LD_LIBRARY_PATH` 找到
+
+      正确的排查顺序：
+      ```
+      python -c "import torch; print(torch.__version__, torch.version.cuda)"
+      nvidia-smi  # driver / CUDA runtime
+      ldconfig -p | grep libcuda
+      ```
+
+      把这三件事写到 artifacts/check_cuda.json 里，就是本关 patch 让你学的"环境证据链"。
+
+  - id: q2_pythonpath_pollution
+    prompt: |
+      你在仓库根目录执行 `python -c "import torch"` 报 `ModuleNotFoundError`，
+      但 `pip show torch` 明明装了。下面哪个**最可能**？
+    options:
+      - id: a
+        text: torch 包损坏，需要 pip uninstall + 重装
+      - id: b
+        text: 当前目录有一个叫 `torch/` 的子目录或 `torch.py`，被 PYTHONPATH 优先 import
+        correct: true
+      - id: c
+        text: torch 必须用 conda 装，pip 装的不算
+      - id: d
+        text: 这是 Python 3.13 的新 bug
+    explanation: |
+      Python 的 `sys.path` 默认把 `''`（当前目录）排在第一位。如果你在仓库根目录
+      恰好有一个叫 `torch/` 的 stub 目录，或者一个 `torch.py` 工具脚本，import
+      就会先命中它，然后报"我能 import 但找不到我要的属性"。
+
+      最快定位办法：
+      ```
+      python -c "import torch; print(torch.__file__)"
+      ```
+
+      如果 `__file__` 指向你的项目目录而不是 site-packages，这就是答案。
+
+      本关 patch 的 `collect_python_env()` 把 `pythonpath` 当作 list 返回（不是 str），
+      就是为了让你能直接看出 PYTHONPATH 里第几条路径在污染 import。
+
+  - id: q3_cuda_visible_devices_remap
+    prompt: |
+      4 卡机器，启动命令：
+      ```
+      CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc-per-node=2 train.py
+      ```
+      `LOCAL_RANK=1` 这个进程的 `torch.cuda.current_device()` 返回什么？
+    options:
+      - id: a
+        text: 1，因为 LOCAL_RANK=1 直接对应 cuda:1
+      - id: b
+        text: 3，因为物理卡是 2 和 3
+      - id: c
+        text: 1，因为 CUDA_VISIBLE_DEVICES 把物理卡 2,3 重映射成了逻辑 0,1
+        correct: true
+      - id: d
+        text: 报错，因为 LOCAL_RANK 越界
+    explanation: |
+      `CUDA_VISIBLE_DEVICES` 是**重映射表**，不是 mask。设置成 "2,3" 之后，
+      在这个进程里：
+
+      ```
+      逻辑 cuda:0  ←→  物理 GPU 2
+      逻辑 cuda:1  ←→  物理 GPU 3
+      ```
+
+      `torch.cuda.current_device()` 返回的是**逻辑**编号，所以 LOCAL_RANK=1
+      调用 `torch.cuda.set_device(1)` 之后，逻辑 cuda:1 = 物理 GPU 3。
+
+      这就是为什么本关 patch 的 `parse_local_rank_mapping` 必须区分两件事：
+      - `local_rank`（逻辑，给 PyTorch 看的）
+      - `physical_device`（物理，给 nvidia-smi 看的）
+
+      混淆这两个会导致：你以为 rank0 在 GPU 0，nvidia-smi 看到的是 GPU 2 的功耗，
+      调试日志怎么对都对不上。
+
+  - id: q4_local_rank_vs_rank
+    prompt: |
+      在 2 节点 × 8 卡 = 16 进程的分布式训练里，下面**对**的说法是？
+    options:
+      - id: a
+        text: RANK == LOCAL_RANK，只是命名不同
+      - id: b
+        text: RANK 在 [0,16) 全局唯一；LOCAL_RANK 在每个节点内 [0,8)；
+              torch.cuda.set_device 必须用 LOCAL_RANK 而不是 RANK
+        correct: true
+      - id: c
+        text: RANK 用于 GPU，LOCAL_RANK 用于 CPU
+      - id: d
+        text: WORLD_SIZE = LOCAL_WORLD_SIZE = 8
+    explanation: |
+      torchrun 启动时给每个进程注入这些环境变量：
+
+      | 变量 | 范围 | 谁定义的 |
+      |---|---|---|
+      | `RANK` | `[0, WORLD_SIZE)` | 全局唯一 |
+      | `LOCAL_RANK` | `[0, LOCAL_WORLD_SIZE)` | 每节点内 |
+      | `WORLD_SIZE` | 总进程数（16） | 由 `--nnodes × --nproc-per-node` 决定 |
+      | `LOCAL_WORLD_SIZE` | 单节点进程数（8） | == `--nproc-per-node` |
+
+      `torch.cuda.set_device()` 必须用 `LOCAL_RANK`：
+      - GPU 是节点本地资源，每个节点的 GPU 编号都是 0..7
+      - 用 RANK 设备号会越界（`set_device(15)` 在只有 8 卡的节点上立刻报错）
+
+      collective 通信（all-reduce 等）才用 RANK 标识发送方/接收方。
+
+      面试金句："训练 hang 住了第一件事看 NCCL log 里每个 RANK 的 hostname
+      和 LOCAL_RANK，错位 90% 是 launcher 起错了 nproc-per-node。"

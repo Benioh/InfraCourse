@@ -1,0 +1,75 @@
+mission: l32.5_ipc_weight_sync
+title: L11.3 Quiz · CUDA IPC Weight Sync
+pass_threshold: 1.0
+description: |
+  3 题打中 handle tuple 共享 storage 这件事最容易模糊的点。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l32.5_ipc_weight_sync/patch/task.md
+  - title: 读 weight update 主线博客
+    kind: source
+    path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/sys-design/readme-1.md
+  - title: 跑对应 notebook
+    kind: notebook
+    path: notebooks/n22_weight_sync_handle_tuple.ipynb
+
+questions:
+  - id: q1_handle_content
+    prompt: |
+      verl `MultiprocessingSerializer.serialize(tensor)` 返回的 bytes 里包含哪些内容？
+    options:
+      - id: a
+        text: 完整 tensor 数据 + meta 信息
+      - id: b
+        text: 只有 tensor data 的 base64 编码
+      - id: c
+        text: rebuild_fn + (size, stride, dtype, device, CUDA IPC handle, refcount, event)，**不含数据**
+        correct: true
+      - id: d
+        text: tensor 的 numpy view
+    explanation: |
+      C 对：返回的 handle tuple 只是元数据 + CUDA IPC handle（storage 指针），
+      绝不包含数据本身。这是为什么 verl 能在 ms 级跨进程同步 GB 级权重——
+      传输的是几百字节的 handle，数据靠 IPC 共享同一块 VRAM。
+      A/B/D 都会让传输量等于 tensor 数据量，违背设计目标。
+
+  - id: q2_who_gets_list
+    prompt: |
+      `dist.gather_object(serialized_tensor, dst=0)` 调用后：
+    options:
+      - id: a
+        text: 所有 rank 都拿到完整的 handle list
+      - id: b
+        text: 只有 dst (rank 0) 拿到 list，其他 rank 拿到 None
+        correct: true
+      - id: c
+        text: 只有 rank 0 调用，其他 rank 不参与
+      - id: d
+        text: 所有 rank 拿到 list，但只有 dst 的内容是真值
+    explanation: |
+      B 对：所有 rank 都必须调用 gather_object（collective op），但只有 dst rank
+      拿到完整 list。这样后续只有 rank 0 跨进程把 list 传给 SGLang Engine，
+      避免了每 rank 都持有一份完整 handle 列表的内存浪费。
+      C 错：collective op 必须所有 rank 同时调用，否则会死锁。
+
+  - id: q3_flush_cache_timing
+    prompt: |
+      为什么 verl 在 update_weights_from_tensor 里只在最后一个 tensor 时
+      flush_cache=True，而不是每次都 flush？
+    options:
+      - id: a
+        text: 频繁 flush 会让 SGLang radix tree 反复重建，浪费 KV cache
+        correct: true
+      - id: b
+        text: flush_cache 是一次性 op，多次调用会报错
+      - id: c
+        text: 中间不 flush 是为了让旧 KV cache 继续 serve 新请求
+      - id: d
+        text: flush_cache 必须在 forward 前调用，所以放最后
+    explanation: |
+      A 对：每个 weight update 都会 invalidate KV cache 里依赖该 weight 的项。
+      如果每个 tensor 都 flush，radix tree 反复清空-重建；只在最后一次 flush，
+      整批 weight update 完成后再统一清掉旧 KV，性能最好。
+      C 错：旧 KV 在 weight 已经变了的情况下绝不能再用，逻辑上必须清。

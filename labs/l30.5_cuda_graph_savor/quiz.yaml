@@ -1,0 +1,72 @@
+mission: l30.5_cuda_graph_savor
+title: L10.7 Quiz · CUDA Graph + Memory Savor
+pass_threshold: 1.0
+description: |
+  3 题打中 graph 与 savor 协作的最常见误区。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l30.5_cuda_graph_savor/patch/task.md
+  - title: 读 cuda-graph 主线博客
+    kind: source
+    path: github_repo/Awesome-ML-SYS-Tutorial/torch/cuda-graph/readme.md
+
+questions:
+  - id: q1_static_buffer
+    prompt: |
+      为什么 CUDA Graph replay 时必须复用同一块 input/output buffer，
+      不能每次 alloc 新 tensor？
+    options:
+      - id: a
+        text: graph 录制时把 buffer 的虚拟地址硬编进 kernel 参数；换 buffer 等于换地址，
+              kernel 写到错误的地方
+        correct: true
+      - id: b
+        text: 性能优化：alloc 慢，所以复用
+      - id: c
+        text: torch.cuda.graph API 不允许换 buffer
+      - id: d
+        text: 显存碎片问题
+    explanation: |
+      A 对：CUDA Graph 是把一系列 kernel launch + 参数指针固化下来；replay 时 GPU
+      根据预先记录的指针读写。换 buffer 后预录的指针失效，行为未定义。
+      B 是好处之一，但**不是根因**。
+
+  - id: q2_savor_vs_cudafree
+    prompt: |
+      为什么 RL co-locate 用 `torch_memory_saver` 而不是直接 `cudaFree`？
+    options:
+      - id: a
+        text: cudaFree 释放后，原虚拟地址失效，所有持有该指针的对象（包括 captured graph）都废了
+        correct: true
+      - id: b
+        text: cudaFree 必须在 GPU 0 上调用
+      - id: c
+        text: torch_memory_saver 速度更快
+      - id: d
+        text: cudaFree 要 sync 整个 stream
+    explanation: |
+      A 对：memory savor 用 CUDA Virtual Memory，pause 时 unmap 物理页但保留虚拟
+      地址范围；resume 时重新 map 物理页，所有指针仍然有效。这样 graph 能照常
+      replay，KV cache pool 也能"原地复活"。
+      cudaFree 直接释放虚拟地址，graph 内部的指针指向悬空内存。
+
+  - id: q3_offload_order
+    prompt: |
+      slime co-locate 的标准切换顺序是什么？
+    options:
+      - id: a
+        text: rollout 完 → savor.pause(rollout) → upload megatron weights →
+              megatron train → offload megatron → savor.resume(rollout)
+        correct: true
+      - id: b
+        text: rollout 完 → 直接 train → 然后 reload rollout
+      - id: c
+        text: 同时跑两个，让 PyTorch allocator 自己处理
+      - id: d
+        text: rollout 完 → 移除 rollout 进程 → fork train 进程
+    explanation: |
+      A 对：必须先 pause rollout 释放物理显存，才能腾出空间给 megatron weights
+      + activation。训练完反向：先 offload megatron 释放，再 resume rollout。
+      详见 mismatch / weight-update 主线博客。

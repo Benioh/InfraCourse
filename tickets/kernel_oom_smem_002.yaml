@@ -1,5 +1,5 @@
 id: kernel_oom_smem_002
-title: Triton kernel SMEM 溢出（out of resource: shared memory）
+title: "Triton kernel SMEM 溢出（out of resource: shared memory）"
 mission: l04_gpu_kernel
 severity: high
 symptom: |
@@ -9,7 +9,7 @@ symptom: |
 error_signatures:
 - "triton.compiler.errors.OutOfResources: out of resource: shared memory"
 - "Required: <X> bytes, Hardware limit: <Y> bytes"
-- "Required: <X> registers, Hardware limit: <Y> registers"（同源问题，SMEM/寄存器都是 SM 资源）
+- '"Required: <X> registers, Hardware limit: <Y> registers"（同源问题，SMEM/寄存器都是 SM 资源）'
 - "PTXAS error: Entry function uses too much shared data"
 - 在 H100/H200 上没事，搬到 4090 上就 OOM（消费卡 SMEM 比数据中心卡少）
 classification_questions:
@@ -19,24 +19,24 @@ classification_questions:
 - 是 4090 上 OOM 还是 H100/H200 上 OOM？查 device 的 `smem_kb_per_sm`
 - 用了 `num_stages` > 2 吗？pipeline stage 会复制 SMEM
 likely_causes:
-- BLOCK_SIZE 太大：每行 BLOCK_SIZE × 4 bytes (fp32) 直接占满 SMEM
-- 中间缓冲过多：online softmax 你保留了 (x, exp, sum, max) 四份，其实只需 2 份
+- "BLOCK_SIZE 太大：每行 BLOCK_SIZE × 4 bytes (fp32) 直接占满 SMEM"
+- "中间缓冲过多：online softmax 你保留了 (x, exp, sum, max) 四份，其实只需 2 份"
 - 用 `num_stages=4` 做 software pipelining，SMEM × 4
-- 多维 BLOCK：(BLOCK_M=128, BLOCK_N=128) 时实际 SMEM = 128*128*4*N（N=stage 数）
-- dtype 没降：本来可以 fp16 计算，一直在 fp32
+- "多维 BLOCK：(BLOCK_M=128, BLOCK_N=128) 时实际 SMEM = 128*128*4*N（N=stage 数）"
+- "dtype 没降：本来可以 fp16 计算，一直在 fp32"
 minimal_checks:
-- 算账：`SMEM_required ≈ BLOCK_SIZE × dtype_bytes × num_buffers × num_stages`
-  4090 的 `smem_kb_per_sm` 是 100KB。`mini_infra/gpu/memory_model.py:GPU_PROFILES["rtx4090"]` 有规格表
-- 看 PTXAS 报错信息里 `Required: <X>`，与你估算的 X 是否一致——不一致说明你少算了一个 buffer
-- 把 BLOCK_SIZE 临时减半，OOM 是否消失——是 → 100% SMEM；否 → 是 register spill
-- `triton.compiler.compile(...).asm['ptx']` 看 PTX，搜索 `.shared` 段总大小
+- "算账：`SMEM_required ≈ BLOCK_SIZE × dtype_bytes × num_buffers × num_stages`
+   4090 的 `smem_kb_per_sm` 是 100KB。`mini_infra/gpu/memory_model.py:GPU_PROFILES[\"rtx4090\"]` 有规格表"
+- "看 PTXAS 报错信息里 `Required: <X>`，与你估算的 X 是否一致——不一致说明你少算了一个 buffer"
+- "把 BLOCK_SIZE 临时减半，OOM 是否消失——是 → 100% SMEM；否 → 是 register spill"
+- "`triton.compiler.compile(...).asm['ptx']` 看 PTX，搜索 `.shared` 段总大小"
 - 用 `ncu --set basic --kernel-name <kernel>` 看 `Shared Memory Configuration Size`
 minimal_fixes:
-- BLOCK_SIZE 减半（如 2048 → 1024），同时把 `num_warps` 减半保持 occupancy
-- num_stages 从 4 降到 2 或 3，SMEM 立减
-- 把累加器 dtype 从 fp32 降到 bf16（精度风险：online softmax 必须 fp32 累加，不能降）
-- Split-K：把一行切成两半，分两个 program 跑，最后 reduce
-- 重新设计：不用 online，改成 two-pass（pass 1 求 max+sum，pass 2 算 exp/sum）——SMEM 复用 → 减半
+- "BLOCK_SIZE 减半（如 2048 → 1024），同时把 `num_warps` 减半保持 occupancy"
+- "num_stages 从 4 降到 2 或 3，SMEM 立减"
+- "把累加器 dtype 从 fp32 降到 bf16（精度风险：online softmax 必须 fp32 累加，不能降）"
+- "Split-K：把一行切成两半，分两个 program 跑，最后 reduce"
+- "重新设计：不用 online，改成 two-pass（pass 1 求 max+sum，pass 2 算 exp/sum）——SMEM 复用 → 减半"
 what_not_to_do:
 - 不要把 BLOCK_SIZE 加大期望"更快"——4090 上 BLOCK=2048 反而比 BLOCK=512 慢
 - 不要把 online softmax 的 `running_max` `running_sum` 累加器从 fp32 降到 fp16——数值会崩

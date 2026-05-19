@@ -147,11 +147,37 @@ export type Quest = {
   badge?: { name?: string; pass_score?: number };
 };
 
+export type SourceReadingHighlight = {
+  /** Either [start, end] inclusive 1-indexed numbers, or a string like "L120-L145" / "120-145". */
+  lines: [number, number] | string;
+  /** Side-by-side annotation explaining what's interesting about this region. Markdown allowed. */
+  note: string;
+  /** Optional sub-title displayed above the snippet. */
+  title?: string;
+};
+
 export type SourceReadingItem = {
   title: string;
   repo_path: string;
   focus?: string;
+  /** Long-form, beginner-friendly markdown walkthrough for this source file.
+   * Rendered between `focus` and `highlights` in the SourceReadingCard.
+   * Use for: 入口/生命周期/不变量/常见误解/与本关 patch 的关系。 */
+  walkthrough?: string;
   questions?: string[];
+  /** Optional curated highlights — when present, the lab page renders the
+   * file inline with these regions called out alongside the note text. */
+  highlights?: SourceReadingHighlight[];
+};
+
+export type StarterPayload = {
+  mission: string;
+  path: string;
+  content: string;
+  exists: boolean;
+  bytes?: number;
+  size?: number;
+  language?: string;
 };
 
 export type NotebookBridgeItem = {

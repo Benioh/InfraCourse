@@ -1,0 +1,73 @@
+mission: l28.5_multiturn_chat_mask
+title: L09.7 Quiz · Multi-turn Tokenization 与 Loss Mask
+pass_threshold: 1.0
+description: |
+  3 题打中 multi-turn tokenization 三大暗坑。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l28.5_multiturn_chat_mask/patch/task.md
+  - title: 读 verl multi-turn fast tokenization 博客
+    kind: source
+    path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/verl/multi-turn/fast_tokenization/multiturn_tokenization_and_masking_ZH.md
+
+questions:
+  - id: q1_why_not_per_msg
+    prompt: |
+      为什么"每条 msg 单独 apply_chat_template 再拼接"在 multi-turn 下会失败？
+    options:
+      - id: a
+        text: 因为 chat_template 不接受单条 msg
+      - id: b
+        text: 模板会自动注入默认 system message + BPE 在拼接边界合并 token，导致 token 序列与全量 tokenize 不一致
+        correct: true
+      - id: c
+        text: 因为单条 msg tokenize 太慢
+      - id: d
+        text: 因为 attention mask 必须整段计算
+    explanation: |
+      B 对：模板的 conditional 行为（隐式塞默认 system；连续 \n\n 在拼接处被 BPE 合并）
+      让"分段 + 拼接"得到的 token 序列与全量 tokenize 不一致，loss_mask 跟着错位。
+      详见 verl PR #1668 的失败原型记录。
+
+  - id: q2_fixed_base_choice
+    prompt: |
+      为什么 BASE_CONVERSATION 选择 `[system, user]` 而不是 `[]` 或 `[system]`？
+    options:
+      - id: a
+        text: 为了避免 chat_template 触发 conditional 修改（默认 system 注入 / think strip），
+              system + user 是 main-stream 模板下都不会被修改的稳定起手
+        correct: true
+      - id: b
+        text: 因为 BASE 必须包含一条 assistant 才能算 delta
+      - id: c
+        text: 单条 system 在某些模板里会被裁掉
+      - id: d
+        text: 长度必须 ≥ 2 个 message 才能算 delta
+    explanation: |
+      A 对：经测试主流模板都不会在 system+user 起手的对话上做条件式修改。空 BASE
+      会触发默认 system 注入；纯 system 起手在某些模板下也会被特殊处理。
+      详见原文："放在最前面的系统消息会阻止模板添加默认值"。
+
+  - id: q3_think_token_edge
+    prompt: |
+      QwQ-32B / Qwen3 系模板会在 assistant 不是最后一条 message 时 **strip
+      `<think>...</think>`** 内容。这对训练有什么影响？为什么 fixed-base 增量法
+      能绕过这个问题？
+    options:
+      - id: a
+        text: 推理优化：上下文窗口被 think 占用浪费；训练时如果 think 被 strip，模型
+              学不到 "何时 think + 如何 think"，必须保留。增量法在 isolation 下处理
+              每条 assistant，模板看到的 assistant 始终是"最后一条"，不会触发 strip
+        correct: true
+      - id: b
+        text: 没影响，think 内容是冗余的
+      - id: c
+        text: 增量法只能处理单轮
+      - id: d
+        text: 必须改 chat_template 才能保留 think
+    explanation: |
+      A 对：think strip 是推理优化（节约 context window），但训练时必须保留以让模型学
+      会推理链。fixed-base 增量法把每条 assistant 都放在 BASE+[msg] 的末尾，模板视角
+      下永远是"最后一条"，conditional strip 不会触发。这是 fixed-base 的最大价值之一。

@@ -1,0 +1,43 @@
+id: l02.5_memory_snapshot
+title: GPU Memory Snapshot · 按 Stack 定位泄露
+level: L01.3
+act: 第 1 章：基础设施基本功
+role: 调试学徒
+priority: 进阶
+estimated_minutes: 60
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - inspect / dataclasses
+
+patch:
+  description: |
+    实现 CPU 友好的 MemoryTracker：记录 alloc/free 与 caller stack，
+    在 dump_snapshot 上层用 find_top_leaks_by_stack 定位 top-k 泄露源。
+    思路与 torch.cuda.memory._record_memory_history + _dump_snapshot 一致，
+    便于过渡到真实 GPU 显存调试。
+  task_md: labs/l02.5_memory_snapshot/patch/task.md
+  starter_file: labs/l02.5_memory_snapshot/patch/starter/memory_snapshot.py
+  reference_file: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
+  test_command: make patch-test M=l02.5_memory_snapshot
+  status_file: labs/l02.5_memory_snapshot/patch/.last_run.json
+  test_count: 8
+  test_kind: 行为契约 + 调试场景
+
+source_reading:
+  - title: 通过 Torch Memory Snapshot 分析 VLM RL 训练显存泄露
+    repo_path: github_repo/Awesome-ML-SYS-Tutorial/torch/mem-snapshot/readme.md
+
+mini_infra_targets:
+  - mini_infra/gpu/
+
+notebooks:
+  - notebooks/n21_memory_snapshot_walk.ipynb
+
+prereq: l02_pytorch_systems
+next_lab: l03_nccl_ddp_smoke
+
+gpu_modes:
+  local: CPU OK
+  cluster: 真 GPU 上用 torch.cuda.memory._dump_snapshot 验证

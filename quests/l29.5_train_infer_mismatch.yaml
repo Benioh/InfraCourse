@@ -1,0 +1,46 @@
+id: l29.5_train_infer_mismatch
+title: Train-Infer Mismatch 修正算子（K3 KL / TIS / MIS / Geometric IS / Veto）
+level: L10.3
+act: 第 4 章：RL 与对齐
+role: RL Infra 学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - slime / verl / AReaL（对照）
+
+patch:
+  description: |
+    实现 6 个 RL 框架在线上真正用的 mismatch 修正算子：K3 KL（Schulman 估计器）、
+    TIS（截断 IS）、MIS（带 mask 的 IS）、Geometric Sequence IS、Veto、Batch Normalize。
+    这些是 slime / verl / AReaL 用于解决"训推不一致"的核心算法。
+  task_md: labs/l29.5_train_infer_mismatch/patch/task.md
+  starter_file: labs/l29.5_train_infer_mismatch/patch/starter/mismatch.py
+  reference_file: labs/l29.5_train_infer_mismatch/patch/reference/mismatch.py
+  test_command: make patch-test M=l29.5_train_infer_mismatch
+  status_file: labs/l29.5_train_infer_mismatch/patch/.last_run.json
+  test_count: 10
+  test_kind: 数值校验 + 边界条件
+
+source_reading:
+  - title: slime - 让速度与精度同在
+    repo_path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/slime/mismatch/blog-cn.md
+  - title: slime train_infer_mismatch_helper 配置
+    repo_path: github_repo/slime/examples/train_infer_mismatch_helper/
+  - title: Schulman K3 KL approximation
+    repo_path: docs/术语表.md
+
+mini_infra_targets:
+  - mini_infra/rl/
+
+notebooks:
+  - notebooks/n19_train_infer_mismatch.ipynb
+
+prereq: l29_verl_rl_baseline
+next_lab: l30_dpo_loss
+
+gpu_modes:
+  local: CPU OK
+  cluster: 完整 RL 训练 + K3 KL 监控（可选）

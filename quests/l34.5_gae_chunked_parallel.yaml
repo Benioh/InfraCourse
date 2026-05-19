@@ -1,0 +1,39 @@
+id: l34.5_gae_chunked_parallel
+title: GAE 分 chunk 并行 (slime 100-300× 优化)
+level: L11.7
+act: 第 4 章：RL 与对齐
+role: PPO / GRPO 学徒
+priority: 高
+estimated_minutes: 80
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - slime / verl GAE 实现 (对照)
+
+patch:
+  description: |
+    实现 naive 反向递推 GAE + 分 chunk 并行版本，要求两者数值精确等价。
+    chunk 之间通过单个标量 boundary correction 传递。在 slime 中实测 100-300×
+    加速；本关让你看清"算法不变 + 实现精明"的工程美学。
+  task_md: labs/l34.5_gae_chunked_parallel/patch/task.md
+  starter_file: labs/l34.5_gae_chunked_parallel/patch/starter/gae_chunk.py
+  reference_file: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
+  test_command: make patch-test M=l34.5_gae_chunked_parallel
+  status_file: labs/l34.5_gae_chunked_parallel/patch/.last_run.json
+  test_count: 7
+  test_kind: 数值等价 + 边界情况 + batched
+
+source_reading:
+  - title: PPO 中 GAE 的分 chunk 并行计算 (slime)
+    repo_path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/slime/batch-GAE/ppo-gae-chunk.md
+
+mini_infra_targets:
+  - mini_infra/rl/
+
+prereq: l34_grpo
+next_lab: l35_multimodal_capstone
+
+gpu_modes:
+  local: CPU OK
+  cluster: 真长上下文 RL (T=32K) 验证 100-300× 加速 (可选)

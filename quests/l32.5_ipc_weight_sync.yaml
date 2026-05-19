@@ -1,0 +1,46 @@
+id: l32.5_ipc_weight_sync
+title: CUDA IPC Weight Sync（handle tuple 共享显存）
+level: L11.3
+act: 第 4 章：RL 与对齐
+role: SLiME / verl 学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - SGLang / verl / slime（对照）
+
+patch:
+  description: |
+    实现 verl/slime co-locate 路径下 update_weights_from_tensor 的真正机制：
+    序列化的不是 tensor data 而是 IPC handle；接收端反序列化后与源 tensor 共享 storage。
+    CPU 模拟通过 IPCStoragePool 实现，API 形状与真实代码一致。
+  task_md: labs/l32.5_ipc_weight_sync/patch/task.md
+  starter_file: labs/l32.5_ipc_weight_sync/patch/starter/ipc_weight_sync.py
+  reference_file: labs/l32.5_ipc_weight_sync/patch/reference/ipc_weight_sync.py
+  test_command: make patch-test M=l32.5_ipc_weight_sync
+  status_file: labs/l32.5_ipc_weight_sync/patch/.last_run.json
+  test_count: 7
+  test_kind: 行为契约 + 数据共享语义
+
+source_reading:
+  - title: RL 系统深思 - 深入理解权重更新机制
+    repo_path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/sys-design/readme-1.md
+  - title: verl fsdp_sglang.update_weights
+    repo_path: github_repo/verl/
+  - title: SGLang model_runner.update_weights_from_tensor
+    repo_path: github_repo/sglang/
+
+mini_infra_targets:
+  - mini_infra/slime/
+
+notebooks:
+  - notebooks/n22_weight_sync_handle_tuple.ipynb
+
+prereq: l32_slime_rl_core
+next_lab: l33_rl_rollout_freshness
+
+gpu_modes:
+  local: CPU OK（用 IPCStoragePool 模拟）
+  cluster: 真 CUDA IPC 跨进程验证（需要 multiprocessing + spawn）

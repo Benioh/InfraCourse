@@ -104,3 +104,34 @@ notebook 的职责是建立系统直觉；最终结论必须回到 lab 的真实
 | `n16_minhash_dedup.ipynb` | L06.3 | MinHash 近重复与阈值校准 |
 | `n17_quant_calibration.ipynb` | L08.5 | SmoothQuant/AWQ calibration 与 scale |
 | `n18_spec_decode_acceptance.ipynb` | L08.7 | acceptance rate 与 expected speedup |
+
+## v2 增量 Notebooks（参考 Awesome-ML-SYS-Tutorial）
+
+直击 RL Infra 在生产中真正会摔跟头的 5 个系统级痛点，建议在做对应 lab 之前各跑 30–60 分钟：
+
+| Notebook | 对应关卡 | 用途 | 真实事故来源 |
+|---|---|---|---|
+| `n19_train_infer_mismatch.ipynb` | L29.5 | K3 KL vs K1，TIS / MIS 直觉，何时干预 | slime mismatch 博客 · Qwen30B-A3B 320 步崩溃 |
+| `n20_cuda_graph_replay.ipynb` | L30.5 | capture/replay 直觉，prefill vs decode sweet spot | slime co-locate offload/upload |
+| `n21_memory_snapshot_walk.ipynb` | L02.5 | 按 stack 聚合定位泄露，区分真泄露 vs caching | VLM RL 训练 OOM 现场 |
+| `n22_weight_sync_handle_tuple.ipynb` | L32.5 | 三种 weight sync 接口对比 + handle tuple 链路 | RL 系统深思博客 · verl/slime/AReaL |
+| `n23_chat_template_multiturn.ipynb` | L28.5 | 复现 chat template 的两个噩梦 + Fixed Base 解法 | verl PR #1668（Yanbin Jiang）|
+
+n07/n10 也补了两段框架理解（n07 §3.5 RadixCache vs PagedAttention「策略层 vs 寻址层」；n10 §3.5 K1 vs K3 KL 估计器选择），不需要单独跑。
+
+## v2 增量：系统级真实痛点 Notebooks
+
+这一组 notebook 配合 v2 的 5 个新 lab，用 CPU 模拟实现可视化关键概念。每个都
+直接 `import` 对应 lab 的 `reference/` 实现，跑通后再去做 patch 会更顺。
+
+| Notebook | 对应 lab | 用途 | 真实事故 |
+|---|---|---|---|
+| `n19_train_infer_mismatch.ipynb` | L10.3 (l29.5) | K1 vs K3 KL 方差对比；模拟 rollout 与 training logp 漂移；MIS veto 在 ratio=3e9 时整条丢弃 | slime mismatch · Qwen30B-A3B 320 步崩溃 |
+| `n20_cuda_graph_replay.ipynb` | L10.7 (l30.5) | static buffer 复用证据；multi-bs cache 命中；savor pause/resume 物理 bytes 归零并复原 | slime co-locate offload/upload 节奏 |
+| `n21_memory_snapshot_walk.ipynb` | L01.3 (l02.5) | 50 步 VLM 训练复现 hook 漏 free，按 top-frame 聚合自动归因到真凶 | VLM RL OOM 排查 |
+| `n22_weight_sync_handle_tuple.ipynb` | L11.3 (l32.5) | 1024×1024 fp32 tensor 的 handle 实测 < 200B；多 rank deserialize 共享 storage；slime 分桶显存账 | verl `update_weights_from_tensor` 内部机制 |
+| `n23_chat_template_multiturn.ipynb` | L09.7 (l28.5) | 三大暗坑逐个演示（默认 system 注入 / BPE 合并 / think strip），最后用 fixed-base 解决 | verl PR #1668 (Yanbin Jiang) |
+
+补：`n07_kv_cache.ipynb` 增补了 "RadixCache vs PagedAttention：策略层 vs 寻址层"
+（Zhaochen Yang 的 framing），`n10_rl_kl_reward.ipynb` 增补了 "K1 vs K3 KL 估计器"
+对比表，串到 N19 / L29.5。

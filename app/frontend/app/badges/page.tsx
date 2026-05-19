@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
 import { Panel, StatusPill } from "@/components/ui";
 import Link from "next/link";
+import { withPublicPrefix } from "@/lib/runtime";
 
 export default async function BadgesPage() {
   const badges = await api.badges();
@@ -11,7 +12,7 @@ export default async function BadgesPage() {
         {badges.map((row) => (
           <Link
             key={row.mission}
-            href={`/missions/${row.mission}`}
+            href={withPublicPrefix(`/missions/${row.mission}`)}
             className="rounded-3xl border border-quest-border bg-white/70 p-5 transition hover:border-quest-accent hover:shadow-panel"
           >
             <div className="flex items-center justify-between gap-3">

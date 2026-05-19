@@ -1,0 +1,101 @@
+mission: l29.5_train_infer_mismatch
+title: L10.7 Quiz · 训推不一致
+pass_threshold: 1.0
+description: |
+  这 4 题打中训推不一致最容易混淆的概念点。答错任何一题说明你的理解还没到
+  "能写代码"的程度，重读 mismatch 资料再答一遍。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l29.5_train_infer_mismatch/patch/task.md
+  - title: 读 mismatch 主线博客
+    kind: source
+    path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/slime/mismatch/blog-cn.md
+  - title: 跑对应 notebook 建直觉
+    kind: notebook
+    path: notebooks/n19_train_infer_mismatch.ipynb
+
+questions:
+  - id: q1_root_cause
+    prompt: |
+      为什么相同权重下，rollout engine 和 training engine 计算同一 token 序列
+      的 log prob 会出现 K3 KL ≠ 0 的差异？（多选最贴切的根因）
+    options:
+      - id: a
+        text: 浮点加法不满足结合律，加上不同 batch shape 会触发不同 reduction kernel / Tensor Core 指令
+        correct: true
+      - id: b
+        text: rollout engine 是 prefill，training engine 是 decode，本质上一个跑 attention 一个不跑
+      - id: c
+        text: SGLang 内部用 fp16，Megatron 用 fp32，dtype 不一致
+      - id: d
+        text: 因为 rollout engine 加了 KV cache，training 没加
+    explanation: |
+      A 对：根因是浮点不结合律 + 不同 batch shape / 算子选择 / 归约顺序，详见
+      Thinking Machine Lab "Defeating Nondeterminism in LLM Inference"。
+      B 错：rollout 是 decode（一次一 token），training 是 prefill（整段序列一次跑）。
+      C 错：dtype 通常一致，bf16 训练 + bf16 rollout 仍有差异。
+      D 错：KV cache 是性能优化，数值上等价于无 cache 情况。
+      记忆：**算子相同，输入 shape 不同 → 算子内部归约顺序不同 → 结果不同**。
+
+  - id: q2_moe_amplify
+    prompt: |
+      为什么 MoE 模型的 train-infer mismatch 通常显著大于 dense 模型？
+    options:
+      - id: a
+        text: MoE 模型参数更多
+      - id: b
+        text: rollout 和 training 的 logits 微小差异会导致路由到不同 expert，差异在 expert 选择层被放大
+        correct: true
+      - id: c
+        text: MoE 层用了 fp8，精度更低
+      - id: d
+        text: top-k 采样比 greedy 不稳定
+    explanation: |
+      B 对：MoE router 是离散选择。logits 微小数值差异 → argmax/topk 选不同 expert
+      → 整个 expert 计算分支不同 → 输出差异远大于浮点 epsilon。这是 IcePop / slime
+      MoE 实验里观察到 K3 KL 跳到 1e-1 量级的核心原因。
+      A/C/D 都不是核心原因。
+
+  - id: q3_tis_vs_mis
+    prompt: |
+      训练后期突然 grad norm 跳变 + reward 骤降，怀疑是 train-infer mismatch 引起
+      的崩溃。下面哪种 IS 配置最稳？
+    options:
+      - id: a
+        text: 只用 token-level TIS [0.5, 2.0]
+      - id: b
+        text: 用 token TIS + sequence-level MIS + batch normalize + veto threshold 1e-6
+        correct: true
+      - id: c
+        text: 关掉所有 IS，相信模型自己收敛
+      - id: d
+        text: 只用 batch normalize
+    explanation: |
+      B 对：实验结果（slime mismatch 博客 config 2/3）显示 token TIS + 几何 MIS +
+      batch norm 是抑制崩溃的最稳组合；veto 防止概率极低的 token 把 ratio 推到 1e12。
+      A 不够：纯 token TIS 在 Qwen30B-A3B 实验里仍然崩溃 (config 4)。
+      C 危险：mismatch 长大就会崩。
+      D 不够：batch norm 只是方差控制，没解决越界问题。
+
+  - id: q4_k3_correct
+    prompt: |
+      下面哪个是 K3 KL 估计器（Schulman）的正确公式？
+    options:
+      - id: a
+        text: KL = mean(p - q)
+      - id: b
+        text: KL = mean(log p - log q)
+      - id: c
+        text: KL = mean(ratio - 1 - log ratio), where ratio = p/q
+        correct: true
+      - id: d
+        text: KL = mean(ratio * log ratio)
+    explanation: |
+      C 对：Schulman 的 K3 估计器 k3 = ratio - 1 - log(ratio)；当样本来自 q 时，
+      它是 KL(q || p) 的无偏低方差估计，且总是非负（k3 ≥ 0 对任何 ratio > 0 成立）。
+      A 错：差值的均值不是 KL。
+      B 错：那是 K1（log ratio）估计器，方差大。
+      D 错：那是 K2 形式但有偏。
+      记忆：**K3 = ratio − 1 − log ratio，永远非负，方差最小**。

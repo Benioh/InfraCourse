@@ -8,7 +8,7 @@ symptom: |
   典型在 4090 单卡或 8×H100 集群上看到。
 error_signatures:
 - "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate X GiB"
-- "GPU 0; X.YZ GiB allocated; A.BC GiB free"（可见 OOM 量级，常 2-10GB）
+- "GPU 0; X.YZ GiB allocated; A.BC GiB free（可见 OOM 量级，常 2-10GB）"
 - "memory_allocated() / max_memory_allocated() ratio > 0.95"
 - 开 CP=2 后 OOM 推迟一两步但仍崩
 - flash-attn 报 "headdim must be ≤ 128" 等不兼容
@@ -26,7 +26,8 @@ likely_causes:
 - KV cache 在训练里也存（如果 use_cache=True 没关）
 - micro_batch 太大：长 seq 应该 micro_batch=1 + grad_accum
 minimal_checks:
-- 算激活账：
+- |
+  算激活账：
   ```python
   micro_bs = 1; seq = 32768; hidden = 4096; layers = 32
   attn_act = micro_bs * seq * seq * 2 / 1e9  # naive attention
@@ -40,11 +41,11 @@ minimal_checks:
 - 暂时把 recompute 关掉与开 full 对比，看激活差是否符合理论
 - micro_batch 临时设 1 + grad_accum=micro_batch 看是否过 OOM
 minimal_fixes:
-- **必开 flash-attention**：`--use-flash-attn` 或 SDPA 的 flash 后端
-- micro_batch=1：长 seq 几乎必须 micro_batch=1
-- recompute=full：所有 transformer block 的 attention 与 MLP 全 recompute
-- 增大 CP：CP=2 不够 → CP=4；同时确保 MLP 也按 SP 切（sequence parallel for MLP）
-- 启 selective recompute：只 recompute attention（最省）而不 recompute MLP
+- "**必开 flash-attention**：`--use-flash-attn` 或 SDPA 的 flash 后端"
+- "micro_batch=1：长 seq 几乎必须 micro_batch=1"
+- "recompute=full：所有 transformer block 的 attention 与 MLP 全 recompute"
+- "增大 CP：CP=2 不够 → CP=4；同时确保 MLP 也按 SP 切（sequence parallel for MLP）"
+- "启 selective recompute：只 recompute attention（最省）而不 recompute MLP"
 - 降 hidden（如果是预训练）或降 layers 来证明显存账正确
 - 关闭 use_cache（训练时根本不该开 KV cache）
 what_not_to_do:

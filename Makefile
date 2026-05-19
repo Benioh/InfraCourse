@@ -4,6 +4,8 @@ SHELL := /bin/bash
 PYTHON ?= python
 BACKEND_APP ?= app.backend.main:app
 FRONTEND_DIR := app/frontend
+FRONTEND_HOST ?= 0.0.0.0
+FRONTEND_PORT ?= 3000
 
 # Export key env vars to all sub-makes (so `IMPL=reference make patch-test-all`
 # propagates IMPL into each lab's patch-test invocation).
@@ -34,7 +36,7 @@ check-env:
 	$(PYTHON) scripts/env/collect_env.py --pretty
 
 app:
-	npm --prefix $(FRONTEND_DIR) run dev
+	npm --prefix $(FRONTEND_DIR) run dev -- --hostname $(FRONTEND_HOST) --port $(FRONTEND_PORT)
 
 backend:
 	uvicorn $(BACKEND_APP) --reload --port 8000

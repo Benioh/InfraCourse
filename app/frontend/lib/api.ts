@@ -11,10 +11,10 @@ import type {
   QuizSubmissionResult,
   SourcePayload,
   SourceTreePayload,
+  StarterPayload,
   Ticket,
 } from "@/lib/types";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/api";
+import { API_BASE } from "@/lib/runtime";
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...init });
@@ -47,6 +47,19 @@ export const api = {
     fetchJson<PatchStatus>(`/missions/${missionId}/patch-status`),
   runPatchTest: (missionId: string) =>
     fetchJson<PatchStatus>(`/missions/${missionId}/patch-test`, { method: "POST" }),
+
+  // ★ Starter editing endpoints — back the in-app editor + write_starter tool.
+  starter: (missionId: string) =>
+    fetchJson<StarterPayload>(`/missions/${missionId}/starter`),
+  saveStarter: (missionId: string, content: string) =>
+    fetchJson<{ mission: string; path: string; bytes: number; saved: true }>(
+      `/missions/${missionId}/starter`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      },
+    ),
 
   tickets: () => fetchJson<Ticket[]>("/tickets"),
   ticket: (ticketId: string) => fetchJson<Ticket>(`/tickets/${ticketId}`),

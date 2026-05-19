@@ -11,7 +11,7 @@ symptom: |
 error_signatures:
 - "RuntimeError: The size of tensor a ... must match the size of tensor b ... at non-singleton dimension"
 - "AssertionError: q.shape[1] != attention_mask.shape[2]"
-- "loss=nan in step 1"（CP=1 时同样数据是正常 loss）
+- 'loss=nan in step 1（CP=1 时同样数据是正常 loss）'
 - "ring_attention partial softmax max_abs_err > 0.01"
 - ranks 0/1 看到的 step_time / loss 不一致
 classification_questions:
@@ -36,7 +36,8 @@ minimal_checks:
 - 在 ring 累加循环里 `tl.print` 或 `print` 每步的 partial_max / partial_sum，确认是用 final 重归一
 - CP=2 跑 seq=4 的 toy（可手算）验证数值等价性
 minimal_fixes:
-- 切 mask：`local_mask = mask[:, :, cp_rank * chunk : (cp_rank + 1) * chunk, :]`
+- |
+  切 mask：`local_mask = mask[:, :, cp_rank * chunk : (cp_rank + 1) * chunk, :]`
   causal 时还要考虑 chunk 间的因果关系
 - 改 ring step 数为 `range(cp_size)`，而不是 `range(cp_size - 1)` 或 `range(cp_size + 1)`
 - partial output 重归一：在所有 ring step 完成后用 final_max 重新算 exp/sum

@@ -162,3 +162,20 @@ python -m mini_infra.slime.train --steps 2
 | webdataset / datasketch | `mini_infra/data/` | shard/worker 切分、minhash 去重、shard 续读 |
 | vLLM / SGLang quantization | `mini_infra/vllm/quant/`, `mini_infra/sglang/quant/` | scale/zero、KV 量化、calibration |
 | vLLM speculative | `mini_infra/vllm/spec_decode/` | draft/n-gram → verify → KV 回滚 → acceptance |
+
+## v2 增量同构对象（系统级真实痛点）
+
+这一组同构骨架不属于单一真实框架，而是把 RL Infra 在生产中真实摔过跟头的横切机制做了 CPU 模拟版本，让学生在没卡的环境也能完整跑通对策。对标 [Awesome-ML-SYS-Tutorial](../github_repo/Awesome-ML-SYS-Tutorial/) 系列博客。
+
+| 真实对象 | MiniInfra 镜像 | 学习重点 | 对应 lab |
+|---|---|---|---|
+| `torch.cuda.memory._record_memory_history` + leak analyzer | `mini_infra/torch/memory_snapshot.py` | alloc/free tracker、按 top-of-stack frame 聚合归因、closure capture 泄露检测 | L02.5 (l02.5) |
+| HF tokenizer chat template + verl PR #1668 fixed-base 算法 | `mini_infra/data/multiturn_tokenizer.py` + `_mock_tokenizer.py` | BASE_CONVERSATION 增量 tokenize、loss_mask、think token 边界 | L09.7 (l28.5) |
+| slime mismatch K3 KL + TIS/MIS/Geometric IS | `mini_infra/rl/mismatch.py` | K3 KL 估计、ratio clip/truncate、token mask + sequence veto、batch normalize | L10.3 (l29.5) |
+| `torch.cuda.graph` + `torch_memory_saver` | `mini_infra/torch/cuda_graph_cache.py` | GraphCache capture/replay + static buffer 复用、MemorySavor pause/resume 释放物理 bytes | L10.7 (l30.5) |
+| verl `update_weights_from_tensor` (CUDA IPC handle tuple) | `mini_infra/slime/ipc_weight_sync.py` | handle 序列化（不含数据）、`IPCStoragePool` 模拟共享 storage、gather 不对称、flush_cache 时序 | L11.3 (l32.5) |
+| slime batch-GAE chunked parallel | `mini_infra/rl/gae_chunk.py` | naive 反向递推、chunked 并行 + boundary correction 标量传递、与 naive 数值精确等价 | L11.7 (l34.5) |
+
+**关键设计原则**：CPU 模拟版本**保证结构性不变量与生产 GPU 版本一致**——例如 handle 必须 < 1KB（证明不含数据）、graph buffer `data_ptr()` 在多次 replay 间不变、savor pause 后 `physical_bytes() == 0`、按 top frame 聚合在 50 step 漏 free 实验里能定位到唯一真凶。这些性质在 GPU 上完全成立，在 CPU 模拟版上也必须成立。**唯一不能验证的是性能数字**（CUDA Graph 加速比、IPC 吞吐、chunked GAE 100-300× 等），那些必须放到真实硬件验证。
+
+详见每个 v2 lab 的 `patch/task.md` 与对应 notebook（`n19`-`n23`）。整体阅读顺序与简化对照见 [docs/qwen3_omni_reading_guide.md](./qwen3_omni_reading_guide.md)。

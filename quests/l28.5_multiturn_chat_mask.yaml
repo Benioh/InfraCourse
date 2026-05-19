@@ -1,0 +1,45 @@
+id: l28.5_multiturn_chat_mask
+title: Multi-turn Chat Template & Loss Mask
+level: L09.5
+act: 第 4 章：RL 与对齐
+role: Tokenization 学徒
+priority: 核心
+estimated_minutes: 75
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - HuggingFace Transformers
+  - verl（对照）
+
+patch:
+  description: |
+    实现 verl PR #1668（Yanbin Jiang）的 Fixed Base Conversation 算法：
+    给定多轮 messages，返回 (token_ids, loss_mask, attention_mask)，
+    正确处理默认 system 注入、QwQ 风格 think token drop 等 chat template 条件渲染问题。
+  task_md: labs/l28.5_multiturn_chat_mask/patch/task.md
+  starter_file: labs/l28.5_multiturn_chat_mask/patch/starter/multiturn_tokenizer.py
+  reference_file: labs/l28.5_multiturn_chat_mask/patch/reference/multiturn_tokenizer.py
+  test_command: make patch-test M=l28.5_multiturn_chat_mask
+  status_file: labs/l28.5_multiturn_chat_mask/patch/.last_run.json
+  test_count: 8
+  test_kind: 行为契约 + chat template 鲁棒性
+
+source_reading:
+  - title: 从 tokenizer 视角看 Agentic 多轮训练（Yanbin Jiang）
+    repo_path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/verl/multi-turn/fast_tokenization/
+  - title: verl multi-turn schemas 实现
+    repo_path: github_repo/verl/
+
+mini_infra_targets:
+  - mini_infra/data/
+
+notebooks:
+  - notebooks/n23_chat_template_multiturn.ipynb
+
+prereq: l28_sft_qwen_alpaca
+next_lab: l29_verl_rl_baseline
+
+gpu_modes:
+  local: CPU OK（用 MockTokenizer 模拟 chat template 行为）
+  cluster: 用真实 Qwen2.5-Instruct / QwQ-32B tokenizer 端到端验证（可选）

@@ -1,3 +1,5 @@
+import { withPublicPrefix } from "@/lib/runtime";
+
 export type ParsedPath = {
   path: string;
   hitRange: [number, number] | null;
@@ -37,7 +39,7 @@ export function parseLineRange(raw: string | null | undefined): [number, number]
 export function sourceUrl(path: string, lines?: [number, number] | null): string {
   const query = new URLSearchParams({ path });
   if (lines) query.set("lines", lines[0] === lines[1] ? `${lines[0]}` : `${lines[0]}-${lines[1]}`);
-  return `/source?${query.toString()}`;
+  return withPublicPrefix(`/source?${query.toString()}`);
 }
 
 export function buildBreadcrumbs(path: string): { name: string; href: string; isLast: boolean }[] {
@@ -48,7 +50,7 @@ export function buildBreadcrumbs(path: string): { name: string; href: string; is
   segments.forEach((seg, idx) => {
     acc = acc ? `${acc}/${seg}` : seg;
     const isLast = idx === segments.length - 1;
-    const href = isLast ? sourceUrl(acc) : `/source?dir=${encodeURIComponent(acc)}`;
+    const href = isLast ? sourceUrl(acc) : withPublicPrefix(`/source?dir=${encodeURIComponent(acc)}`);
     crumbs.push({ name: seg, href, isLast });
   });
   return crumbs;

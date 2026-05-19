@@ -1,0 +1,1889 @@
+=== base start: 2026-05-07T09:57:16Z ===
+RESULT base: ALREADY_EXISTS
+--- base end ---
+=== notebook start: 2026-05-07T09:57:17Z ===
+RESULT notebook: OK
+--- notebook end: 2026-05-07T09:58:10Z ---
+=== pytorch start: 2026-05-07T09:58:10Z ===
+RESULT pytorch: OK
+--- pytorch end: 2026-05-07T10:02:58Z ---
+=== megatron start: 2026-05-07T10:02:58Z ===
+RESULT megatron: OK
+--- megatron end: 2026-05-07T10:11:29Z ---
+=== vllm start: 2026-05-07T10:11:29Z ===
+RESULT vllm: OK
+--- vllm end: 2026-05-07T10:17:13Z ---
+=== sglang start: 2026-05-07T10:17:13Z ===
+RESULT sglang: OK
+--- sglang end: 2026-05-07T10:20:10Z ---
+=== slime start: 2026-05-07T10:20:10Z ===
+RESULT slime: OK
+--- slime end: 2026-05-07T10:22:58Z ---
+=== torchtitan start: 2026-05-07T10:22:58Z ===
+RESULT torchtitan: OK
+--- torchtitan end: 2026-05-07T10:24:12Z ---
+=== verl start: 2026-05-07T10:24:12Z ===
+RESULT verl: OK
+--- verl end: 2026-05-07T10:26:00Z ---
+=== final env list ===
+
+# conda environments:
+#
+# * -> active
+# + -> frozen
+base                     /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda
+megatron                 /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/megatron
+notebook                 /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/notebook
+pytorch                  /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/pytorch
+sglang                   /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/sglang
+slime                    /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/slime
+torchtitan               /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/torchtitan
+verl                     /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/verl
+vllm                     /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/envs/vllm
+
+=== base update start: 2026-05-07T10:27:42Z ===
+2 channel Terms of Service accepted
+Channels:
+ - conda-forge
+ - pytorch
+ - defaults
+Platform: linux-64
+Collecting package metadata (repodata.json): - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / done
+Solving environment: \ | / - \ | / done
+
+Downloading and Extracting Packages: ...working...libmamba-2.3.2       | 2.4 MB    |            |   0% 
+cryptography-48.0.0  | 1.8 MB    |            |   0% [A
+
+pydantic-core-2.46.4 | 1.8 MB    |            |   0% [A[A
+
+
+conda-26.3.2         | 1.2 MB    |            |   0% [A[A[A
+
+
+
+libsqlite-3.52.0     | 928 KB    |            |   0% [A[A[A[A
+
+
+
+
+libuv-1.51.0         | 874 KB    |            |   0% [A[A[A[A[A
+
+
+
+
+
+libmambapy-2.3.2     | 752 KB    |            |   0% [A[A[A[A[A[A
+
+
+
+
+
+
+uvloop-0.22.1        | 569 KB    |            |   0% [A[A[A[A[A[A[A
+
+
+
+
+
+
+
+libsolv-0.7.36       | 507 KB    |            |   0% [A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+zstandard-0.25.0     | 456 KB    |            |   0% [A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+fastar-0.11.0        | 416 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+watchfiles-1.1.1     | 411 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+brotlicffi-1.2.0.1   | 372 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+libsodium-1.0.18     | 366 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+brotli-python-1.0.9  | 353 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+websockets-16.0      | 349 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pydantic-2.13.4      | 338 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+zeromq-4.3.5         | 335 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+boltons-25.0.0       | 295 KB    |            |   0% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ... (more hidden) ...[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+libsqlite-3.52.0     | 928 KB    | 1          |   2% [A[A[A[Alibmamba-2.3.2       | 2.4 MB    |            |   1% 
+
+
+conda-26.3.2         | 1.2 MB    | 1          |   1% [A[A[A
+
+pydantic-core-2.46.4 | 1.8 MB    |            |   1% [A[A
+cryptography-48.0.0  | 1.8 MB    |            |   1% [A
+
+
+
+libsqlite-3.52.0     | 928 KB    | ####6      |  47% [A[A[A[Alibmamba-2.3.2       | 2.4 MB    | #8         |  18% 
+
+
+conda-26.3.2         | 1.2 MB    | ###2       |  32% [A[A[A
+
+pydantic-core-2.46.4 | 1.8 MB    | ##2        |  23% [A[A
+cryptography-48.0.0  | 1.8 MB    | #7         |  18% [A
+
+
+
+libsqlite-3.52.0     | 928 KB    | ########## | 100% [A[A[A[A
+
+
+conda-26.3.2         | 1.2 MB    | ########## | 100% [A[A[A
+
+
+
+libsqlite-3.52.0     | 928 KB    | ########## | 100% [A[A[A[Alibmamba-2.3.2       | 2.4 MB    | ########## | 100% 
+
+pydantic-core-2.46.4 | 1.8 MB    | ########## | 100% [A[A
+
+
+
+
+libuv-1.51.0         | 874 KB    | 1          |   2% [A[A[A[A[A
+cryptography-48.0.0  | 1.8 MB    | ########## | 100% [A
+
+
+
+
+libuv-1.51.0         | 874 KB    | ########## | 100% [A[A[A[A[A
+
+
+
+
+
+
+uvloop-0.22.1        | 569 KB    | 2          |   3% [A[A[A[A[A[A[A
+
+
+
+
+
+
+
+libsolv-0.7.36       | 507 KB    | 3          |   3% [A[A[A[A[A[A[A[A
+
+
+
+
+
+
+uvloop-0.22.1        | 569 KB    | ########## | 100% [A[A[A[A[A[A[A
+
+
+
+
+
+
+
+libsolv-0.7.36       | 507 KB    | ########## | 100% [A[A[A[A[A[A[A[A
+
+pydantic-core-2.46.4 | 1.8 MB    | ########## | 100% [A[A
+
+pydantic-core-2.46.4 | 1.8 MB    | ########## | 100% [A[A
+
+
+
+
+
+
+
+
+zstandard-0.25.0     | 456 KB    | 3          |   4% [A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+zstandard-0.25.0     | 456 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+watchfiles-1.1.1     | 411 KB    | 3          |   4% [A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+watchfiles-1.1.1     | 411 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+libmambapy-2.3.2     | 752 KB    | 2          |   2% [A[A[A[A[A[A
+
+
+
+
+
+libmambapy-2.3.2     | 752 KB    | ########## | 100% [A[A[A[A[A[Alibmamba-2.3.2       | 2.4 MB    | ########## | 100% libmamba-2.3.2       | 2.4 MB    | ########## | 100% 
+
+
+
+
+
+
+
+
+
+
+
+
+libsodium-1.0.18     | 366 KB    | 4          |   4% [A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+libsodium-1.0.18     | 366 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+libuv-1.51.0         | 874 KB    | ########## | 100% [A[A[A[A[A
+
+
+
+
+libuv-1.51.0         | 874 KB    | ########## | 100% [A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+websockets-16.0      | 349 KB    | 4          |   5% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+websockets-16.0      | 349 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pydantic-2.13.4      | 338 KB    | 4          |   5% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pydantic-2.13.4      | 338 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+zeromq-4.3.5         | 335 KB    | 4          |   5% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+zeromq-4.3.5         | 335 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+uvloop-0.22.1        | 569 KB    | ########## | 100% [A[A[A[A[A[A[A
+
+
+
+
+
+
+uvloop-0.22.1        | 569 KB    | ########## | 100% [A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ... (more hidden) ...[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+boltons-25.0.0       | 295 KB    | 5          |   5% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ... (more hidden) ...[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+boltons-25.0.0       | 295 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+libsolv-0.7.36       | 507 KB    | ########## | 100% [A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+libsolv-0.7.36       | 507 KB    | ########## | 100% [A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+brotlicffi-1.2.0.1   | 372 KB    | 4          |   4% [A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+brotlicffi-1.2.0.1   | 372 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+zstandard-0.25.0     | 456 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+zstandard-0.25.0     | 456 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+fastar-0.11.0        | 416 KB    | 3          |   4% [A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+fastar-0.11.0        | 416 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+watchfiles-1.1.1     | 411 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+watchfiles-1.1.1     | 411 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A
+cryptography-48.0.0  | 1.8 MB    | ########## | 100% [A
+cryptography-48.0.0  | 1.8 MB    | ########## | 100% [A
+
+
+conda-26.3.2         | 1.2 MB    | ########## | 100% [A[A[A
+
+
+conda-26.3.2         | 1.2 MB    | ########## | 100% [A[A[A
+
+
+
+
+
+libmambapy-2.3.2     | 752 KB    | ########## | 100% [A[A[A[A[A[A
+
+
+
+
+
+libmambapy-2.3.2     | 752 KB    | ########## | 100% [A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+brotli-python-1.0.9  | 353 KB    | 4          |   5% [A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+brotli-python-1.0.9  | 353 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pydantic-2.13.4      | 338 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pydantic-2.13.4      | 338 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+libsodium-1.0.18     | 366 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+libsodium-1.0.18     | 366 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+websockets-16.0      | 349 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+websockets-16.0      | 349 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+zeromq-4.3.5         | 335 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+zeromq-4.3.5         | 335 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ... (more hidden) ...[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ... (more hidden) ...[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+brotlicffi-1.2.0.1   | 372 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+brotlicffi-1.2.0.1   | 372 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+boltons-25.0.0       | 295 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+boltons-25.0.0       | 295 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+fastar-0.11.0        | 416 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+fastar-0.11.0        | 416 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+brotli-python-1.0.9  | 353 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+brotli-python-1.0.9  | 353 KB    | ########## | 100% [A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                      [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A                                                     
+                                                     [A
+
+                                                     [A[A
+
+
+                                                     [A[A[A
+
+
+
+                                                     [A[A[A[A
+
+
+
+
+                                                     [A[A[A[A[A
+
+
+
+
+
+                                                     [A[A[A[A[A[A
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                     [A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+[A
+
+[A[A
+
+
+[A[A[A
+
+
+
+[A[A[A[A
+
+
+
+
+[A[A[A[A[A
+
+
+
+
+
+[A[A[A[A[A[A
+
+
+
+
+
+
+[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+[A
+
+[A[A
+
+
+[A[A[A
+
+
+
+[A[A[A[A
+
+
+
+
+[A[A[A[A[A
+
+
+
+
+
+[A[A[A[A[A[A
+
+
+
+
+
+
+[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+[A
+
+[A[A
+
+
+[A[A[A
+
+
+
+[A[A[A[A
+
+
+
+
+[A[A[A[A[A
+
+
+
+
+
+[A[A[A[A[A[A
+
+
+
+
+
+
+[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A
+[A
+
+[A[A
+
+
+[A[A[A
+
+
+
+[A[A[A[A done
+Preparing transaction: \ | / - \ | done
+Verifying transaction: - \ | / - \ | / - \ | / - \ | / - done
+Executing transaction: | / - \ | / - Removed 2 cache files.
+Removed 2 Terms of Service files.
+
+\ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | done
+Installing pip dependencies: - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ | / - \ Ran pip subprocess with arguments:
+['/inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/bin/python', '-m', 'pip', 'install', '-U', '-r', '/inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt', '--exists-action=b']
+Pip subprocess output:
+Collecting streamlit (from -r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading streamlit-1.57.0-py3-none-any.whl.metadata (9.6 kB)
+Collecting altair!=5.4.0,!=5.4.1,<7,>=4.0 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading altair-6.1.0-py3-none-any.whl.metadata (11 kB)
+Collecting blinker<2,>=1.5.0 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading blinker-1.9.0-py3-none-any.whl.metadata (1.6 kB)
+Collecting cachetools<8,>=5.5 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached cachetools-7.1.1-py3-none-any.whl.metadata (5.8 kB)
+Requirement already satisfied: click<9,>=7.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (8.3.3)
+Collecting gitpython!=3.1.19,<4,>=3.0.7 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached gitpython-3.1.50-py3-none-any.whl.metadata (14 kB)
+Collecting numpy<3,>=1.23 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached numpy-2.4.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+Requirement already satisfied: packaging>=20 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (26.2)
+Collecting pandas<4,>=1.4.0 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached pandas-3.0.2-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+Collecting pillow<13,>=7.1.0 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached pillow-12.2.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (8.8 kB)
+Collecting pydeck<1,>=0.8.0b4 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading pydeck-0.9.2-py2.py3-none-any.whl.metadata (4.2 kB)
+Collecting protobuf<8,>=3.20 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached protobuf-7.34.1-cp310-abi3-manylinux2014_x86_64.whl.metadata (595 bytes)
+Collecting pyarrow>=7.0 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached pyarrow-24.0.0-cp311-cp311-manylinux_2_28_x86_64.whl.metadata (3.0 kB)
+Requirement already satisfied: requests<3,>=2.27 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (2.33.1)
+Collecting tenacity<10,>=8.1.0 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading tenacity-9.1.4-py3-none-any.whl.metadata (1.2 kB)
+Collecting toml<2,>=0.10.1 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading toml-0.10.2-py2.py3-none-any.whl.metadata (7.1 kB)
+Requirement already satisfied: typing-extensions<5,>=4.10.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (4.15.0)
+Requirement already satisfied: starlette>=0.40.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (1.0.0)
+Requirement already satisfied: uvicorn>=0.30.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (0.46.0)
+Requirement already satisfied: httptools>=0.6.3 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (0.7.1)
+Requirement already satisfied: anyio>=4.0.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (4.13.0)
+Requirement already satisfied: python-multipart>=0.0.10 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (0.0.27)
+Requirement already satisfied: websockets>=12.0.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (16.0)
+Collecting itsdangerous>=2.1.2 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading itsdangerous-2.2.0-py3-none-any.whl.metadata (1.9 kB)
+Collecting watchdog<7,>=2.1.5 (from streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading watchdog-6.0.0-py3-none-manylinux2014_x86_64.whl.metadata (44 kB)
+Requirement already satisfied: jinja2 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (3.1.6)
+Requirement already satisfied: jsonschema>=3.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (4.26.0)
+Collecting narwhals>=2.4.0 (from altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Downloading narwhals-2.20.0-py3-none-any.whl.metadata (15 kB)
+Collecting gitdb<5,>=4.0.1 (from gitpython!=3.1.19,<4,>=3.0.7->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached gitdb-4.0.12-py3-none-any.whl.metadata (1.2 kB)
+Collecting smmap<6,>=3.0.1 (from gitdb<5,>=4.0.1->gitpython!=3.1.19,<4,>=3.0.7->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1))
+  Using cached smmap-5.0.3-py3-none-any.whl.metadata (4.6 kB)
+Requirement already satisfied: python-dateutil>=2.8.2 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from pandas<4,>=1.4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (2.9.0.post0)
+Requirement already satisfied: charset_normalizer<4,>=2 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from requests<3,>=2.27->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (3.4.7)
+Requirement already satisfied: idna<4,>=2.5 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from requests<3,>=2.27->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (3.13)
+Requirement already satisfied: urllib3<3,>=1.26 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from requests<3,>=2.27->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (2.5.0)
+Requirement already satisfied: certifi>=2023.5.7 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from requests<3,>=2.27->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (2026.4.22)
+Requirement already satisfied: MarkupSafe>=2.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from jinja2->altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (3.0.3)
+Requirement already satisfied: attrs>=22.2.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (26.1.0)
+Requirement already satisfied: jsonschema-specifications>=2023.03.6 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (2025.9.1)
+Requirement already satisfied: referencing>=0.28.4 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (0.37.0)
+Requirement already satisfied: rpds-py>=0.25.0 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from jsonschema>=3.0->altair!=5.4.0,!=5.4.1,<7,>=4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (0.30.0)
+Requirement already satisfied: six>=1.5 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from python-dateutil>=2.8.2->pandas<4,>=1.4.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (1.17.0)
+Requirement already satisfied: h11>=0.8 in /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/.miniconda/lib/python3.11/site-packages (from uvicorn>=0.30.0->streamlit->-r /inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse/envs/condaenv.z4lrh63t.requirements.txt (line 1)) (0.16.0)
+Downloading streamlit-1.57.0-py3-none-any.whl (9.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.2/9.2 MB 16.3 MB/s  0:00:00
+Downloading altair-6.1.0-py3-none-any.whl (796 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 797.0/797.0 kB 125.6 MB/s  0:00:00
+Downloading blinker-1.9.0-py3-none-any.whl (8.5 kB)
+Using cached cachetools-7.1.1-py3-none-any.whl (16 kB)
+Using cached gitpython-3.1.50-py3-none-any.whl (212 kB)
+Using cached gitdb-4.0.12-py3-none-any.whl (62 kB)
+Using cached numpy-2.4.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (16.9 MB)
+Using cached pandas-3.0.2-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (11.3 MB)
+Using cached pillow-12.2.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (7.1 MB)
+Using cached protobuf-7.34.1-cp310-abi3-manylinux2014_x86_64.whl (324 kB)
+Downloading pydeck-0.9.2-py2.py3-none-any.whl (11.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.3/11.3 MB 34.9 MB/s  0:00:00
+Using cached smmap-5.0.3-py3-none-any.whl (24 kB)
+Downloading tenacity-9.1.4-py3-none-any.whl (28 kB)
+Downloading toml-0.10.2-py2.py3-none-any.whl (16 kB)
+Downloading watchdog-6.0.0-py3-none-manylinux2014_x86_64.whl (79 kB)
+Downloading itsdangerous-2.2.0-py3-none-any.whl (16 kB)
+Downloading narwhals-2.20.0-py3-none-any.whl (449 kB)
+Using cached pyarrow-24.0.0-cp311-cp311-manylinux_2_28_x86_64.whl (48.8 MB)
+Installing collected packages: watchdog, toml, tenacity, smmap, pyarrow, protobuf, pillow, numpy, narwhals, itsdangerous, cachetools, blinker, pydeck, pandas, gitdb, gitpython, altair, streamlit
+
+Successfully installed altair-6.1.0 blinker-1.9.0 cachetools-7.1.1 gitdb-4.0.12 gitpython-3.1.50 itsdangerous-2.2.0 narwhals-2.20.0 numpy-2.4.4 pandas-3.0.2 pillow-12.2.0 protobuf-7.34.1 pyarrow-24.0.0 pydeck-0.9.2 smmap-5.0.3 streamlit-1.57.0 tenacity-9.1.4 toml-0.10.2 watchdog-6.0.0
+
+done
+#
+# To activate this environment, use
+#
+#     $ conda activate base
+#
+# To deactivate an active environment, use
+#
+#     $ conda deactivate
+
+=== base update end ===
+=== pip install -e . start: 2026-05-07T10:28:37Z ===
+Obtaining file:///inspire/qb-ilm2/project/embodied-multimodality/public/yangchen/InfraCourse
+  DEPRECATION: Setting PIP_CONSTRAINT will not affect build constraints in the future, pip 26.2 will enforce this behaviour change. A possible replacement is to specify build constraints using --build-constraint or PIP_BUILD_CONSTRAINT. To disable this warning without any build constraints set --use-feature=build-constraint or PIP_USE_FEATURE="build-constraint".
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: fastapi>=0.115.0 in ./.miniconda/lib/python3.11/site-packages (from infra-quest==0.1.0) (0.136.1)
+Requirement already satisfied: uvicorn>=0.30.0 in ./.miniconda/lib/python3.11/site-packages (from infra-quest==0.1.0) (0.46.0)
+Requirement already satisfied: pyyaml>=6.0.0 in ./.miniconda/lib/python3.11/site-packages (from infra-quest==0.1.0) (6.0.3)
+Requirement already satisfied: pydantic>=2.7.0 in ./.miniconda/lib/python3.11/site-packages (from infra-quest==0.1.0) (2.13.4)
+Requirement already satisfied: jinja2>=3.1.0 in ./.miniconda/lib/python3.11/site-packages (from infra-quest==0.1.0) (3.1.6)
+Collecting anthropic>=0.40 (from infra-quest==0.1.0)
+  Using cached anthropic-0.100.0-py3-none-any.whl.metadata (3.2 kB)
+Collecting openai>=1.50 (from infra-quest==0.1.0)
+  Using cached openai-2.35.1-py3-none-any.whl.metadata (31 kB)
+Requirement already satisfied: anyio<5,>=3.5.0 in ./.miniconda/lib/python3.11/site-packages (from anthropic>=0.40->infra-quest==0.1.0) (4.13.0)
+Requirement already satisfied: distro<2,>=1.7.0 in ./.miniconda/lib/python3.11/site-packages (from anthropic>=0.40->infra-quest==0.1.0) (1.9.0)
+Collecting docstring-parser<1,>=0.15 (from anthropic>=0.40->infra-quest==0.1.0)
+  Using cached docstring_parser-0.18.0-py3-none-any.whl.metadata (3.5 kB)
+Requirement already satisfied: httpx<1,>=0.25.0 in ./.miniconda/lib/python3.11/site-packages (from anthropic>=0.40->infra-quest==0.1.0) (0.28.1)
+Collecting jiter<1,>=0.4.0 (from anthropic>=0.40->infra-quest==0.1.0)
+  Using cached jiter-0.14.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (5.2 kB)
+Requirement already satisfied: sniffio in ./.miniconda/lib/python3.11/site-packages (from anthropic>=0.40->infra-quest==0.1.0) (1.3.1)
+Requirement already satisfied: typing-extensions<5,>=4.14 in ./.miniconda/lib/python3.11/site-packages (from anthropic>=0.40->infra-quest==0.1.0) (4.15.0)
+Requirement already satisfied: idna>=2.8 in ./.miniconda/lib/python3.11/site-packages (from anyio<5,>=3.5.0->anthropic>=0.40->infra-quest==0.1.0) (3.13)
+Requirement already satisfied: certifi in ./.miniconda/lib/python3.11/site-packages (from httpx<1,>=0.25.0->anthropic>=0.40->infra-quest==0.1.0) (2026.4.22)
+Requirement already satisfied: httpcore==1.* in ./.miniconda/lib/python3.11/site-packages (from httpx<1,>=0.25.0->anthropic>=0.40->infra-quest==0.1.0) (1.0.9)
+Requirement already satisfied: h11>=0.16 in ./.miniconda/lib/python3.11/site-packages (from httpcore==1.*->httpx<1,>=0.25.0->anthropic>=0.40->infra-quest==0.1.0) (0.16.0)
+Requirement already satisfied: annotated-types>=0.6.0 in ./.miniconda/lib/python3.11/site-packages (from pydantic>=2.7.0->infra-quest==0.1.0) (0.7.0)
+Requirement already satisfied: pydantic-core==2.46.4 in ./.miniconda/lib/python3.11/site-packages (from pydantic>=2.7.0->infra-quest==0.1.0) (2.46.4)
+Requirement already satisfied: typing-inspection>=0.4.2 in ./.miniconda/lib/python3.11/site-packages (from pydantic>=2.7.0->infra-quest==0.1.0) (0.4.2)
+Requirement already satisfied: starlette>=0.46.0 in ./.miniconda/lib/python3.11/site-packages (from fastapi>=0.115.0->infra-quest==0.1.0) (1.0.0)
+Requirement already satisfied: annotated-doc>=0.0.2 in ./.miniconda/lib/python3.11/site-packages (from fastapi>=0.115.0->infra-quest==0.1.0) (0.0.4)
+Requirement already satisfied: MarkupSafe>=2.0 in ./.miniconda/lib/python3.11/site-packages (from jinja2>=3.1.0->infra-quest==0.1.0) (3.0.3)
+Requirement already satisfied: tqdm>4 in ./.miniconda/lib/python3.11/site-packages (from openai>=1.50->infra-quest==0.1.0) (4.67.3)
+Requirement already satisfied: click>=7.0 in ./.miniconda/lib/python3.11/site-packages (from uvicorn>=0.30.0->infra-quest==0.1.0) (8.3.3)
+Downloading anthropic-0.100.0-py3-none-any.whl (753 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 753.6/753.6 kB 2.9 MB/s  0:00:00
+Using cached docstring_parser-0.18.0-py3-none-any.whl (22 kB)
+Using cached jiter-0.14.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (358 kB)
+Using cached openai-2.35.1-py3-none-any.whl (1.3 MB)
+Building wheels for collected packages: infra-quest
+  Building editable for infra-quest (pyproject.toml): started
+  Building editable for infra-quest (pyproject.toml): finished with status 'done'
+  Created wheel for infra-quest: filename=infra_quest-0.1.0-0.editable-py3-none-any.whl size=8432 sha256=f1a1fc6a73ece76a0a69dada41a807f799182686b1a604bb4eeeae2ff2037361
+  Stored in directory: /tmp/pip-ephem-wheel-cache-9j0clf0p/wheels/c0/c7/7d/45f1022a1089b56d41f4c95f762f2c48f5d6774106be29af5f
+Successfully built infra-quest
+Installing collected packages: jiter, docstring-parser, openai, anthropic, infra-quest
+
+Successfully installed anthropic-0.100.0 docstring-parser-0.18.0 infra-quest-0.1.0 jiter-0.14.0 openai-2.35.1
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+=== pip install -e . end ===
+=== verify in base ===
+fastapi 0.136.1
+anthropic 0.100.0
+openai 2.35.1

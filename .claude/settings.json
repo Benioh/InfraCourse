@@ -1,9 +1,0 @@
-{
-  "apiKeyHelper": "echo sk-b42d594c36c5e8b287d1c3aaf896f872e75361a4b14f8763",
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://ai-gateway.sotatts.online"
-  },
-  "theme": "dark",
-  "hasCompletedOnboarding": true,
-  "model": "opus[1m]"
-}

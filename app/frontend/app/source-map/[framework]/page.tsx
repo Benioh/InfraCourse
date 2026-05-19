@@ -2,6 +2,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { Panel } from "@/components/ui";
 import { inferRepoPath, parseSourceHref, sourceUrl, splitInspectPaths } from "@/lib/source";
+import { withPublicPrefix } from "@/lib/runtime";
 
 const frameworks = ["MiniInfra", "pytorch", "TorchTitan", "Megatron", "vLLM", "SGLang", "verl", "SLiME"];
 
@@ -43,7 +44,7 @@ export default async function SourceMapPage({ params }: { params: Promise<{ fram
       <Panel title={`${payload.framework} 源码地图`} eyebrow="Code Reading / 读代码路线">
         <div className="flex flex-wrap gap-2">
           {frameworks.map((item) => (
-            <Link key={item} href={`/source-map/${item}`} className="rounded-full border border-quest-border bg-white/80 px-4 py-2 text-sm hover:border-quest-accent">
+            <Link key={item} href={withPublicPrefix(`/source-map/${item}`)} className="rounded-full border border-quest-border bg-white/80 px-4 py-2 text-sm hover:border-quest-accent">
               {item}
             </Link>
           ))}

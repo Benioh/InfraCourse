@@ -35,6 +35,22 @@ cat labs/l35_multimodal_capstone/CAPSTONE_PLAN.md
 | `test_clip_score_identical` | 相同向量 → 1 |
 | `test_clip_score_orthogonal` | 正交 → 0 |
 
+## v2 增量在 Capstone 里怎么用
+
+5 个新 lab 不是孤立外挂，应当作为 Capstone 三阶段的工程基石融进 Gold 评分：
+
+| 阶段 | 必装 patch | 解决的问题 |
+|---|---|---|
+| Stage A 训练前数据 | **L09.7 Multi-turn Chat Mask**（l28.5） | 多轮 SFT 数据的 loss mask 不能搞错，否则 reward 全是噪声 |
+| Stage A 调试 | **L01.3 Memory Snapshot**（l02.5） | Stage A 跑 80 步突然 OOM 时按 stack 定位；不会的人只能盲改 batch size |
+| Stage B 推理 | **L10.7 CUDA Graph + Savor**（l30.5） | OpenAI endpoint 的 decode loop 必须 capture/replay；否则 TTFT 拉不到 < 500ms |
+| Stage C RL 训练 | **L10.3 Train-Infer Mismatch**（l29.5） | 不加 TIS/MIS 修正，RL 跑到 300 步会因为 mismatch 崩溃，Gold 的 +5pp 拿不到 |
+| Stage C 权重同步 | **L11.3 IPC Weight Sync**（l32.5） | actor → rollout 的权重推送必须用 handle tuple，不是 dict copy；否则单次 sync 几十秒 |
+
+Stage C 的 **Gold +5pp** 评估前，必须证明 K3 KL 在训练期间不发散（用 L29.5 实现的 `compute_k3_kl` 出图）；
+任何 OOM 的 incident report 必须附 L02.5 的 stack 聚合截图；
+任何 Stage B 的 latency 报告必须区分 capture vs replay 的 step time。
+
 ## 全课总结
 
 恭喜你跑到这里。如果 Capstone Gold 通过，你的简历可以直接写：
@@ -46,5 +62,11 @@ cat labs/l35_multimodal_capstone/CAPSTONE_PLAN.md
 > RadixCache（L08）/ AWQ quantization（L08.5）/ spec decode（L08.7）/
 > Prometheus metrics（L09）/ adaptive KL（L10）/ async rollout（L10.5）/
 > weight sync（L11）—— 全部 16 个真补丁串起来部署成 OpenAI 兼容 endpoint。
+>
+> **而且我懂"基础设施会以哪些方式骗你"**：在 Capstone 里我用 K3 KL 监控并用 TIS/MIS（L10.3）
+> 防住了训推不一致导致的训练崩溃；用 IPC handle tuple weight sync（L11.3）做到 actor → rollout
+> 的同步只花几百毫秒；用 CUDA Graph + Memory Savor（L10.7）让 SGLang endpoint 的 decode TTFT
+> 稳定在 sub-500ms；用 fixed-base chat template tokenization（L09.7）保证 multi-turn loss mask
+> 没有一个 token 错位；OOM 现场用 memory snapshot stack 聚合（L01.3）3 分钟定位泄露源。
 
 这就是面试官想看的。

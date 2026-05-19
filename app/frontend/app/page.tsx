@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { CommandBlock, KeyValue, Panel, StatusPill } from "@/components/ui";
+import { withPublicPrefix } from "@/lib/runtime";
 
 function statusLabel(status: string): { label: string; passed: boolean } {
   if (status === "已通过") return { label: "已通过", passed: true };
@@ -42,7 +43,7 @@ export default async function DashboardPage() {
             return (
               <Link
                 key={mission.id}
-                href={`/missions/${mission.id}`}
+                href={withPublicPrefix(`/missions/${mission.id}`)}
                 className="rounded-3xl border border-quest-border bg-white/70 p-5 transition hover:border-quest-accent hover:shadow-panel"
               >
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">

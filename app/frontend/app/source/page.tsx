@@ -4,7 +4,9 @@ import { codeToHtml, type ShikiTransformer } from "shiki";
 import { api } from "@/lib/api";
 import { Panel } from "@/components/ui";
 import { CopyButton } from "@/components/copy-button";
+import RegisterPageContext from "@/components/register-page-context";
 import { buildBreadcrumbs, parseLineRange, sourceUrl } from "@/lib/source";
+import { withPublicPrefix } from "@/lib/runtime";
 import type { SourcePayload, SourceTreeEntry, SourceTreePayload } from "@/lib/types";
 
 type SearchParams = Promise<{ path?: string; dir?: string; lines?: string }>;
@@ -69,14 +71,14 @@ function Breadcrumbs({ path, isDir }: { path: string; isDir: boolean }) {
   const crumbs = buildBreadcrumbs(path);
   return (
     <div className="flex flex-wrap items-center gap-1 font-mono text-xs text-quest-muted">
-      <Link href="/source" className="text-quest-accent hover:underline">
+      <Link href={withPublicPrefix("/source")} className="text-quest-accent hover:underline">
         仓库根
       </Link>
       {crumbs.map((crumb, idx) => {
         const showAsFile = crumb.isLast && !isDir;
         const href = showAsFile
           ? sourceUrl(crumbPath(crumbs, idx))
-          : `/source?dir=${encodeURIComponent(crumbPath(crumbs, idx))}`;
+          : withPublicPrefix(`/source?dir=${encodeURIComponent(crumbPath(crumbs, idx))}`);
         return (
           <span key={`${crumb.name}-${idx}`} className="flex items-center gap-1">
             <span className="text-quest-muted">/</span>
@@ -103,7 +105,7 @@ function TreeView({ tree }: { tree: SourceTreePayload }) {
       {tree.entries.map((entry: SourceTreeEntry) => {
         const href =
           entry.type === "dir"
-            ? `/source?dir=${encodeURIComponent(entry.path)}`
+            ? withPublicPrefix(`/source?dir=${encodeURIComponent(entry.path)}`)
             : entry.type === "file"
               ? sourceUrl(entry.path)
               : null;
@@ -154,35 +156,48 @@ async function FileView({ path, hit }: { path: string; hit: [number, number] | n
   const dirPath = payload.path.includes("/") ? payload.path.slice(0, payload.path.lastIndexOf("/")) : "";
 
   return (
-    <Panel title={payload.path} eyebrow="Source / 源码查看">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <Breadcrumbs path={payload.path} isDir={false} />
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full border border-quest-border px-3 py-1 text-xs text-quest-muted">
-            {payload.language} · {payload.line_count} 行 · {formatBytes(payload.size)}
-          </span>
-          {dirPath ? (
-            <Link
-              href={`/source?dir=${encodeURIComponent(dirPath)}`}
-              className="rounded-full border border-quest-border px-3 py-1 text-xs text-quest-ink hover:border-quest-accent"
-            >
-              同目录文件
-            </Link>
-          ) : null}
-          <CopyButton text={payload.content} label="复制全文" />
-        </div>
-      </div>
-      {hit ? (
-        <p className="mt-3 text-xs text-quest-muted">
-          高亮行：{hit[0] === hit[1] ? `L${hit[0]}` : `L${hit[0]}-L${hit[1]}`}
-        </p>
-      ) : null}
-      <div
-        className="source-viewer mt-4 overflow-auto rounded-2xl border border-quest-border/70 bg-[#fdfaf3]"
-        // shiki 的输出已 HTML 转义
-        dangerouslySetInnerHTML={{ __html: html }}
+    <div data-ai-context-root>
+      <RegisterPageContext
+        ctx={{
+          page_kind: "source",
+          source_path: payload.path,
+          lines: hit ?? undefined,
+          page_summary: `source=${payload.path}${
+            hit ? `#L${hit[0]}-${hit[1]}` : ""
+          } · ${payload.language} · ${payload.line_count} lines`,
+        }}
       />
-    </Panel>
+      <Panel title={payload.path} eyebrow="Source / 源码查看">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <Breadcrumbs path={payload.path} isDir={false} />
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-quest-border px-3 py-1 text-xs text-quest-muted">
+              {payload.language} · {payload.line_count} 行 · {formatBytes(payload.size)}
+            </span>
+            {dirPath ? (
+              <Link
+                href={withPublicPrefix(`/source?dir=${encodeURIComponent(dirPath)}`)}
+                className="rounded-full border border-quest-border px-3 py-1 text-xs text-quest-ink hover:border-quest-accent"
+              >
+                同目录文件
+              </Link>
+            ) : null}
+            <CopyButton text={payload.content} label="复制全文" />
+          </div>
+        </div>
+        {hit ? (
+          <p className="mt-3 text-xs text-quest-muted">
+            高亮行：{hit[0] === hit[1] ? `L${hit[0]}` : `L${hit[0]}-L${hit[1]}`}
+          </p>
+        ) : null}
+        <div
+          className="source-viewer mt-4 overflow-auto rounded-2xl border border-quest-border/70 bg-[#fdfaf3]"
+          data-source-path={payload.path}
+          // shiki 的输出已 HTML 转义
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      </Panel>
+    </div>
   );
 }
 

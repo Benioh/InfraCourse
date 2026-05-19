@@ -1,0 +1,44 @@
+id: l30.5_cuda_graph_savor
+title: CUDA Graph Cache + Memory Savor（co-locate RL 双件套）
+level: L10.7
+act: 第 4 章：RL 与对齐
+role: GPU 调优学徒
+priority: 进阶
+estimated_minutes: 75
+no_gpu_friendly: true
+
+frameworks:
+  - PyTorch
+  - SGLang torch_memory_saver / Megatron CuMemAllocator (对照)
+
+patch:
+  description: |
+    实现两个 RL co-locate 必备件：GraphCache（CUDA Graph capture/replay）
+    与 MemorySavor（pause/resume tensor 数据）。CPU 模拟语义，API 与
+    SGLang/Megatron 真实对应组件一致。
+  task_md: labs/l30.5_cuda_graph_savor/patch/task.md
+  starter_file: labs/l30.5_cuda_graph_savor/patch/starter/cuda_graph_cache.py
+  reference_file: labs/l30.5_cuda_graph_savor/patch/reference/cuda_graph_cache.py
+  test_command: make patch-test M=l30.5_cuda_graph_savor
+  status_file: labs/l30.5_cuda_graph_savor/patch/.last_run.json
+  test_count: 8
+  test_kind: 行为契约 + 数值正确性
+
+source_reading:
+  - title: 基于 torch-memory-saver 浅析 CUDA Graph
+    repo_path: github_repo/Awesome-ML-SYS-Tutorial/torch/cuda-graph/readme.md
+  - title: 再探 CUDA Graph - Dual AR 模型的统一覆盖优化
+    repo_path: github_repo/Awesome-ML-SYS-Tutorial/torch/cuda-graph/readme-2.md
+
+mini_infra_targets:
+  - mini_infra/sglang/
+
+notebooks:
+  - notebooks/n20_cuda_graph_replay.ipynb
+
+prereq: l30_dpo_loss
+next_lab: l31_rollout_only_smoke
+
+gpu_modes:
+  local: CPU OK（语义模拟）
+  cluster: 真 GPU 上对照 torch.cuda.graphs 验证 capture/replay 时间差

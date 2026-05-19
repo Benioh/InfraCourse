@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { Suspense } from "react";
 import { AppShell } from "@/components/ui";
+import AiTutor from "@/components/ai-tutor";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,6 +15,9 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
     <html lang="zh-CN">
       <body>
         <AppShell>{children}</AppShell>
+        <Suspense fallback={null}>
+          <AiTutor />
+        </Suspense>
       </body>
     </html>
   );

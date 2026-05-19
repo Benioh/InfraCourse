@@ -1,0 +1,67 @@
+mission: l34.5_gae_chunked_parallel
+title: L11.7 Quiz · Chunked GAE
+pass_threshold: 1.0
+description: |
+  3 题打中 chunked GAE 最容易模糊的点。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l34.5_gae_chunked_parallel/patch/task.md
+  - title: 读 batch-GAE 主线博客
+    kind: source
+    path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/slime/batch-GAE/ppo-gae-chunk.md
+
+questions:
+  - id: q1_why_serial
+    prompt: |
+      为什么 GAE 反向递推"看起来必须串行"？
+    options:
+      - id: a
+        text: $A_t$ 依赖 $A_{t+1}$，是真正的数据依赖；naive 实现里 chunk size = T 整段
+        correct: true
+      - id: b
+        text: 因为 PyTorch 不支持并行 reduce
+      - id: c
+        text: 浮点不结合律强制串行
+      - id: d
+        text: GAE 不是 GPU friendly 算法
+    explanation: |
+      A 对：链式依赖在数学上确实存在。但分 chunk 后，chunk 内部仍然依赖、chunk
+      之间只交换一个标量边界值——这就把"全局严格串行"切成"局部严格串行 +
+      全局边界传播 (T/k 长度)"。
+
+  - id: q2_correction
+    prompt: |
+      chunk 之间的"boundary correction"传递的是什么？
+    options:
+      - id: a
+        text: 下一 chunk 起点的 advantage 值，作为本 chunk 末尾的初值
+        correct: true
+      - id: b
+        text: 下一 chunk 的所有 reward
+      - id: c
+        text: 下一 chunk 的所有 value
+      - id: d
+        text: 全局的累积折扣 (γλ)^T
+    explanation: |
+      A 对：本 chunk 在内部递推时，最末 token 的"下一步 advantage"取自下一 chunk
+      起点的 advantage。一个标量足以让所有 chunk 的输出与 naive 数学等价。
+
+  - id: q3_speedup_source
+    prompt: |
+      为什么这个改写在 GPU 上能拿到 100-300× 加速？
+    options:
+      - id: a
+        text: chunk 之间互不依赖（除一个标量），所有 chunk 可以同时跑；CPU launch 开销也大幅下降
+        correct: true
+      - id: b
+        text: 用了 fp8
+      - id: c
+        text: 减少了浮点运算次数
+      - id: d
+        text: cudaGraph 让其零开销
+    explanation: |
+      A 对：parallelism = num_chunks（T=32K, k=64 → 512 路并行）；从 32K 步串行
+      变成 64 步串行 + 512 路并行。同时 CPU 上 Python loop 调度次数 32K → 64，
+      kernel launch 大幅减少。算法和浮点运算次数完全不变，纯工程收益。

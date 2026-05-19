@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { CommandBlock, KeyValue, Panel, StatusPill } from "@/components/ui";
+import { withPublicPrefix } from "@/lib/runtime";
 
 export default async function CurriculumPage() {
   const curriculum = await api.curriculum();
@@ -42,7 +43,7 @@ export default async function CurriculumPage() {
                   : ""}
               </p>
               <Link
-                href={`/missions/${current.id}`}
+                href={withPublicPrefix(`/missions/${current.id}`)}
                 className="inline-flex rounded-full border border-quest-accent px-4 py-2 font-medium text-quest-accent hover:bg-quest-accent hover:text-white"
               >
                 打开本关任务
@@ -127,7 +128,7 @@ export default async function CurriculumPage() {
                 {phase.missions.map((mission) => (
                   <Link
                     key={mission.id}
-                    href={`/missions/${mission.id}`}
+                    href={withPublicPrefix(`/missions/${mission.id}`)}
                     className="rounded-2xl border border-quest-border bg-[#fbfaf7] p-4 transition hover:border-quest-accent hover:shadow-panel"
                   >
                     <div className="flex items-start justify-between gap-3">

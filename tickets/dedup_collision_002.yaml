@@ -29,20 +29,23 @@ likely_causes:
 - 文档长度差异大：短文档 vs 长文档 jaccard 自然偏低，但 minhash 可能高估
 - 跨语言 / 多 domain：未分桶，短文 vs 长文混在一起
 minimal_checks:
-- 用 `mini_infra/data/minhash_dedup.py` 在合成数据上测召回率与精度：
+- |
+  用 `mini_infra/data/minhash_dedup.py` 在合成数据上测召回率与精度：
   ```python
   # 构造已知 ground truth: 100 个原 + 10 个 near-dup（真重复）+ 90 个独立
   # 跑 minhash 看 detected pairs 与 ground truth 的 precision/recall
   ```
-- 抽 50 对 detected pairs 人工看：
+- |
+  抽 50 对 detected pairs 人工看：
   - 阈值 0.7 时应有 80%+ 真重复
   - 阈值 0.5 时只有 50%
-- 不同 num_perm 跑同数据：64/128/256，看 dedup_ratio 是否稳定
-- 不同 shingle size 跑：n=1/3/5，看 dedup_ratio 差几倍
+- "不同 num_perm 跑同数据：64/128/256，看 dedup_ratio 是否稳定"
+- "不同 shingle size 跑：n=1/3/5，看 dedup_ratio 差几倍"
 - 用 simhash 或精确 jaccard 在小子集上做 cross-check
 minimal_fixes:
 - num_perm 升到 128 或 256（精度↑，速度↓）
-- band × row = num_perm，调整后看效果：
+- |
+  band × row = num_perm，调整后看效果：
   - 高召回低精度: band 多 row 少（如 32 × 4）
   - 高精度低召回: band 少 row 多（如 8 × 16）
 - shingle size = 5（5-word n-gram）：比 single word 精度高

@@ -29,7 +29,8 @@ likely_causes:
 - LayerNorm / RMSNorm / Embedding 也量化了（不应该）
 - KV-cache 也量化但 calibration 没覆盖长 prompt
 minimal_checks:
-- 用 `mini_infra/vllm/quant/calibrator.py:calibration_summary` 看 scale 求解：
+- |
+  用 `mini_infra/vllm/quant/calibrator.py:calibration_summary` 看 scale 求解：
   ```python
   from mini_infra.vllm.quant.calibrator import (
       channel_absmax, smoothquant_scales, calibration_summary
@@ -37,30 +38,33 @@ minimal_checks:
   s = calibration_summary()
   print(s)
   ```
-- 用 `fp8_summary` 看量化-反量化的数值精度损失：
+- |
+  用 `fp8_summary` 看量化-反量化的数值精度损失：
   ```python
   from mini_infra.vllm.quant.fp8_kv import fp8_summary
   print(fp8_summary())
   ```
-- 跑 dummy fp8: weights=fp8 act=fp16 vs weights=fp8 act=fp8，比 acc 看哪步崩
+- "跑 dummy fp8: weights=fp8 act=fp16 vs weights=fp8 act=fp8，比 acc 看哪步崩"
 - 加大 calibration set 到 1024+ 重量化看 acc 改善
-- dump 各 layer 激活 max 直方图：找 outlier
+- "dump 各 layer 激活 max 直方图：找 outlier"
 - 跑 same calibration on 50 题 GSM8K 看 acc，如果未 fp8 baseline 也低 → 量化框架坏
 minimal_fixes:
-- calibration set ≥ 512 sample，覆盖目标 domain（GSM8K calibration 跑 GSM8K）
-- 用 SmoothQuant α=0.5 平滑激活异常：
+- "calibration set ≥ 512 sample，覆盖目标 domain（GSM8K calibration 跑 GSM8K）"
+- |
+  用 SmoothQuant α=0.5 平滑激活异常：
   ```python
   scales = smoothquant_scales(activation_samples, alpha=0.5)
   weight_new = weight * scales
   activation_new = activation / scales
   ```
-- weights=e4m3, act=e5m2：weights 精度优先，act 范围优先
-- per-channel scale（每 output channel 单独 scale）：
+- "weights=e4m3, act=e5m2：weights 精度优先，act 范围优先"
+- |
+  per-channel scale（每 output channel 单独 scale）：
   ```python
   scale = act.abs().max(dim=0)  # per channel
   ```
 - 不量化 LayerNorm / RMSNorm / Embedding / lm_head（这些精度敏感）
-- KV-cache 单独量化，calibration 用真实长度的 prompt
+- "KV-cache 单独量化，calibration 用真实长度的 prompt"
 - 极端情况退到 fp8 weights only（act 仍 fp16）
 what_not_to_do:
 - 不要用 small calibration set 跑出"acc 看着还行"——后续 long prompt 一定崩

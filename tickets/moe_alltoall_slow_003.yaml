@@ -10,7 +10,7 @@ symptom: |
   (d) GPU 利用率（compute）下降，多数时间在等通信。
 error_signatures:
 - "alltoall_ms / step_time_ms > 0.4"
-- "EP=8 step_time > EP=4 step_time"（无加速）
+- "EP=8 step_time > EP=4 step_time（无加速）"
 - "NCCL all_to_all_single 时间随 ep_size 超线性"
 - "ncu / nsys: %SM Active < 30%"
 - "permute / unpermute 出现在 host 时间线（CPU bound）"
@@ -28,7 +28,8 @@ likely_causes:
 - ep_size 与 expert 数不整除：负载更不均
 - alltoall payload 太小（< 1MB）：launch overhead > 实际传输
 minimal_checks:
-- 用 `mini_infra/megatron/core/transformer/moe/alltoall.py:alltoall_cost_ms` 算预算：
+- |
+  用 `mini_infra/megatron/core/transformer/moe/alltoall.py:alltoall_cost_ms` 算预算：
   ```python
   from mini_infra.megatron.core.transformer.moe.alltoall import alltoall_cost_ms
   for ep in [2, 4, 8, 16]:

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { withPublicPrefix } from "@/lib/runtime";
 import type {
   QuizPayload,
   QuizQuestionResult,
@@ -27,9 +28,9 @@ function PrereqLink({
 }) {
   let href = "#";
   if (item.kind === "notebook") {
-    href = `/notebooks?path=${encodeURIComponent(item.path)}`;
+    href = withPublicPrefix(`/notebooks?path=${encodeURIComponent(item.path)}`);
   } else if (item.kind === "source" || item.kind === "read") {
-    href = `/source?path=${encodeURIComponent(item.path)}`;
+    href = withPublicPrefix(`/source?path=${encodeURIComponent(item.path)}`);
   }
   return (
     <li className="rounded-2xl border border-quest-border/70 bg-white/70 p-3">

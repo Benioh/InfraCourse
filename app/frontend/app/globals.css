@@ -4,11 +4,21 @@
 
 :root {
   color-scheme: light;
+  --quest-scrollbar: #d6d3cb;
+  --quest-scrollbar-track: transparent;
 }
 
 body {
   margin: 0;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  background-color: #f1f0ec;
+  color: #2c2e36;
+  font-family:
+    "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 a {
@@ -20,6 +30,28 @@ a {
   box-sizing: border-box;
 }
 
+::selection {
+  background: #dfe5e0;
+  color: #2c2e36;
+}
+
+/* Custom scrollbar — thin, low-contrast, Morandi neutral. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--quest-scrollbar-track);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--quest-scrollbar);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b9b6ad;
+}
+
+/* Source viewer — line gutter and hit highlight in Morandi tones. */
 .source-viewer pre.shiki {
   margin: 0;
   padding: 0;
@@ -29,11 +61,12 @@ a {
 .source-viewer pre.shiki > code {
   display: block;
   counter-reset: line;
-  padding: 0.75rem 0;
+  padding: 0.875rem 0;
   background: transparent;
-  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
-  font-size: 0.85rem;
-  line-height: 1.55;
+  font-family:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+  line-height: 1.62;
 }
 
 .source-viewer .line {
@@ -41,25 +74,39 @@ a {
   padding-left: 0.5rem;
   padding-right: 1rem;
   white-space: pre;
+  transition: background-color 120ms ease;
+}
+
+.source-viewer .line:hover {
+  background: rgba(125, 150, 164, 0.06);
 }
 
 .source-viewer .line::before {
   content: attr(data-line);
   display: inline-block;
-  width: 3.5rem;
-  margin-right: 0.75rem;
+  width: 3.25rem;
+  margin-right: 0.875rem;
   padding-right: 0.5rem;
-  color: #b3a89c;
+  color: #b9b6ad;
+  font-variant-numeric: tabular-nums;
   text-align: right;
-  border-right: 1px solid #e4dcd0;
+  border-right: 1px solid #ece9e2;
   user-select: none;
 }
 
 .source-viewer .source-viewer-line-hit {
-  background: #fff3c4;
+  background: #ece5d6;
 }
 
 .source-viewer .source-viewer-line-hit::before {
-  color: #92400e;
-  border-right-color: #fcd34d;
+  color: #a08056;
+  border-right-color: #d4c8b6;
+}
+
+/* Subtle focus ring used across inputs / buttons — sage at low alpha. */
+.quest-focus-ring:focus,
+.quest-focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(107, 128, 115, 0.18);
+  border-color: #6b8073;
 }

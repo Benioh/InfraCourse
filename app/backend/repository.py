@@ -54,7 +54,20 @@ def get_quest(mission_id: str) -> dict[str, Any]:
 
 
 def list_tickets() -> list[dict[str, Any]]:
-    tickets = [read_yaml(path) for path in sorted(TICKETS_DIR.glob("*.yaml"))]
+    tickets: list[dict[str, Any]] = []
+    for path in sorted(TICKETS_DIR.glob("*.yaml")):
+        try:
+            data = read_yaml(path)
+        except yaml.YAMLError as exc:
+            tickets.append({
+                "id": path.stem,
+                "title": f"[YAML parse error] {path.name}",
+                "severity": "unknown",
+                "_parse_error": str(exc).splitlines()[0],
+            })
+            continue
+        if isinstance(data, dict):
+            tickets.append(data)
     return sorted(tickets, key=lambda item: item.get("id", ""))
 
 
@@ -236,6 +249,65 @@ def patch_status(mission_id: str) -> dict[str, Any]:
     if not status:
         raise FileNotFoundError(f"no patch status for {mission_id}")
     return status
+
+
+# ---------------------------------------------------------------------------
+# Starter file helpers — read/write the editable starter for a mission.
+# ---------------------------------------------------------------------------
+
+
+STARTER_BYTE_LIMIT = 200_000
+
+
+def _starter_path(mission_id: str) -> Path:
+    quest = get_quest(mission_id)
+    rel = (quest.get("patch") or {}).get("starter_file")
+    if not isinstance(rel, str) or not rel:
+        raise FileNotFoundError(f"{mission_id} has no patch.starter_file in quests yaml")
+    resolved = (ROOT / rel).resolve()
+    repo_root = ROOT.resolve()
+    if not str(resolved).startswith(str(repo_root) + "/"):
+        raise PermissionError(f"starter path escapes repo: {rel}")
+    if "/labs/" not in str(resolved):
+        raise PermissionError(f"refusing to edit non-lab path: {rel}")
+    return resolved
+
+
+def starter_payload(mission_id: str) -> dict[str, Any]:
+    quest = get_quest(mission_id)
+    patch = quest.get("patch") or {}
+    rel = patch.get("starter_file")
+    if not isinstance(rel, str) or not rel:
+        raise FileNotFoundError(f"{mission_id} has no patch.starter_file")
+    path = _starter_path(mission_id)
+    if not path.exists():
+        return {
+            "mission": mission_id,
+            "path": rel,
+            "language": rel.rsplit(".", 1)[-1] if "." in rel else "text",
+            "content": "",
+            "exists": False,
+        }
+    content = path.read_text(encoding="utf-8")
+    return {
+        "mission": mission_id,
+        "path": rel,
+        "language": rel.rsplit(".", 1)[-1] if "." in rel else "text",
+        "content": content,
+        "exists": True,
+        "size": len(content.encode("utf-8")),
+    }
+
+
+def write_starter(mission_id: str, content: str) -> dict[str, Any]:
+    if not isinstance(content, str):
+        raise ValueError("content must be a string")
+    if len(content.encode("utf-8")) > STARTER_BYTE_LIMIT:
+        raise ValueError(f"content exceeds {STARTER_BYTE_LIMIT} bytes")
+    path = _starter_path(mission_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return starter_payload(mission_id)
 
 
 def patch_payload(mission_id: str) -> dict[str, Any]:

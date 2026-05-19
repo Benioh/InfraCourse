@@ -28,13 +28,15 @@ likely_causes:
 - 模型架构不兼容：某些 GLU MLP 的 gate/up 合并 packing 与 vLLM 期望不一致
 - HF 模型的 quantization_config 缺字段
 minimal_checks:
-- 用 `mini_infra/vllm/quant/awq_loader.py:awq_summary` 看预算：
+- |
+  用 `mini_infra/vllm/quant/awq_loader.py:awq_summary` 看预算：
   ```python
   from mini_infra.vllm.quant.awq_loader import awq_summary, group_layout
   s = awq_summary(hidden_size=4096, group_size=128, weight_bits=4)
   print(s)
   ```
-- 检查模型 config：
+- |
+  检查模型 config：
   ```python
   from transformers import AutoConfig
   cfg = AutoConfig.from_pretrained('your-awq-model')
@@ -42,7 +44,8 @@ minimal_checks:
   print(cfg.hidden_size, cfg.intermediate_size)
   ```
   确认所有 hidden / intermediate 都被 group_size 整除
-- dump 实际权重 shape：
+- |
+  dump 实际权重 shape：
   ```python
   import torch
   ckpt = torch.load('model.safetensors')
@@ -53,19 +56,21 @@ minimal_checks:
   qweight 形状应是 (in_features // 8, out_features) 或 (out_features, in_features // 8) 看实现
 - 用 transformers 直接 load 看是否报错：能 load → vLLM/SGLang 集成问题；不能 → 权重本身坏
 minimal_fixes:
-- group_size 改用 hidden 的因子：32, 64, 128 中选与所有层 hidden 整除的
+- "group_size 改用 hidden 的因子：32, 64, 128 中选与所有层 hidden 整除的"
 - 重量化时确保 GLU split：对 LLaMA 这类 gate/up 合并，要么单独量化每个，要么明确指明 packing 顺序
-- 把 packing dim 转一下（如果库期望反向）：
+- |
+  把 packing dim 转一下（如果库期望反向）：
   ```python
   qweight_t = qweight.t().contiguous()
   ```
 - 升级 awq / vLLM 到匹配版本（HuggingFace AWQ 经常 break）
-- 用 autoawq 重新量化：
+- |
+  用 autoawq 重新量化：
   ```python
   from awq import AutoAWQForCausalLM
   model.quantize(tokenizer, quant_config={'group_size': 128, 'w_bit': 4, 'version': 'gemm'})
   ```
-- 检查 dtype：scales 应为 fp16，qzeros 应为 int32（packed）
+- "检查 dtype：scales 应为 fp16，qzeros 应为 int32（packed）"
 what_not_to_do:
 - 不要直接改 hidden_size 或 group_size 后又用旧 ckpt——必须重新量化
 - 不要把 AWQ 量化结果当成 ground truth——如果 acc 大跌可能是量化本身坏，不是 load 坏

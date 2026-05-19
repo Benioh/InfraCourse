@@ -1,0 +1,71 @@
+mission: l02.5_memory_snapshot
+title: L02.5 Quiz · Memory Snapshot
+pass_threshold: 1.0
+description: |
+  3 题打中 memory snapshot 调试套路最容易混淆的点。
+
+prereq_checklist:
+  - title: 读 patch/task.md
+    kind: read
+    path: labs/l02.5_memory_snapshot/patch/task.md
+  - title: 读 mem-snapshot 主线博客
+    kind: source
+    path: github_repo/Awesome-ML-SYS-Tutorial/torch/mem-snapshot/readme.md
+
+questions:
+  - id: q1_why_snapshot
+    prompt: |
+      为什么定位显存泄露不能只靠 nvidia-smi，而需要 memory snapshot？
+    options:
+      - id: a
+        text: nvidia-smi 只显示总量，不告诉你"哪行代码 alloc 了这块显存"
+        correct: true
+      - id: b
+        text: nvidia-smi 不能在多 GPU 上工作
+      - id: c
+        text: nvidia-smi 数字不准，只能用 snapshot
+      - id: d
+        text: snapshot 比 nvidia-smi 快很多
+    explanation: |
+      A 对：nvidia-smi 给的是 process-level 总占用，看不到 stack frame；
+      `_record_memory_history` 记录的是每次 alloc/free 的调用栈，配合 viewer 才能
+      定位真凶。
+      记忆口诀：**总量靠 smi，归因靠 snapshot**。
+
+  - id: q2_top_frame_grouping
+    prompt: |
+      为什么 leak finder 按 `stack_frames[0]` (top frame) 聚合，而不是整条 stack？
+    options:
+      - id: a
+        text: 整条 stack 在反复调用同一函数时不会聚合，导致每次出现都是独立 entry，看不出"哪个函数贡献了多少"
+        correct: true
+      - id: b
+        text: top frame 计算更快
+      - id: c
+        text: stack 太长，hash 不稳定
+      - id: d
+        text: top frame 即 root frame
+    explanation: |
+      A 对：同一个 forward_hook 在 50 个 step 调用 50 次，整条 stack 因为外层调用栈
+      可能不同会被拆成 50 个 entry，每个只占一份；按 top frame 聚合则正确归到该函数
+      下，立刻看出 leak 的源头。
+      D 错：top frame = leaf（最近调用），不是 root。
+
+  - id: q3_real_leak_pattern
+    prompt: |
+      VLM RL 训练的 forward_hook 持有 forward 本地变量导致泄露——这本质是
+      Python 哪个机制？
+    options:
+      - id: a
+        text: 闭包捕获（closure capture）：hook 函数闭包了 forward 的局部变量，引用计数不归零
+        correct: true
+      - id: b
+        text: GIL 死锁
+      - id: c
+        text: Python 的 weakref 失效
+      - id: d
+        text: torch.Tensor 不支持 GC
+    explanation: |
+      A 对：register_forward_hook 注册的 callable 通常是 lambda/局部函数，闭包引用了
+      forward 内部的中间 tensor。只要 hook 还挂着，被引用的 tensor 就 free 不掉。
+      解法：要么 hook 用 detach + 不闭包大变量，要么训练结束 remove() hook。

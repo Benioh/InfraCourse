@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# L04.8 lifecycle launcher.
+# L11 lifecycle launcher.
 #   - default profile: cpu_smoke (200 steps, runs anywhere with torch)
 #   - PROFILE=4090_debug ./scripts/launch_pretrain.sh
 #   - PROFILE=h200_125m  ./scripts/launch_pretrain.sh   # also emits real torchrun cmd

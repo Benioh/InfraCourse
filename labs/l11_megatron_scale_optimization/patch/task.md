@@ -1,8 +1,8 @@
-# L05 Patch · Bucketed Manual DDP（合并 grad 通信）
+# L12 Patch · Bucketed Manual DDP（合并 grad 通信）
 
 ## 你要交付什么
 
-在 L01.5 ManualDDP 的基础上，加 **bucket 机制**：把 params 按字节数分组，
+在逐参数 ManualDDP 的基础上，加 **bucket 机制**：把 params 按字节数分组，
 每个 bucket 一次性 all-reduce 所有 grad（用 `_flatten_dense_tensors`），
 而不是每个 param 单独 all-reduce。
 
@@ -33,7 +33,7 @@ optimizer.step()
 
 ## 不变量
 
-1. **数值上**与 L01.5 ManualDDP 完全等价（也与 PyTorch DDP 等价）。
+1. **数值上**与逐参数 ManualDDP 完全等价（也与 PyTorch DDP 等价）。
 2. params 按 `requires_grad=True` 顺序分组：累加超过 bucket_size_mb 就新开一桶。
 3. 单个 param > bucket_size 也可以（自成一桶）。
 4. world_size=1 时 `synchronize_grads()` 是 no-op。

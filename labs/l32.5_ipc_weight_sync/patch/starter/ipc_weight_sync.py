@@ -1,5 +1,5 @@
 """
-L32.5 Patch · CUDA IPC-shaped Weight Sync (CPU simulation)
+L37 Patch · CUDA IPC-shaped Weight Sync (CPU simulation)
 
 填空规则：
 - TODO(student) 必须自己写
@@ -76,7 +76,7 @@ def serialize_handle(tensor: torch.Tensor, pool: IPCStoragePool) -> bytes:
     #       "device": str(tensor.device),
     #   }
     #   return pickle.dumps(meta)
-    raise NotImplementedError("L32.5: implement serialize_handle")
+    raise NotImplementedError("L37: implement serialize_handle")
 
 
 def deserialize_handle(blob: bytes, pool: IPCStoragePool) -> torch.Tensor:
@@ -89,7 +89,7 @@ def deserialize_handle(blob: bytes, pool: IPCStoragePool) -> torch.Tensor:
     # TODO(student):
     #   meta = pickle.loads(blob)
     #   return pool.get(meta["handle"])
-    raise NotImplementedError("L32.5: implement deserialize_handle")
+    raise NotImplementedError("L37: implement deserialize_handle")
 
 
 @dataclass
@@ -100,7 +100,7 @@ class LocalSerializedTensor:
 
     def get(self, rank: int, pool: IPCStoragePool) -> torch.Tensor:
         # TODO(student): 反序列化 self.values[rank]，从 pool 取出 tensor
-        raise NotImplementedError("L32.5: implement LocalSerializedTensor.get")
+        raise NotImplementedError("L37: implement LocalSerializedTensor.get")
 
 
 def gather_handles_to_rank0(
@@ -128,7 +128,7 @@ def gather_handles_to_rank0(
     #   if len(group) < world_size:
     #       return None
     #   return [group[r] for r in range(world_size)]
-    raise NotImplementedError("L32.5: implement gather_handles_to_rank0")
+    raise NotImplementedError("L37: implement gather_handles_to_rank0")
 
 
 def update_weights_from_tensor(
@@ -153,4 +153,4 @@ def update_weights_from_tensor(
     #       inference_state[name] = tensor
     #       if flush_cache and tensor_index == n - 1:
     #           pool.clear()
-    raise NotImplementedError("L32.5: implement update_weights_from_tensor")
+    raise NotImplementedError("L37: implement update_weights_from_tensor")

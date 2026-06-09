@@ -1,4 +1,4 @@
-# Patch · L02 Tensor Parallel Linear
+# Patch · L06 Tensor Parallel Linear
 
 **这个目录就是本关的全部任务。** 读 `task.md` → 改 `starter/tp_linear.py` → 跑测试。
 

@@ -1,0 +1,492 @@
+id: l30_dpo_loss
+title: L33 · DPO Loss：从偏好对到稳定的 PyTorch 实现
+level: L33
+act: 第 4 章：SFT、偏好优化与 RL
+role: 偏好优化系统学徒
+priority: 核心
+estimated_minutes: 90
+no_gpu_friendly: true
+frameworks:
+- PyTorch
+- MiniInfra
+- SLiME 对照
+patch:
+  description: |
+    实现 completion-only logprob 抽取和 DPO pairwise loss。patch 验证 prompt mask、
+    reference log-ratio、reward margin、loss 单调性和大 beta 数值稳定性。
+  task_md: labs/l30_dpo_loss/patch/task.md
+  starter_file: labs/l30_dpo_loss/patch/starter/dpo.py
+  reference_file: labs/l30_dpo_loss/patch/reference/dpo.py
+  test_command: make patch-test M=l30_dpo_loss
+  status_file: labs/l30_dpo_loss/patch/.last_run.json
+  test_count: 9
+  test_kind: 公式 + mask + 数值稳定
+lesson_docs:
+- title: 系统地图
+  path: labs/l30_dpo_loss/system_map.md
+  description: 本讲在 SFT、偏好优化与 RL 主线中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l30_dpo_loss/lecture.md
+  description: 从偏好对、completion logprob、DPO loss、reference anchor 讲到 smoke 和生产排查。
+- title: 源码带读讲义
+  path: labs/l30_dpo_loss/source_walkthrough.md
+  description: 按 patch 公式、pytest 合同、synthetic smoke 和 RL logprob 对照组织的源码阅读路线。
+source_reading:
+- title: Patch starter：DPO TODO
+  repo_path: labs/l30_dpo_loss/patch/starter/dpo.py
+  focus: completion logprob 和 DPO loss 的待实现合同
+  highlights:
+  - title: logprob 接口
+    lines:
+    - 8
+    - 20
+    note: |
+      L8-L20: `compute_logps_for_completions` 的接口说明 logits、labels、mask 和 log_softmax 入口。
+  - title: logprob 输出
+    lines:
+    - 21
+    - 23
+    note: |
+      L21-L23: TODO 要求 gather 后清零 masked 位置，并沿时间维求和。
+  - title: DPO 输入
+    lines:
+    - 26
+    - 38
+    note: |
+      L26-L38: `dpo_loss` 接收 policy/ref 的 chosen/rejected logprob，并先写 chosen/rejected reward。
+  - title: DPO 输出
+    lines:
+    - 39
+    - 42
+    note: |
+      L39-L42: TODO 要求 reward margin、`F.logsigmoid` loss 和四个返回字段。
+- title: Patch reference：最小正确公式
+  repo_path: labs/l30_dpo_loss/patch/reference/dpo.py
+  focus: PyTorch logprob 抽取和 DPO loss 公式
+  highlights:
+  - title: completion logprob
+    lines:
+    - 9
+    - 15
+    note: |
+      L9-L15: reference 用 mask、safe labels、log_softmax、gather 和 sum 得到 `[B]` logprob。
+  - title: DPO loss
+    lines:
+    - 25
+    - 34
+    note: |
+      L25-L34: reference 构造 chosen/rejected reward、reward margin、loss 和返回字典。
+- title: Patch tests：行为合同
+  repo_path: labs/l30_dpo_loss/patch/tests/test_patch.py
+  focus: shape、mask、公式方向、单调性和数值稳定
+  highlights:
+  - title: 实现选择
+    lines:
+    - 19
+    - 20
+    note: |
+      L19-L20: `IMPL` 环境变量允许在 starter 和 reference 间切换。
+  - title: logprob shape
+    lines:
+    - 23
+    - 28
+    note: |
+      L23-L28: 输出必须是每条样本一个 logprob，总 shape 为 `(B,)`。
+  - title: prompt mask
+    lines:
+    - 31
+    - 42
+    note: |
+      L31-L42: mask 掉 prompt token 后，少加负 logprob，结果应更接近 0。
+  - title: manual gather
+    lines:
+    - 45
+    - 56
+    note: |
+      L45-L56: 测试手写 log_softmax、safe labels、gather 和 mask sum。
+  - title: beta zero
+    lines:
+    - 59
+    - 68
+    note: |
+      L59-L68: `beta=0` 时 margin 为 0，loss 等于 `log(2)`。
+  - title: policy equals ref
+    lines:
+    - 71
+    - 76
+    note: |
+      L71-L76: policy 与 reference 相同时，DPO 没有偏好方向，loss 等于 `log(2)`。
+  - title: chosen better
+    lines:
+    - 79
+    - 89
+    note: |
+      L79-L89: policy 相对 ref 更偏向 chosen 时，loss 必须下降。
+  - title: rejected better
+    lines:
+    - 92
+    - 101
+    note: |
+      L92-L101: policy 更偏向 rejected 时，loss 应高于 `log(2)`。
+  - title: reward margin
+    lines:
+    - 104
+    - 113
+    note: |
+      L104-L113: reward margin 必须等于手写公式。
+  - title: large beta
+    lines:
+    - 116
+    - 125
+    note: |
+      L116-L125: 大 beta 下 loss 仍应为 finite，验证 `F.logsigmoid` 边界。
+- title: DPO synthetic smoke
+  repo_path: labs/l30_dpo_loss/scripts/run_dpo_smoke.py
+  focus: 合成偏好数据、reference freeze、训练循环和 artifact
+  highlights:
+  - title: 实现选择
+    lines:
+    - 32
+    - 39
+    note: |
+      L32-L39: smoke 支持 `IMPL=reference`，并拒绝未知实现名。
+  - title: run 配置
+    lines:
+    - 50
+    - 57
+    note: |
+      L50-L57: 读取 CLI 和配置，选择实现并解析 YAML。
+  - title: run 目录
+    lines:
+    - 58
+    - 64
+    note: |
+      L58-L64: 准备 run 目录、命令快照、prediction 和 resolved config。
+  - title: TinyLM
+    lines:
+    - 86
+    - 94
+    note: |
+      L86-L94: TinyLM 用 embedding、body 和 head 构成最小可训练模型。
+  - title: reference freeze
+    lines:
+    - 96
+    - 102
+    note: |
+      L96-L102: reference 从 policy 复制权重，并关闭梯度。
+  - title: preference labels
+    lines:
+    - 103
+    - 109
+    note: |
+      L103-L109: 生成 chosen/rejected token，并把前半段 labels 设为 `-100`。
+  - title: loss 调用
+    lines:
+    - 111
+    - 123
+    note: |
+      L111-L123: 每步计算 policy/ref 四组 logprob，再调用 `dpo_loss`。
+  - title: metrics 写入
+    lines:
+    - 128
+    - 136
+    note: |
+      L128-L136: 每步写入 loss 和 reward margin mean。
+  - title: artifact 写入
+    lines:
+    - 139
+    - 147
+    note: |
+      L139-L147: 写 `dpo_smoke.json` 和 report，记录 head/tail loss 与 accept。
+- title: SLiME PPO utils：logprob 对照
+  repo_path: github_repo/slime/slime/utils/ppo_utils.py
+  focus: 真实 RL 框架中的 token logprob 和 PPO loss 对照
+  highlights:
+  - title: PPO ratio loss
+    lines:
+    - 124
+    - 136
+    note: |
+      L124-L136: PPO policy loss 使用 ratio、advantage 和 clip，便于对比 DPO 的 preference loss。
+  - title: dual clip
+    lines:
+    - 138
+    - 148
+    note: |
+      L138-L148: 生产 PPO 还会处理 negative advantage 的 dual-clip 分支。
+  - title: token logprob
+    lines:
+    - 151
+    - 158
+    note: |
+      L151-L158: fused cross entropy 把 logits 与 tokens 转成 token-level logprob。
+- title: MiniInfra reward parser
+  repo_path: mini_infra/rl/reward.py
+  focus: scalar reward 路线和 DPO preference 路线的对照
+  highlights:
+  - title: 提取答案
+    lines:
+    - 12
+    - 18
+    note: |
+      L12-L18: reward parser 从文本中提取最终数字。
+  - title: 计算 reward
+    lines:
+    - 21
+    - 33
+    note: |
+      L21-L33: scalar reward 路线把 prediction 和 target 比较成一个奖励值。
+  - title: CLI 入口
+    lines:
+    - 36
+    - 41
+    note: |
+      L36-L41: 最小 CLI 展示 reward parser 输入输出。
+mini_infra_targets:
+- mini_infra/rl/reward.py
+notebooks: []
+prereq: l29.5_train_infer_mismatch
+next_lab: l30.5_cuda_graph_savor
+gpu_modes:
+  local: CPU OK
+  cluster: Qwen / UltraFeedback DPO 训练（可选）
+lesson:
+  opening: |
+    本讲处理 SFT 之后的偏好优化问题。输入是同一个 prompt 下的 chosen/rejected response；目标是让 policy 相对 reference 更偏向 chosen，同时保留 reference 作为分布锚点。
+
+    本关不启动真实偏好数据训练。你要实现的是两个局部函数：completion-only logprob 抽取，以及 DPO pairwise loss。通过它们可以看清 prompt mask、reference log-ratio、reward margin、beta 和数值稳定性怎样连接。
+  sections:
+  - title: 目标和边界
+    plain_explanation: |
+      DPO 样本由 prompt、chosen response 和 rejected response 组成。prompt 是条件，chosen/rejected 是要比较的 completion。patch 的第一个函数只统计 completion token 的 logprob；第二个函数比较 policy 和 reference 对 chosen/rejected 的相对偏好。
+
+      本讲不处理 tokenizer、真实数据加载、分布式 reference forward、checkpoint 或多轮 DPO 迭代。它只验证两个最小合同：`labels == -100` 的位置不进入 logprob，DPO loss 使用 reference log-ratio 构造稳定 pairwise loss。
+    mental_model: |
+      把 DPO 看成一张四列表：policy chosen、policy rejected、ref chosen、ref rejected。loss 只关心 chosen 相对 rejected 的 reference-adjusted margin。
+    why_it_matters: |
+      DPO 代码行数少，但常见 bug 很隐蔽。prompt 混入、方向写反或 reference 漂移都可能让 loss 看起来下降，实际优化目标已经偏离。
+    source_refs:
+    - title: Starter logprob
+      repo_path: labs/l30_dpo_loss/patch/starter/dpo.py
+      lines:
+      - 8
+      - 20
+      note: |
+        L8-L20: starter 说明 logits、labels、mask 和 log_softmax 的输入合同。
+    - title: Starter DPO
+      repo_path: labs/l30_dpo_loss/patch/starter/dpo.py
+      lines:
+      - 26
+      - 38
+      note: |
+        L26-L38: DPO 函数签名展示四组 logprob 和 beta。
+    common_confusions:
+    - 把 DPO 写成只对 chosen 做交叉熵。
+    - 把 prompt token 加进 completion logprob。
+    - 忽略 reference 是否冻结。
+    checkpoint_questions:
+    - DPO patch 的两个函数分别输出什么？
+    - prompt token 为什么不能进入 completion logprob？
+    - patch 没覆盖哪些真实训练组件？
+  - title: Completion-only logprob
+    plain_explanation: |
+      `compute_logps_for_completions` 接收 `[B,T,V]` logits 和 `[B,T]` labels。labels 中 `-100` 表示忽略位置。实现时先构造 mask，再把 `-100` 替换成合法 token id，随后用 `F.log_softmax` 和 `gather` 抽取目标 token logprob，最后按 mask 清零并沿时间维求和。
+
+      safe labels 不改变 masked 位置的结果，因为这些位置在乘 mask 后贡献为 0。它只避免 `gather` 遇到非法负索引。
+    mental_model: |
+      先把无效格子盖住，再从 vocab 维度取出目标 token 的 logprob。盖住的位置即使临时填了 0，也不会进入最终求和。
+    why_it_matters: |
+      prompt 混入会让 `log π(y|x)` 被共同前缀污染。多轮数据中，tool token、padding 或 system prompt 混入也会造成类似问题。
+    source_refs:
+    - title: Reference logprob
+      repo_path: labs/l30_dpo_loss/patch/reference/dpo.py
+      lines:
+      - 9
+      - 15
+      note: |
+        L9-L15: reference 展示 mask、safe labels、log_softmax、gather 和 sum。
+    - title: Prompt mask test
+      repo_path: labs/l30_dpo_loss/patch/tests/test_patch.py
+      lines:
+      - 31
+      - 42
+      note: |
+        L31-L42: 测试验证 mask 掉两个 prompt token 后，logprob 总和更接近 0。
+    - title: SLiME token logprob
+      repo_path: github_repo/slime/slime/utils/ppo_utils.py
+      lines:
+      - 151
+      - 158
+      note: |
+        L151-L158: 真实 RL 工具用 fused cross entropy 抽取 token logprob。
+    common_confusions:
+    - 用 labels 直接 gather，忘记替换 `-100`。
+    - 先 sum 再 mask，导致 prompt 贡献已经进入结果。
+    - 输出 `[B,T]`；本讲要求每条样本一个 sequence logprob。
+    checkpoint_questions:
+    - safe labels 为什么不会影响最终结果？
+    - '`labels == -100` 的 mask 应在哪一步生效？'
+    - 为什么输出 shape 是 `(B,)`？
+  - title: DPO reward margin
+    plain_explanation: |
+      DPO loss 接收四组 sequence-level logprob。先计算 policy 相对 reference 的 chosen reward 和 rejected reward，再取二者差值作为 reward margin。margin 为正时，policy 相对 reference 更偏向 chosen，loss 应下降。
+
+      最终 loss 是 `-F.logsigmoid(reward_margin).mean()`。使用 `F.logsigmoid` 是数值边界：大负 margin 下，先 sigmoid 再 log 容易下溢。
+    mental_model: |
+      reference 是尺子。先量 policy 对 chosen/rejected 相对尺子的变化，再比较 chosen 是否超过 rejected。
+    why_it_matters: |
+      方向写反时，训练可能仍有下降曲线，但模型会被推向 rejected。大 beta 下数值下溢会把问题表现成 inf/NaN。
+    source_refs:
+    - title: Reference DPO
+      repo_path: labs/l30_dpo_loss/patch/reference/dpo.py
+      lines:
+      - 25
+      - 34
+      note: |
+        L25-L34: reference 写出 chosen/rejected reward、reward margin、loss 和返回字段。
+    - title: Reward margin test
+      repo_path: labs/l30_dpo_loss/patch/tests/test_patch.py
+      lines:
+      - 104
+      - 113
+      note: |
+        L104-L113: 测试用手写公式验证 reward margin。
+    - title: Large beta test
+      repo_path: labs/l30_dpo_loss/patch/tests/test_patch.py
+      lines:
+      - 116
+      - 125
+      note: |
+        L116-L125: 大 beta 下 loss 必须保持 finite。
+    common_confusions:
+    - 只用 `policy_chosen - policy_rejected`，丢掉 reference。
+    - 把 beta 当成 optimizer learning rate。
+    - 使用 `log(sigmoid)` 导致极端 margin 下数值下溢。
+    checkpoint_questions:
+    - policy 等于 reference 时，reward margin 为什么为 0？
+    - chosen 变好时 loss 为什么下降？
+    - 大 beta 测试能发现哪类 bug？
+  - title: Reference 与 smoke
+    plain_explanation: |
+      真实 DPO 训练中，reference 通常是 SFT checkpoint 的冻结副本。smoke 脚本用 TinyLM 构造 policy 和 reference，把 reference 加载为 policy 的初始权重，并关闭梯度。合成数据把前半段 labels 设为 `-100`，模拟 prompt mask。
+
+      这个 smoke 只能说明最小训练循环闭合：能计算四组 logprob，能调用 DPO loss，能写 metrics 和 artifact。它不说明真实偏好数据质量、chat template、reference forward 性能或输出质量。
+    mental_model: |
+      smoke 是一个小闭环：造数据、算四组 logprob、跑 loss、写指标。它用于检查接线，不用于证明模型已对齐。
+    why_it_matters: |
+      很多训练问题先出现在数据接线和 artifact 缺失。smoke 把这部分成本降到 CPU 本地可跑。
+    source_refs:
+    - title: Reference freeze
+      repo_path: labs/l30_dpo_loss/scripts/run_dpo_smoke.py
+      lines:
+      - 96
+      - 102
+      note: |
+        L96-L102: smoke 从 policy 复制 reference，并关闭 reference 梯度。
+    - title: Preference labels
+      repo_path: labs/l30_dpo_loss/scripts/run_dpo_smoke.py
+      lines:
+      - 103
+      - 109
+      note: |
+        L103-L109: synthetic 数据把前半段 label 设为 `-100`。
+    - title: Loss call
+      repo_path: labs/l30_dpo_loss/scripts/run_dpo_smoke.py
+      lines:
+      - 111
+      - 123
+      note: |
+        L111-L123: 训练循环计算四组 logprob 并调用 `dpo_loss`。
+    common_confusions:
+    - smoke 通过就代表真实数据训练稳定。
+    - reference 只要初始化一样就可以继续训练。
+    - 合成 chosen/rejected 能代表真实偏好质量。
+    checkpoint_questions:
+    - smoke 中 reference 怎样冻结？
+    - smoke 写出哪些 artifact？
+    - smoke 不能证明哪些生产结论？
+  - title: 测试合同和排查
+    plain_explanation: |
+      patch-test 覆盖 logprob shape、prompt mask、手写 gather、两个 `log(2)` 基准、chosen/rejected 单调性、reward margin 公式和大 beta 数值稳定。排查时先看输入语义，再看 mask 和 reference，最后看 loss 与 artifact。
+
+      如果 loss 下降但输出变差，先检查 chosen/rejected 是否被 swap、prompt 是否混入、reference 是否漂移。如果 loss 为 inf/NaN，先查 `F.logsigmoid`、beta 和 logprob 极值。
+    mental_model: |
+      DPO debug 是三层：数据方向、公式状态、数值边界。三层都过了，才讨论真实训练规模和模型质量。
+    why_it_matters: |
+      DPO 的错误常能伪装成正常下降曲线。测试合同和 artifact 是防止误判的最低证据。
+    source_refs:
+    - title: Chosen better test
+      repo_path: labs/l30_dpo_loss/patch/tests/test_patch.py
+      lines:
+      - 79
+      - 89
+      note: |
+        L79-L89: 测试验证 chosen 相对变好时 loss 下降。
+    - title: Rejected better test
+      repo_path: labs/l30_dpo_loss/patch/tests/test_patch.py
+      lines:
+      - 92
+      - 101
+      note: |
+        L92-L101: 测试验证 rejected 相对变好时 loss 上升。
+    - title: Metrics write
+      repo_path: labs/l30_dpo_loss/scripts/run_dpo_smoke.py
+      lines:
+      - 128
+      - 136
+      note: |
+        L128-L136: smoke 每步写 loss 和 reward margin mean。
+    - title: Artifact write
+      repo_path: labs/l30_dpo_loss/scripts/run_dpo_smoke.py
+      lines:
+      - 139
+      - 147
+      note: |
+        L139-L147: smoke 写 head/tail loss、drop 和 accept。
+    common_confusions:
+    - 只看平均 loss，不看 reward margin。
+    - 只跑 patch-test，不看 smoke artifact。
+    - 只检查代码公式，不抽样看数据方向。
+    checkpoint_questions:
+    - 哪个测试能发现方向写反？
+    - 哪个测试能发现 prompt mask 错误？
+    - 一份 DPO debug 报告至少要记录哪些证据？
+  - title: DPO 与 PPO 的 logprob 对照
+    plain_explanation: |
+      DPO 和 PPO 都依赖目标 token 的 logprob，但消费方式不同。DPO 用 chosen/rejected 相对 reference 的 log-ratio 做 pairwise preference loss。PPO 用当前策略、旧策略、advantage 和 clip 约束 rollout 更新。
+
+      读 SLiME PPO utils 时，不要把 PPO policy loss 当 DPO 实现。它的价值是展示真实 RL 框架如何抽取 token logprob，以及 ratio/clip 这条路径和 DPO 有哪些差异。
+    mental_model: |
+      logprob 是共同原料。DPO 把它送进偏好对比较，PPO 把它送进 rollout ratio 和 advantage。
+    why_it_matters: |
+      课程前后会同时出现 DPO、PPO、GRPO。能区分 logprob 的消费方式，才能避免把不同优化目标混在一起。
+    source_refs:
+    - title: PPO ratio loss
+      repo_path: github_repo/slime/slime/utils/ppo_utils.py
+      lines:
+      - 124
+      - 136
+      note: |
+        L124-L136: PPO policy loss 使用 ratio、advantage 和 clip。
+    - title: PPO dual clip
+      repo_path: github_repo/slime/slime/utils/ppo_utils.py
+      lines:
+      - 138
+      - 148
+      note: |
+        L138-L148: dual clip 处理 negative advantage 分支。
+    - title: MiniInfra reward
+      repo_path: mini_infra/rl/reward.py
+      lines:
+      - 21
+      - 33
+      note: |
+        L21-L33: scalar reward 路线把 prediction 和 target 比较成 reward。
+    common_confusions:
+    - 把 DPO 当成 PPO 的无 rollout 版本。
+    - 把 scalar reward parser 当成 DPO loss 的必需输入。
+    - 看到 logprob 抽取就认为优化目标相同。
+    checkpoint_questions:
+    - DPO 和 PPO 分别怎样使用 logprob？
+    - DPO 为什么不需要显式 reward parser？
+    - scalar reward 路线和 preference pair 路线的证据有何差异？

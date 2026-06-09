@@ -1,6 +1,6 @@
 id: l27_sglang_pd_cache
-title: SGLang-shaped PD Disaggregation Service
-level: L09.5
+title: L28 · SGLang PD Disaggregation：Prefix Cache、KV Transfer 与 Worker Load
+level: L28
 act: 第 3 章：推理服务
 role: SGLang 调度学徒
 priority: 核心
@@ -10,29 +10,467 @@ no_gpu_friendly: true
 frameworks:
   - SGLang
   - MiniInfra
+  - Python stdlib
 
 patch:
   description: |
     实现 SGLang-shaped DisaggregationService：route request、计算 cached prefix 后的
-    prefill 工作量、记录 prefill→decode KV transfer，并暴露 worker load 指标。
+    prefill 工作量、记录 prefill 到 decode 的 KV transfer，并暴露 worker load 指标。
   task_md: labs/l27_sglang_pd_cache/patch/task.md
   starter_file: labs/l27_sglang_pd_cache/patch/starter/disagg_service.py
   reference_file: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
-  test_command: make patch-test M=l27_sglang_pd_cache
+  test_command: IMPL=reference make patch-test M=l27_sglang_pd_cache
   status_file: labs/l27_sglang_pd_cache/patch/.last_run.json
   test_count: 7
-  test_kind: PD route / KV transfer 语义验证
+  test_kind: PD route / KV transfer / worker load 语义验证
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l27_sglang_pd_cache/system_map.md
+    description: L28 在 Serving PD、prefix cache、KV transfer 和 worker load 链路中的位置。
+  - title: 主讲义
+    path: labs/l27_sglang_pd_cache/lecture.md
+    description: 从 PD 执行模型、prefix cache 影响范围、route/transfer/complete 不变量讲到 SGLang 对照。
+  - title: 源码带读讲义
+    path: labs/l27_sglang_pd_cache/source_walkthrough.md
+    description: 按 patch、MiniInfra、真实 SGLang RadixCache、Req prefix match 和 disagg queues 组织源码阅读。
 
 source_reading:
+  - title: Patch reference
+    repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+    focus: Worker、KVTransfer、DisaggRoute、route、metrics、complete
+    highlights:
+      - title: Worker 状态
+        lines: [8, 13]
+        note: |
+          L8: `Worker` 是 prefill/decode 资源角色的最小模型。
+          L9-L11: worker id 和 role 说明这条负载属于哪一侧。
+          L12-L13: `load_tokens` 和 `active_requests` 是 route 选择与 complete 释放的依据。
+      - title: KVTransfer 状态
+        lines: [16, 21]
+        note: |
+          L16: `KVTransfer` 表示一次 prefill 到 decode 的 handoff。
+          L17-L20: request id、prefill worker 和 decode worker 共同定位一次交接。
+          L21: token count 记录本次交接的 KV 覆盖范围。
+      - title: DisaggRoute 字段
+        lines: [24, 32]
+        note: |
+          L24: `DisaggRoute` 表示一个活跃 request 的 route 记录。
+          L26-L28: request id、prefill worker 和 decode worker 定位两侧资源。
+          L29-L32: prompt、cached prefix、prefill 和 transfer token 数支撑 metrics 与 complete。
+      - title: least-loaded 选择
+        lines: [54, 62]
+        note: |
+          L54: `_select_least_loaded` 接收同一角色的 worker 列表。
+          L55-L61: 排序 key 依次比较 load、active request 和 worker id。
+          L62: 返回当前最适合接新请求的 worker。
+      - title: route 输入校验上半段
+        lines: [70, 77]
+        note: |
+          L70-L75: `route_request` 接收 request id、prompt token 数和 cached prefix token 数。
+          L76-L77: 空 request id 直接拒绝。
+      - title: route 输入校验下半段
+        lines: [78, 83]
+        note: |
+          L78-L79: 同一 request 不能重复进入 active routes。
+          L80-L81: prompt token 数必须为正。
+          L82-L83: cached prefix token 数必须落在合法区间。
+      - title: route 记账与 handoff
+        lines: [85, 95]
+        note: |
+          L85: prefill 工作量等于 prompt 减 cached prefix。
+          L86-L87: 分别选择 prefill 和 decode worker。
+          L89-L92: 两侧 worker 增加 load 和 active request 计数。
+          L93-L95: route 必须调用 `transfer_kv`，token 数等于 prompt token 数。
+      - title: route 保存结果
+        lines: [97, 107]
+        note: |
+          L97-L105: 构造 `DisaggRoute`，保留 complete 和 metrics 所需字段。
+          L106: active route 写入 `self.routes`。
+          L107: 返回 route，drill 会把它写入 metrics。
+      - title: transfer_kv
+        lines: [109, 121]
+        note: |
+          L109-L115: `transfer_kv` 接收 request id、两侧 worker 和 token count。
+          L116-L121: 校验 request、worker 和正的 token 数。
+      - title: transfer_kv append
+        lines: [122, 126]
+        note: |
+          L122-L125: 创建并追加 `KVTransfer`。
+          L126: 返回本次 handoff 记录。
+      - title: metrics 聚合上半段
+        lines: [128, 139]
+        note: |
+          L128: `metrics` 是调试视图入口。
+          L129-L130: 准备按 worker 聚合 transfer tokens。
+          L131-L139: 遍历历史 transfers，分别累计 prefill 和 decode worker 的 token 数。
+      - title: metrics 聚合下半段
+        lines: [140, 149]
+        note: |
+          L140-L149: 返回 transfer 数、总 token、active prefill/cache token 和 active request 数。
+      - title: metrics worker loads
+        lines: [150, 156]
+        note: |
+          L150-L151: 返回按 prefill/decode worker 聚合的历史 transfer tokens。
+          L152-L156: 返回所有 worker 当前 active load。
+      - title: complete_request
+        lines: [163, 172]
+        note: |
+          L163: `complete_request` 释放 active route。
+          L164-L166: unknown request 是 no-op。
+          L167-L168: 根据 route 找回两侧 worker。
+          L169-L172: 两侧 load 和 active request 计数回收，并保护不变成负数。
+  - title: Patch tests
+    repo_path: labs/l27_sglang_pd_cache/patch/tests/test_patch.py
+    focus: 七个行为合同
+    highlights:
+      - title: route 和 transfer 合同
+        lines: [22, 33]
+        note: |
+          L22: 测试 route 是否记录 worker 和 KV transfer。
+          L24-L30: 单 prefill/decode worker 下路由一个带 cached prefix 的请求。
+          L31-L33: 校验 route 字段、transfer 记录和 worker load。
+      - title: least-loaded 合同
+        lines: [36, 46]
+        note: |
+          L36: 测试多 worker 下的负载选择。
+          L38-L43: 连续 route 两个请求。
+          L44-L46: 第二个请求应进入另一组 least-loaded worker。
+      - title: 输入校验合同
+        lines: [49, 56]
+        note: |
+          L49: 测试 route 输入边界。
+          L51-L52: 空 request id 应抛错。
+          L53-L54: 非正 prompt token 数应抛错。
+          L55-L56: cached prefix 超过 prompt token 数应抛错。
+      - title: metrics 聚合合同上半段
+        lines: [59, 68]
+        note: |
+          L59: 测试 metrics 是否聚合 cache、prefill 和 worker tokens。
+          L60-L66: route 三个不同 cached prefix 的请求。
+          L67-L68: 获取 metrics 并进入完整字典断言。
+      - title: metrics 聚合合同下半段
+        lines: [69, 75]
+        note: |
+          L69-L73: 断言 transfer、prefill、cached prefix 和 active request 总量。
+          L74-L75: 断言按 prefill/decode worker 聚合的 transfer tokens。
+      - title: metrics worker load 合同
+        lines: [76, 82]
+        note: |
+          L76-L82: 断言当前 worker active load。
+      - title: transfer 过滤合同
+        lines: [85, 90]
+        note: |
+          L85: 测试按 request 过滤 transfers。
+          L86-L89: 插入同一 request 的两次 transfer，中间夹另一个 request。
+          L90: 过滤结果必须保持插入顺序。
+      - title: complete 合同
+        lines: [93, 100]
+        note: |
+          L93: 测试 complete 是否释放 active load。
+          L95-L96: route 后 active request 为 1。
+          L97-L99: complete 后 active request 和 worker load 归零。
+          L100: unknown request complete 不应抛错。
+      - title: empty metrics 合同
+        lines: [103, 113]
+        note: |
+          L103: 测试空服务 metrics。
+          L104-L109: transfer、prefill、cache 和 active 数量为 0。
+          L110-L113: worker token 聚合为空，默认 worker load 为 0。
+  - title: PD drill script
+    repo_path: labs/l27_sglang_pd_cache/scripts/run_pd_drill.py
+    focus: cache off/on workload、route metrics、acceptance artifact
+    highlights:
+      - title: 实现选择
+        lines: [34, 45]
+        note: |
+          L34: `_impl` 选择用于 drill 的实现。
+          L35-L37: `IMPL` 环境变量存在时直接导入指定实现。
+          L38-L45: 未指定时尝试 starter，失败后回退 reference。
+      - title: workload 生成
+        lines: [48, 58]
+        note: |
+          L48: `_generate_workload` 接收 workload 配置。
+          L49-L53: 读取随机种子、prompt 范围、cache hit rate 和命中比例。
+          L54-L57: 每个请求生成 prompt tokens 和 cached prefix tokens。
+          L58: 返回请求列表。
+      - title: run 初始化
+        lines: [61, 68]
+        note: |
+          L61-L65: 解析 config 和 run id。
+          L67-L68: 导入实现并读取配置。
+      - title: run 目录
+        lines: [69, 75]
+        note: |
+          L69-L75: 准备 run 目录，并写入 command、prediction 和 resolved config。
+      - title: run_pass route
+        lines: [97, 105]
+        note: |
+          L97-L101: 每个 pass 创建新的 `DisaggregationService`。
+          L102-L105: 逐请求调用 `route_request`。
+      - title: run_pass metrics write
+        lines: [106, 113]
+        note: |
+          L106-L113: route 结果写入 `metrics.jsonl` 的基础字段。
+      - title: run_pass worker fields
+        lines: [114, 119]
+        note: |
+          L114-L119: route metrics 继续写入 cached prefix、prefill 和 worker 字段。
+      - title: run_pass complete
+        lines: [120, 127]
+        note: |
+          L120: complete 前保存 service metrics。
+          L121-L122: 对 workload 中每个 request 调用 complete。
+          L123-L127: 返回 label、complete 前后快照和 transfer/request 下界。
+      - title: run_pass transfer range
+        lines: [128, 133]
+        note: |
+          L128-L133: 计算 transfer/request 上界，完成 pass 摘要。
+      - title: acceptance
+        lines: [138, 145]
+        note: |
+          L138-L141: 计算 cache off 到 cache on 的 prefill saving。
+          L143-L145: 检查 saving 是否达到配置阈值。
+      - title: acceptance transfer and drain
+        lines: [146, 153]
+        note: |
+          L146-L150: 检查每个 request 一条 transfer，以及 worker loads 是否归零。
+          L152-L153: 汇总整体通过条件。
+      - title: drill artifact
+        lines: [156, 168]
+        note: |
+          L156-L157: 写入 `artifacts/pd_drill.json`。
+          L159-L164: 保存实现、saving、transfer、drain 和总结果。
+          L165-L168: 保存 cache off/on 两个 pass 的完整摘要。
+  - title: MiniInfra RadixCache
+    repo_path: mini_infra/sglang/srt/mem_cache/radix_cache.py
+    focus: cached prefix tokens 的来源
+    highlights:
+      - title: match_prefix
+        lines: [60, 72]
+        note: |
+          L60: `match_prefix` 接收 match params。
+          L61-L63: 从 root 开始，维护最佳命中长度和 value。
+          L64-L68: 逐 token 沿 radix tree 查找。
+          L69-L71: 命中 value 时更新最佳前缀长度。
+          L72: 返回 matched prefix length 和 value。
+      - title: cache_finished_req
+        lines: [83, 95]
+        note: |
+          L83-L85: 完成请求可被插回 prefix cache。
+          L86-L90: 不插入或空 prompt 时直接返回。
+          L91-L95: 用完整 prompt tokens 插入缓存，value 用 KV 占位。
+  - title: MiniInfra Scheduler
+    repo_path: mini_infra/sglang/srt/managers/scheduler.py
+    focus: scheduler 如何把 prefix match 写入 prefill 记录
+    highlights:
+      - title: run_batch prefix match
+        lines: [30, 39]
+        note: |
+          L30: `run_batch` 是教学版 scheduler 的主路径。
+          L31-L33: 准备 cache hit、prefill 和 decode 记录。
+          L34-L38: 从 waiting 取请求并查询 prefix cache。
+          L39: 命中 value 时累计 cache hit。
+      - title: run_batch prefill record
+        lines: [40, 50]
+        note: |
+          L40-L45: prefill 记录写入 request id 和 matched prefix tokens。
+          L46-L48: 模拟生成一个 token，并把请求写回 prefix cache。
+          L49-L50: 请求进入 running，返回本 batch 的 prefill/decode/cache hit 记录。
+  - title: MiniInfra DisaggregationService
+    repo_path: mini_infra/sglang/srt/managers/disagg_service.py
+    focus: route、transfer、metrics、complete 的同构实现
+    highlights:
+      - title: route validation
+        lines: [68, 80]
+        note: |
+          L68-L73: `route_request` 接收 request id、prompt token 数和 cached prefix token 数。
+          L74-L80: 校验空 id、重复 request、prompt token 和 cached prefix 下界。
+      - title: route state update
+        lines: [83, 90]
+        note: |
+          L83: prefill tokens 等于 prompt 减 cached prefix。
+          L84-L85: 选择两侧 least-loaded worker。
+          L87-L90: 更新两侧 worker load 和 active request。
+      - title: route transfer call
+        lines: [91, 96]
+        note: |
+          L91-L96: 记录 KV transfer，token count 等于 prompt token 数。
+      - title: route object
+        lines: [98, 108]
+        note: |
+          L98-L106: 构造 `DisaggRoute`，保存 route 所需字段。
+          L107: active route 写入 `self.routes`。
+          L108: 返回 route。
+      - title: metrics
+        lines: [125, 137]
+        note: |
+          L125-L136: 遍历 transfers，按 prefill/decode worker 聚合 token 数。
+          L137: metrics 返回 dict 开始。
+      - title: metrics totals
+        lines: [138, 149]
+        note: |
+          L138-L146: 返回 transfer、prefill、cached prefix 和 active request 总量。
+          L147-L153: 返回 worker 维度 token 聚合和当前 worker loads。
+      - title: complete
+        lines: [160, 169]
+        note: |
+          L160-L163: 从 active routes 弹出 request，unknown request no-op。
+          L164-L165: 找回 prefill 和 decode worker。
+          L166-L169: 释放两侧 load 和 active request 计数。
   - title: SGLang RadixCache
     repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
-    focus: match_prefix、insert、evict 与 token prefix
-  - title: SGLang Scheduler
+    focus: 真实 prefix cache 的 key、match 和 insert
+    highlights:
+      - title: RadixKey
+        lines: [71, 83]
+        note: |
+          L71: `RadixKey` 是真实 prefix cache 的 key。
+          L72-L80: key 包含 token ids、extra key 和 bigram 模式。
+          L82-L83: token ids 被保存为 key 的主序列。
+      - title: TreeNode
+        lines: [211, 223]
+        note: |
+          L211: `TreeNode` 是 radix tree 节点。
+          L215-L219: 节点保存 children、parent、key 和 KV value。
+          L220-L223: lock 与 access/creation time 支撑 eviction 和生命周期管理。
+      - title: match_prefix entry
+        lines: [435, 447]
+        note: |
+          L435: 取出 lookup key。
+          L436: 根据 EAGLE 模式转换 bigram view。
+          L438-L447: 定义空命中返回值，包含空 device indices 和 root nodes。
+      - title: match_prefix result
+        lines: [449, 457]
+        note: |
+          L449-L455: 禁用、空 key 或 page alignment 后为空时返回空命中。
+          L457: 调用 radix tree helper 查找 prefix。
+      - title: match_prefix return
+        lines: [458, 466]
+        note: |
+          L458-L461: 命中 value 时拼接 KV indices，否则返回空 tensor。
+          L462-L466: 返回 device indices 和 last node。
+      - title: cache_finished_req
+        lines: [488, 500]
+        note: |
+          L488-L489: 完成请求进入 cache 写入路径。
+          L490-L494: 根据 deterministic 和 committed KV 长度决定是否插入。
+          L495-L500: cache disabled 时释放 KV indices 后返回。
+      - title: finished insert
+        lines: [502, 512]
+        note: |
+          L502-L505: 从 request 取 token ids 和 KV indices。
+          L507-L512: 构造 page-aligned RadixKey 和要缓存的 values。
+      - title: finished duplicate free
+        lines: [513, 523]
+        note: |
+          L513-L519: 插入 radix cache 并得到新 prefix 长度。
+          L520-L523: 释放树中已有的重复 KV。
+  - title: SGLang Req prefix match
+    repo_path: github_repo/sglang/python/sglang/srt/managers/schedule_batch.py
+    focus: Req 如何把 prefix match 结果写回自身
+    highlights:
+      - title: disagg fields
+        lines: [867, 874]
+        note: |
+          L867-L874: request 保存 bootstrap、KV sender 和 disagg rank 字段。
+      - title: disagg send cursor
+        lines: [876, 884]
+        note: |
+          L876-L881: `start_send_idx` 标记 chunked prefill 发送位置。
+          L883-L884: overlap schedule 会延迟 KV transfer 到 batch result 阶段。
+      - title: init fill ids
+        lines: [971, 980]
+        note: |
+          L971-L975: `init_next_round_input` 接收可选 tree cache。
+          L976-L980: 根据请求类型生成本轮 `fill_ids`。
+      - title: match input
+        lines: [1000, 1005]
+        note: |
+          L1000-L1001: prefix match 最多匹配到输入长度减一。
+          L1002-L1004: logprob 需求会进一步限制可匹配长度。
+          L1005: 用 `fill_ids` 的前缀作为 lookup token ids。
+      - title: tree cache match
+        lines: [1013, 1021]
+        note: |
+          L1013: tree cache 存在时才做 prefix match。
+          L1014-L1015: Mamba 支持影响 copy-on-write 分支。
+          L1016-L1021: 调用 `tree_cache.match_prefix`，传入 RadixKey、request 和 cow_mamba。
+      - title: match result writeback
+        lines: [1023, 1035]
+        note: |
+          L1023-L1035: prefix indices、last nodes、host hit 和 branching seqlen 写回 request。
+      - title: cache protected length
+        lines: [1036, 1039]
+        note: |
+          L1036-L1039: cache protected length 由 match result 或 prefix indices 长度决定。
+  - title: SGLang scheduler disagg queues
     repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
-    focus: waiting/running batch 与 cache 交互
-  - title: SGLang PD service
+    focus: PD mode 下 queue 和 idle 判断
+    highlights:
+      - title: init_disaggregation mode
+        lines: [1133, 1140]
+        note: |
+          L1133: `init_disaggregation` 初始化 PD 相关状态。
+          L1134-L1139: 从 server args 读取 disaggregation mode 和 transfer backend。
+          L1140: mode/backend 之后用于创建不同队列。
+      - title: decode queues
+        lines: [1166, 1177]
+        note: |
+          L1166-L1174: decode transfer queue 负责轮询或等待 KV cache。
+          L1176-L1177: decode prealloc queue 负责等待预分配。
+      - title: prefill queues
+        lines: [1221, 1230]
+        note: |
+          L1221-L1230: prefill bootstrap queue 使用 KV pool、metadata、rank 和端口信息。
+      - title: prefill inflight queue
+        lines: [1231, 1238]
+        note: |
+          L1231-L1236: prefill bootstrap queue 继续保存 scheduler、pp 和 backend 参数。
+          L1237-L1238: prefill inflight queue 记录正在发送 KV 的请求。
+      - title: add request queue
+        lines: [2144, 2152]
+        note: |
+          L2144-L2152: NULL mode 进入普通 waiting queue。
+      - title: add request prefill queue
+        lines: [2153, 2158]
+        note: |
+          L2153-L2158: PREFILL mode 进入 prefill bootstrap queue。
+      - title: add request decode queue
+        lines: [2159, 2166]
+        note: |
+          L2159-L2164: DECODE mode 进入 decode prealloc queue。
+          L2165-L2166: 非法 mode 直接报错。
+      - title: idle check
+        lines: [3178, 3187]
+        note: |
+          L3178-L3184: idle 判断要看 waiting 和 grammar queue。
+          L3185-L3187: PREFILL mode 还要看 inflight 和 bootstrap queue。
+      - title: idle decode check
+        lines: [3189, 3193]
+        note: |
+          L3189-L3193: DECODE mode 还要看 prealloc、transfer 和 offload 状态。
+  - title: SGLang disagg service
     repo_path: github_repo/sglang/python/sglang/srt/managers/disagg_service.py
-    focus: prefill/decode worker 与 KV transfer 边界
+    focus: prefill mode 启动 KV bootstrap server
+    highlights:
+      - title: start_disagg_service
+        lines: [14, 26]
+        note: |
+          L14-L16: `start_disagg_service` 接收 server args。
+          L17-L20: 读取 disaggregation mode 和 transfer backend。
+          L21-L26: PREFILL mode 下选择 bootstrap server class 并准备启动。
+      - title: bootstrap server
+        lines: [27, 34]
+        note: |
+          L27-L29: bootstrap server 使用 host 和 bootstrap port。
+          L30-L34: ASCEND backend 的 node rank 0 进入 config store 创建路径。
+      - title: bootstrap store
+        lines: [35, 44]
+        note: |
+          L35-L38: 导入并调用 `create_config_store`。
+          L39-L42: store 创建失败会抛出错误。
+          L44: 返回 bootstrap server。
 
 mini_infra_targets:
   - mini_infra/sglang/srt/mem_cache/radix_cache.py
@@ -44,9 +482,11 @@ notebooks:
   - notebooks/n09_prefix_cache.ipynb
 
 tickets:
-  - sglang_pd_misroute_003
-  - sglang_pd_decode_starve_004
-  - sglang_cache_miss_002
+  - pd_router_misroute
+  - pd_kv_transfer_lost
+  - pd_complete_double
+  - pd_decode_starvation
+  - pd_metrics_skew
 
 prereq: l26_sglang_pd_observability
 next_lab: l29_verl_rl_baseline
@@ -54,3 +494,282 @@ next_lab: l29_verl_rl_baseline
 gpu_modes:
   local: CPU 即可
   cluster: 可对照 SGLang repeated-prefix / PD benchmark
+
+lesson:
+  opening: |
+    # 第 28 讲：SGLang PD Disaggregation
+
+    这一讲讲 prefill/decode 分离里的最小控制面。请求进入 PD 服务后，要先根据 prefix cache 命中估算 prefill 工作量，再分别选择 prefill 和 decode worker，随后记录 KV handoff，并在 complete 时释放 worker load。L28 的 patch 不启动真实 SGLang server，它训练的是 PD 系统中最容易漏掉的状态不变量。
+
+    新版课程按“系统地图 -> 主讲义 -> 源码带读 -> notebook -> quiz -> patch -> drill -> 课后产物”的顺序组织。lab 只检查最小合同：route、transfer、metrics、transfer history 和 complete。
+  sections:
+    - title: 课程定位：从观测字段到状态来源
+      plain_explanation: |
+        L27 已经讲过 queue、KV transfer、cache hit-rate 和 worker load 应如何观测。L28 继续回答这些字段从哪里来：一个请求如何进入 prefill worker，cached prefix 如何改变 prefill token 数，KV transfer 如何记录 prefill 到 decode 的交接，complete 如何释放 active load。
+
+        这节课仍在 Serving 章内。它是 SGLang PD 分离的最小控制面，不处理真实网络传输、GPU KV page 或 router service discovery。学生要先掌握不变量，再去读真实 SGLang 的 RadixCache、Req prefix match、disagg queue 和 bootstrap service。
+      mental_model: |
+        把 PD 服务看成调度台：route 挑两侧 worker，transfer 写交接单，metrics 出账本，complete 结清活跃占用。
+      why_it_matters: |
+        PD 分离会把一个请求拆成跨 worker 流水线。状态不闭合时，TTFT、ITL、queue 和 cache 指标都会变得难解释。
+      common_confusions:
+        - 把 PD 当成启动参数，忽略 route 和 KV handoff 的中间状态。
+        - 只看 prefill saving，不看 decode worker load 和 transfer/request。
+        - complete 后把 transfer history 一起清掉。
+      checkpoint_questions:
+        - L28 连接 L27 的哪些观测字段？
+        - patch 不模拟真实 SGLang 的哪些生产细节？
+        - 为什么 route 和 complete 必须成对考虑？
+
+    - title: 数据模型：active route 与 transfer history 分开
+      plain_explanation: |
+        Patch 的三个 dataclass 分别对应三类事实。`Worker` 保存当前资源占用；`KVTransfer` 保存历史 handoff；`DisaggRoute` 保存 active request 在两侧 worker 和 token 数上的状态。`self.routes` 是当前活跃请求表，`self.transfers` 是历史交接列表。
+
+        这个区分决定 complete 的行为。complete 应释放 active route 和 worker load，但不应删除历史 transfers。否则事故复盘时无法证明请求是否产生过 handoff。
+      mental_model: |
+        route 是当前占用，transfer 是审计流水。结算时清占用，不清流水。
+      why_it_matters: |
+        很多 PD 故障来自状态混淆：把历史当当前会误判 worker 忙，把当前当历史会丢审计证据。
+      source_refs:
+        - title: Worker state
+          repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+          lines: [8, 13]
+          note: |
+            L8: `Worker` 建模 prefill/decode 资源角色。
+            L9-L11: id 和 role 标识 worker。
+            L12-L13: load 和 active request 是 route/complete 的核心状态。
+        - title: KVTransfer state
+          repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+          lines: [16, 21]
+          note: |
+            L16-L21: `KVTransfer` 保存一次 handoff。
+      common_confusions:
+        - complete 后清空 `self.transfers`。
+        - 用 transfer history 代表当前 worker load。
+        - 只保存 request id，不保存 token 字段。
+      checkpoint_questions:
+        - active route 和 transfer history 分别服务什么问题？
+        - '`DisaggRoute` 中哪些字段用于 complete？'
+        - '`KVTransfer` 中哪些字段用于排查 transfer lost？'
+
+    - title: Prefix Cache：减少 prefill 工作量
+      plain_explanation: |
+        Prefix cache 命中表示一段 prompt 的 KV 已经可复用。L28 的整数模型把真实 prefix match 结果压缩成 `cached_prefix_tokens`。因此 prefill 侧要新算的 token 是 `prompt_token_count - cached_prefix_tokens`。
+
+        Decode 侧仍要拥有完整历史上下文对应的 KV。本讲把 `kv_transfer_tokens` 记成 prompt token 数，防止把 prefill saving 错当成 decode handoff 成本也消失。
+      mental_model: |
+        Prefix cache 减少“还要算多少”，KV transfer 记录“decode 侧要接手多少历史上下文”。
+      why_it_matters: |
+        cache on/off 的收益必须拆阶段解释。只看总延迟或只看 prefill saving，容易漏掉 decode transfer queue 或 worker load 问题。
+      source_refs:
+        - title: MiniInfra match_prefix
+          repo_path: mini_infra/sglang/srt/mem_cache/radix_cache.py
+          lines: [60, 72]
+          note: |
+            L60: prefix cache 查询入口。
+            L61-L68: 沿 token 序列查找 radix tree。
+            L69-L71: 命中 value 时更新最长命中长度。
+            L72: 返回 matched prefix length。
+        - title: MiniInfra scheduler prefill record
+          repo_path: mini_infra/sglang/srt/managers/scheduler.py
+          lines: [40, 50]
+          note: |
+            L40-L45: prefill 记录写入 matched prefix tokens。
+            L46-L48: 生成 token 后把完成请求写回 cache。
+            L49-L50: 返回 prefill、decode 和 cache hit 记录。
+        - title: SGLang Req prefix match
+          repo_path: github_repo/sglang/python/sglang/srt/managers/schedule_batch.py
+          lines: [1013, 1021]
+          note: |
+            L1013: tree cache 存在时才做 prefix match。
+            L1014-L1015: 根据 cache 能力设置 cow_mamba。
+            L1016-L1021: 调用 `tree_cache.match_prefix`。
+      common_confusions:
+        - 认为 cached prefix 会让 transfer token 数归零。
+        - 把 cache hit 次数当成 cached prefix token 数。
+        - 忽略真实 SGLang 中的 namespace 和 page alignment。
+      checkpoint_questions:
+        - 128 token prompt 命中 32 token prefix 时，prefill tokens 和 transfer tokens 分别是多少？
+        - cache on 没有降低 prefill tokens，优先查哪些字段？
+        - 真实 SGLang 中 `extra_key` 会影响哪类命中？
+
+    - title: Route：校验、算量、选 worker、记录 handoff
+      plain_explanation: |
+        `route_request` 是 L28 patch 的主路径。它先校验 request id、重复 route、prompt token 和 cached prefix 边界；再计算 prefill 工作量；再分别选择 least-loaded prefill/decode worker；随后更新两侧 load 和 active request，调用 `transfer_kv`，保存并返回 route。
+
+        Least-loaded 的排序 key 是 `(load_tokens, active_requests, worker_id)`。这让负载相同时选择稳定，便于测试和复盘。
+      mental_model: |
+        route 的顺序是“先校验，再记账，再交接，再登记”。任何一步省略都会留下不可复查状态。
+      why_it_matters: |
+        router misroute、decode starvation 和 metrics skew 都会在 route 阶段埋下种子。最小实现也必须保证两侧状态一致。
+      source_refs:
+        - title: Route validation
+          repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+          lines: [76, 83]
+          note: |
+            L76-L83: 校验空 id、重复 request、非正 prompt 和 cached prefix 越界。
+        - title: Route state update
+          repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+          lines: [85, 95]
+          note: |
+            L85: 计算 prefill tokens。
+            L86-L87: 选择两侧 least-loaded worker。
+            L89-L92: 更新 worker load 和 active request。
+            L93-L95: 记录 KV transfer。
+        - title: Least-loaded test
+          repo_path: labs/l27_sglang_pd_cache/patch/tests/test_patch.py
+          lines: [36, 46]
+          note: |
+            L36: 测试 least-loaded 选择。
+            L38-L43: 两次 route 产生不同 worker load。
+            L44-L46: 第二个请求应选择负载更低的 worker。
+      common_confusions:
+        - 只选择 prefill worker，不看 decode worker。
+        - 更新 load 后才做输入校验。
+        - route 后忘记调用 transfer。
+      checkpoint_questions:
+        - 为什么 route 要拒绝重复 request id？
+        - prefill worker 和 decode worker 分别增加哪个 token 数？
+        - '`active_requests` 在 tie-break 中解决什么问题？'
+
+    - title: Transfer、Metrics 和 Complete
+      plain_explanation: |
+        `transfer_kv` 追加历史 handoff；`metrics` 把 active route 和 transfer history 折叠成排障字典；`complete_request` 释放 active load。三者配合后，drill 才能回答：每个 request 是否有一条 transfer，cache on 是否减少 prefill tokens，worker load 是否在 complete 后归零。
+
+        Metrics 中要同时保留 `prefill_tokens`、`cached_prefix_tokens`、`tokens_transferred`、`tokens_by_prefill_worker`、`tokens_by_decode_worker` 和 `worker_loads`。只保留总 transfer 数无法判断哪侧 worker 热，也无法核对 cache saving。
+      mental_model: |
+        transfer 是流水，metrics 是报表，complete 是结算。
+      why_it_matters: |
+        PD 故障经常跨越 route、transfer 和 complete。拆开指标后，才能定位丢交接、重复交接和 load 泄漏。
+      source_refs:
+        - title: Transfer implementation
+          repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+          lines: [109, 121]
+          note: |
+            L109-L115: `transfer_kv` 接收 handoff 参数。
+            L116-L121: 校验 request、worker 和 token count。
+        - title: Metrics implementation
+          repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+          lines: [128, 139]
+          note: |
+            L128: metrics 入口。
+            L129-L130: 准备 worker 聚合表。
+            L131-L139: 遍历历史 transfers 聚合两侧 token。
+        - title: Complete implementation
+          repo_path: labs/l27_sglang_pd_cache/patch/reference/disagg_service.py
+          lines: [163, 172]
+          note: |
+            L163-L166: complete 弹出 active route，unknown request no-op。
+            L167-L168: 找回两侧 worker。
+            L169-L172: 回收 load 和 active request。
+      common_confusions:
+        - complete 后删除 transfer history。
+        - metrics 只返回 worker loads。
+        - unknown request complete 抛错。
+      checkpoint_questions:
+        - complete 后 `kv_transfers` 为什么仍可能大于 0？
+        - '`tokens_by_prefill_worker` 和 `worker_loads` 有什么区别？'
+        - transfer token count 为 0 会破坏哪条证据链？
+
+    - title: Drill：cache off/on 的证据链
+      plain_explanation: |
+        Drill 先生成 cache off workload，再生成 cache on workload。每个 pass 都创建新的服务，逐请求 route，写一行 route metrics，随后 complete 所有请求。最后计算 prefill saving、transfer/request 范围和 worker drain 结果。
+
+        这个 drill 不代表真实性能。它验证的是证据链形状：cache on 应该减少 prefill tokens，每个 request 应该恰好一条 transfer，complete 后 worker loads 应该归零。
+      mental_model: |
+        Patch tests 查函数局部语义，drill 查函数组合后的 run 证据。
+      why_it_matters: |
+        真实 benchmark 也需要同样的结构：固定配置、保存 metrics、计算 acceptance、保留 artifact。
+      source_refs:
+        - title: Workload generation
+          repo_path: labs/l27_sglang_pd_cache/scripts/run_pd_drill.py
+          lines: [48, 58]
+          note: |
+            L48: workload 生成入口。
+            L49-L53: 读取 seed、prompt 范围、cache hit rate 和 hit ratio。
+            L54-L57: 生成每个请求的 prompt 与 cached token 数。
+            L58: 返回请求列表。
+        - title: Run pass route
+          repo_path: labs/l27_sglang_pd_cache/scripts/run_pd_drill.py
+          lines: [97, 105]
+          note: |
+            L97-L101: 创建服务。
+            L102-L105: 每个请求调用 route。
+        - title: Run pass metrics
+          repo_path: labs/l27_sglang_pd_cache/scripts/run_pd_drill.py
+          lines: [106, 113]
+          note: |
+            L106-L113: 写入 route metrics 的时间、pass、request 和 prompt 字段。
+        - title: Run pass worker metrics
+          repo_path: labs/l27_sglang_pd_cache/scripts/run_pd_drill.py
+          lines: [114, 119]
+          note: |
+            L114-L119: 写入 cached prefix、prefill 和 worker 字段。
+        - title: Acceptance
+          repo_path: labs/l27_sglang_pd_cache/scripts/run_pd_drill.py
+          lines: [138, 145]
+          note: |
+            L138-L141: 计算 prefill saving。
+            L143-L145: 检查 saving 阈值。
+        - title: Acceptance transfer and drain
+          repo_path: labs/l27_sglang_pd_cache/scripts/run_pd_drill.py
+          lines: [146, 153]
+          note: |
+            L146-L150: 检查 transfer/request 和 drained loads。
+            L152-L153: 汇总 overall。
+      common_confusions:
+        - patch-test 通过后不跑 drill。
+        - saving 达标就忽略 transfer/request。
+        - complete 后只看 active_requests，不看 worker_loads。
+      checkpoint_questions:
+        - Drill 的三个 acceptance 分别验证什么？
+        - 为什么 cache off 和 cache on 要使用同一类 workload？
+        - '`pd_drill.json` 中哪些字段最能定位 complete 漏释放？'
+
+    - title: 真实 SGLang 对照
+      plain_explanation: |
+        真实 SGLang 的 prefix cache、request 初始化和 PD queue 都比 patch 复杂。RadixCache 要处理 namespace、page alignment 和 KV indices；Req 会把 prefix match 结果写回自身；scheduler 根据 disaggregation mode 把请求送入 waiting、prefill bootstrap、decode prealloc 或 decode transfer 相关队列；bootstrap service 负责 prefill 侧 KV 交接入口。
+
+        L28 的价值是给这些复杂代码一条最小阅读线：先找 prefix match，再找请求进入哪条 queue，再找 KV handoff，再找 queue/worker 指标。
+      mental_model: |
+        真实 SGLang 是 L28 patch 的生产扩展版：同样的状态边界，多了 page、rank、backend、queue 和 failure recovery。
+      why_it_matters: |
+        只会启动 PD 服务，不等于能排查 PD 服务。读懂这些源码落点后，看到 p99 或 ITL 退化时才能判断慢在 cache、route、transfer 还是 decode queue。
+      source_refs:
+        - title: SGLang match_prefix
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+          lines: [449, 457]
+          note: |
+            L449-L455: 禁用或空 key 返回空命中。
+            L457: 调用 radix tree helper。
+        - title: Scheduler add request queue
+          repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+          lines: [2144, 2152]
+          note: |
+            L2144-L2152: NULL mode 进入普通 waiting queue。
+        - title: Scheduler PD request queues
+          repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+          lines: [2153, 2158]
+          note: |
+            L2153-L2158: PREFILL mode 进入 prefill bootstrap queue。
+        - title: Scheduler decode queue
+          repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+          lines: [2159, 2166]
+          note: |
+            L2159-L2164: DECODE mode 进入 decode prealloc queue。
+            L2165-L2166: 非法 mode 直接报错。
+        - title: SGLang bootstrap service
+          repo_path: github_repo/sglang/python/sglang/srt/managers/disagg_service.py
+          lines: [14, 26]
+          note: |
+            L14-L16: bootstrap service 入口接收 server args。
+            L17-L20: 读取 mode 和 transfer backend。
+            L21-L26: PREFILL mode 选择 bootstrap server class。
+      common_confusions:
+        - 把 L28 的整数 token count 当成真实 KV 字节量。
+        - 只看 waiting queue，忽略 disagg queues。
+        - 认为 bootstrap service 等同于 router。
+      checkpoint_questions:
+        - 真实 SGLang 的 prefix match 结果写回 request 的哪些字段？
+        - PREFILL 和 DECODE mode 分别把请求送入哪条队列？
+        - 为什么 idle 判断要看 disagg queues？

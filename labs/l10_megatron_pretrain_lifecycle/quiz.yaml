@@ -1,83 +1,105 @@
 mission: l10_megatron_pretrain_lifecycle
-title: L04.8 Quiz · Megatron train_step
-pass_threshold: 1.0
+title: L11 Quiz · Megatron 预训练生命周期
+pass_threshold: 0.8
 description: |
-  这组问题确认你能把 L04 的 scheduler patch 放回 Megatron-shaped train_step。
+  这 5 题检查 train_step 调用顺序、loss 汇总、optimizer skip、
+  scheduler 边界和 lifecycle artifact。
 
 prereq_checklist:
+  - title: 读 L11 主讲义
+    kind: doc
+    path: labs/l10_megatron_pretrain_lifecycle/lecture.md
+    href: "#lesson"
   - title: 读 patch/task.md
-    kind: read
+    kind: task
     path: labs/l10_megatron_pretrain_lifecycle/patch/task.md
-  - title: 读 MiniInfra Megatron pretrain
+    href: "#patch"
+  - title: 读 lifecycle 脚本
     kind: source
-    path: mini_infra/megatron/pretrain_gpt.py
-  - title: 读 Megatron training.py
-    kind: source
-    path: github_repo/Megatron-LM/megatron/training/training.py
+    path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
 
 questions:
-  - id: q1_entry_boundary
-    prompt: Megatron 的 `pretrain_gpt.py` 主要把哪些 provider 交给通用 training loop？
+  - id: q1_call_order
+    prompt: |
+      本关 `train_step` 的主调用顺序应该是什么？
     options:
       - id: a
-        text: model_provider、get_batch、loss_func
-        correct: true
+        text: optimizer.step -> zero_grad -> forward_backward -> scheduler.step。
       - id: b
-        text: HTTP router、KV cache、scheduler
+        text: zero_grad -> forward_backward -> optimizer.step -> scheduler.step（仅成功时）。
+        correct: true
       - id: c
-        text: tokenizer trainer、dataset downloader、wandb login
+        text: scheduler.step -> forward_backward -> zero_grad。
       - id: d
-        text: CUDA kernel launch 参数
-    explanation: "`pretrain_gpt.py` 是任务入口；通用循环在 `megatron/training/training.py`。"
-  - id: q2_forward_backward
-    prompt: "`forward_backward_func` 的系统边界是什么？"
+        text: forward_backward -> scheduler.step -> optimizer.step。
+    explanation: |
+      单步训练先清梯度，再执行 forward/backward，然后 optimizer 更新参数。
+      Scheduler 只在 optimizer update 成功后推进。
+
+  - id: q2_microbatch_loss
+    prompt: |
+      `forward_backward_func` 返回 `{"losses": [3.0, 1.0]}` 时，metrics 中的 loss 应是多少？
     options:
       - id: a
-        text: 只负责保存 checkpoint
+        text: "4.0"
       - id: b
-        text: 连接 microbatch、PP schedule、forward/loss/backward 的执行
-        correct: true
+        text: "3.0"
       - id: c
-        text: 只负责 tokenizer
+        text: "2.0"
+        correct: true
       - id: d
-        text: 只负责读取 JSONL
-    explanation: "它是训练 step 中把并行 schedule 和模型计算接起来的关键边界。"
-  - id: q3_scheduler_state
-    prompt: LR scheduler state 为什么属于 checkpoint 语义？
+        text: "1.0"
+    explanation: |
+      多 microbatch loss 要取平均，`(3.0 + 1.0) / 2 = 2.0`。
+      同时 `num_microbatches` 应记录为 2。
+
+  - id: q3_optimizer_skip
+    prompt: |
+      optimizer.step() 返回 `False` 时，train_step 应怎样处理 scheduler 和 metrics？
     options:
       - id: a
-        text: 不保存也不会影响 resume
+        text: scheduler 继续前进，`skipped_iter=0`。
       - id: b
-        text: resume 后必须延续 step-based LR，否则 loss 曲线会跳变
+        text: scheduler 不前进，`skipped_iter=1`。
         correct: true
       - id: c
-        text: scheduler 只影响日志
+        text: 直接把 loss 改成 0。
       - id: d
-        text: scheduler 只影响 dataloader seed
-    explanation: "训练恢复需要 model、optimizer、scheduler/global step 一致。"
-  - id: q4_miniinfra_gap
-    prompt: MiniInfra pretrain 不能外推成真实 Megatron 性能结论的主要原因是什么？
+        text: 删除 lr 字段。
+    explanation: |
+      `False` 表示本步参数更新被跳过。lr 时间轴要和真实参数更新对齐，因此 scheduler
+      不应前进，metrics 中记录 `skipped_iter=1`。
+
+  - id: q4_optimizer_none
+    prompt: |
+      本关为什么把 optimizer.step() 返回 `None` 视为成功？
     options:
       - id: a
-        text: 它保留生命周期但缩小了模型、数据、并行 runtime 和硬件复杂度
+        text: 兼容常见 PyTorch optimizer，它们通常不返回显式 success。
         correct: true
       - id: b
-        text: 它没有 Python 代码
+        text: 因为 None 表示 loss 为 0。
       - id: c
-        text: 它一定比真实 Megatron 慢
+        text: 因为 None 表示 scheduler 不存在。
       - id: d
-        text: 它只支持 HTTP
-    explanation: "MiniInfra 用来验证系统语义，不代表 8×H200 性能。"
-  - id: q5_debug_start
-    prompt: 如果 Megatron 训练启动后 loss 是 NaN，你不会第一时间从哪里查？
+        text: 因为 None 表示跳过本轮。
+    explanation: |
+      PyTorch optimizer 的 `step()` 常返回 `None`。本关把它视为成功，只有 `False`
+      或 dict 中 `success=False` 表示 skip。
+
+  - id: q5_lifecycle_evidence
+    prompt: |
+      `run_lifecycle.py` 的 `acceptance.json` 主要提供什么证据？
     options:
       - id: a
-        text: batch/loss 函数
-      - id: b
-        text: precision/lr/optimizer
-      - id: c
-        text: checkpoint resume 状态
-      - id: d
-        text: OpenAI HTTP streaming response
+        text: tiny lifecycle 中 loss drop、restart lr 和 final loss 的本地验收结果。
         correct: true
-    explanation: "HTTP streaming 是 serving 边界，不是 Megatron pretrain 启动 NaN 的第一调查点。"
+      - id: b
+        text: 真实 8 卡 Megatron 训练吞吐。
+      - id: c
+        text: tokenizer vocab 完整性。
+      - id: d
+        text: serving KV cache 命中率。
+    explanation: |
+      `acceptance.json` 是本地同构生命周期证据，记录 loss drop、restart 和 final loss。
+      真实集群训练仍要看 torchrun、数据、并行配置和性能指标。

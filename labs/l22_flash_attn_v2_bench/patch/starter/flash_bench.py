@@ -1,4 +1,4 @@
-"""L08.3 Patch · eager vs FlashAttention benchmark."""
+"""L23 Patch · eager vs PyTorch SDPA benchmark."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ def eager_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: b
     # TODO(student): scores = (q @ k.transpose(-2, -1)) * scale
     # TODO(student): if causal, build a [T, T] upper-triangular mask of -inf and add it
     # TODO(student): softmax dim=-1; matmul with v; return [B, H, T, D]
-    raise NotImplementedError("L08.3: implement eager_attention")
+    raise NotImplementedError("L23: implement eager_attention")
 
 
 def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = False) -> torch.Tensor:
     """Use torch.nn.functional.scaled_dot_product_attention (FlashAttention backend on CUDA)."""
     # TODO(student): call F.scaled_dot_product_attention(q, k, v, is_causal=causal)
-    raise NotImplementedError("L08.3: implement flash_attention")
+    raise NotImplementedError("L23: implement flash_attention")
 
 
 def bench_attention(
@@ -42,4 +42,4 @@ def bench_attention(
     #   - record total seconds for num_iters
     # TODO(student): return dict with eager_time_ms / flash_time_ms / speedup / max_abs_diff /
     #               peak_mem_eager_mb / peak_mem_flash_mb (CPU paths fill memory entries with 0.0)
-    raise NotImplementedError("L08.3: implement bench_attention")
+    raise NotImplementedError("L23: implement bench_attention")

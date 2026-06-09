@@ -1,43 +1,296 @@
 id: l02.5_memory_snapshot
-title: GPU Memory Snapshot · 按 Stack 定位泄露
-level: L01.3
-act: 第 1 章：基础设施基本功
-role: 调试学徒
+title: L03 · GPU Memory Snapshot 与按 Stack 定位泄露
+level: L03
+act: 第 1 章：PyTorch 训练系统基础
+role: 显存泄露排查学徒
 priority: 进阶
-estimated_minutes: 60
+estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
   - inspect / dataclasses
 
 patch:
   description: |
-    实现 CPU 友好的 MemoryTracker：记录 alloc/free 与 caller stack，
-    在 dump_snapshot 上层用 find_top_leaks_by_stack 定位 top-k 泄露源。
-    思路与 torch.cuda.memory._record_memory_history + _dump_snapshot 一致，
-    便于过渡到真实 GPU 显存调试。
+    实现 CPU 友好的 MemoryTracker：记录 alloc/free 事件、live allocations
+    和 caller stack，并用 find_top_leaks_by_stack 输出 top-k 泄露来源。
   task_md: labs/l02.5_memory_snapshot/patch/task.md
   starter_file: labs/l02.5_memory_snapshot/patch/starter/memory_snapshot.py
   reference_file: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
   test_command: make patch-test M=l02.5_memory_snapshot
   status_file: labs/l02.5_memory_snapshot/patch/.last_run.json
   test_count: 8
-  test_kind: 行为契约 + 调试场景
+  test_kind: 行为契约 + 泄露归因
 
-source_reading:
-  - title: 通过 Torch Memory Snapshot 分析 VLM RL 训练显存泄露
-    repo_path: github_repo/Awesome-ML-SYS-Tutorial/torch/mem-snapshot/readme.md
+lesson:
+  opening: |
+    L03 解决长时间训练或 rollout 中的显存泄露定位问题。进程可以先正常跑几十步，随后 live allocations 慢慢积累，最后在某个 step OOM。总量指标只能说明显存涨了，Memory Snapshot 要回答的是哪些仍存活的 allocation 来自哪条调用栈。
+
+    本关 patch 是 CPU mock。它不接触真实 CUDA allocator，只保留四个最小概念：alloc/free event、live allocation、caller stack 和按 stack 聚合的 top-k 报告。
+  sections:
+    - title: 长期 OOM 的证据链
+      plain_explanation: |
+        单步峰值 OOM 通常和 batch size、sequence length、activation 或 optimizer state 相关，往往在第一步或前几步出现。泄露型 OOM 的特征是每个 step 留下一点未释放对象，显存曲线慢慢抬高，最后触发 OOM。
+
+        Snapshot 的输入是一段运行窗口中的 alloc/free 历史。中间状态是仍然存活的 allocation 集合。输出是 live bytes 和对应 caller stack。这样排查可以从总量曲线进入具体代码路径。
+      mental_model: |
+        总量指标像水位尺，snapshot 像每条进水管和排水管的账本。
+      why_it_matters: |
+        Hook、closure、cache、request state 和 debug list 都可能留下 GPU tensor。没有 caller stack，只能猜来源。
+      common_confusions:
+        - 把第一步 OOM 和第 200 步 OOM 按同一套步骤排查。
+        - 看到 reserved memory 不下降就直接判定泄露。
+        - 只 dump rank0，忽略 rollout worker 或 serving worker。
+      checkpoint_questions:
+        - 长期泄露型 OOM 的时间特征是什么？
+        - Snapshot 比 `nvidia-smi` 多给了哪类证据？
+        - 多进程系统里 dump 错进程会造成什么问题？
+
+    - title: AllocEvent 和 caller stack
+      plain_explanation: |
+        `AllocEvent` 记录一次分配事实：地址、大小、调用栈和时间戳。地址用于把 free 和 alloc 对上；大小用于计算贡献；调用栈用于归因；时间戳用于和 step 窗口对齐。
+
+        `get_caller_stack(depth)` 用 `inspect.stack()` 取调用者上溯若干层，并格式化成 `file:line:function` 字符串。真实排查里 stack 会包含框架层和 wrapper 噪声，本关先按完整 tuple 作为聚合 key。
+      mental_model: |
+        AllocEvent 是一张带签名路径的分配收据。
+      why_it_matters: |
+        没有 stack 的 snapshot 只能说明漏了多少 bytes，不能把 bytes 指回代码路径。
+      source_refs:
+        - title: Starter AllocEvent
+          repo_path: labs/l02.5_memory_snapshot/patch/starter/memory_snapshot.py
+          lines: [21, 27]
+          note: |
+            L21-L27: `AllocEvent` 明确保存 addr、size、stack 和 timestamp 四个字段。
+        - title: Reference caller stack
+          repo_path: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
+          lines: [19, 21]
+          note: |
+            L19-L21: reference 跳过自身 frame，并把每层 stack 格式化成字符串。
+      common_confusions:
+        - 把本关模拟 addr 当成真实 CUDA 指针。
+        - 记录 size 但不记录 stack，导致无法归因。
+        - 认为 stack 会自动说明释放位置；它主要说明分配来源。
+      checkpoint_questions:
+        - AllocEvent 四个字段分别解决什么问题？
+        - 为什么 stack 要保存成字符串 tuple？
+        - 真实排查中 stack 噪声来自哪里？
+
+    - title: Live Set 才是泄露候选
+      plain_explanation: |
+        `_events` 是历史流水，`_live` 是当前现场。`alloc` 会写入两者；`free` 会从 `_live` 移除对应 event，并在找到 event 时记录 free 历史。`dump_snapshot` 的 `total_leaked_bytes` 只汇总 `_live`。
+
+        disabled tracker、unknown addr 和 double free 都要有稳定边界。调试工具如果在清理路径里频繁抛错，会干扰原本要观察的训练或服务。
+      mental_model: |
+        `_events` 回放过去，`_live` 描述此刻还没结清的账。
+      why_it_matters: |
+        正常训练会产生大量临时 allocation。把历史 alloc 全算成泄露，会把正常 forward/backward 误报。
+      source_refs:
+        - title: Tracker states
+          repo_path: labs/l02.5_memory_snapshot/patch/starter/memory_snapshot.py
+          lines: [40, 47]
+          note: |
+            L40-L47: starter 初始化 events、live、enabled 和 next_addr 四个核心状态。
+        - title: Reference alloc
+          repo_path: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
+          lines: [37, 45]
+          note: |
+            L37-L45: enabled 状态下 alloc 生成 addr、创建 event，并同时写入 events 和 live。
+        - title: Reference free
+          repo_path: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
+          lines: [47, 52]
+          note: |
+            L47-L52: free 从 live 中弹出 event，未知地址返回，找到 event 时才记录 free。
+        - title: Reference snapshot
+          repo_path: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
+          lines: [54, 59]
+          note: |
+            L54-L59: snapshot 暴露 events、live_allocations 和 live bytes 总量。
+      common_confusions:
+        - 把所有历史 alloc 当成泄露。
+        - stop 后继续记录 alloc，污染录制窗口。
+        - double free 抛错导致原始排查流程中断。
+      checkpoint_questions:
+        - events 和 live 分别回答什么问题？
+        - disabled 状态下 `alloc` 应该怎样行为？
+        - 为什么 `total_leaked_bytes` 只看 live allocations？
+
+    - title: Stack 聚合与 top-k
+      plain_explanation: |
+        单个 live allocation 往往只是碎片。`find_top_leaks_by_stack` 把 live allocations 按完整 stack tuple 分组，把同一组的 size 累加，再按累计 bytes 降序取前 k 个。这样输出可以作为排查队列。
+
+        top stack 不是自动判决。它可能是合法 cache，也可能是真泄露。后续要结合 request、episode、step 和释放路径判断它是否应该继续存活。
+      mental_model: |
+        聚合把许多小收据合并成按签名路径排序的欠款表。
+      why_it_matters: |
+        真实 snapshot 里 allocation 数量很大。top-k 聚合能把阅读范围缩小到贡献最大的几条路径。
+      source_refs:
+        - title: Reference aggregation
+          repo_path: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
+          lines: [62, 69]
+          note: |
+            L62-L69: 聚合函数读取 live_allocations，按 stack 累加 size，并返回降序 top-k。
+        - title: Grouping test setup
+          repo_path: labs/l02.5_memory_snapshot/patch/tests/test_patch.py
+          lines: [81, 89]
+          note: |
+            L81-L89: 测试制造两个 stack，stack_a 重复分配，stack_b 单次大分配。
+        - title: Grouping test assertion
+          repo_path: labs/l02.5_memory_snapshot/patch/tests/test_patch.py
+          lines: [90, 97]
+          note: |
+            L90-L97: 断言 top 结果按累计 bytes 降序，并保留原始 stack tuple。
+      common_confusions:
+        - 按 addr 聚合，导致每次分配都是独立项。
+        - 只看 allocation 个数，忽略 bytes 贡献。
+        - 把 top stack 直接写成 bug，缺少生命周期判断。
+      checkpoint_questions:
+        - 本关聚合 key 是什么？
+        - 为什么排序指标是累计 bytes？
+        - top stack 出现后还要做哪些源码判断？
+
+    - title: 测试闭环和真实边界
+      plain_explanation: |
+        patch-test 用 8 个 CPU tests 锁定最小合同：disabled、alloc/free 平衡、未释放泄露、double free、snapshot shape、stack 聚合、top-k 和 caller stack 格式。这些测试足以证明 mock tracker 的行为正确。
+
+        真实 PyTorch snapshot 会包含 allocator segment、block、stream、device 和更复杂的 stack 信息。迁移时要补上 rank/worker、dump 窗口、snapshot 开销和业务生命周期判断。
+      mental_model: |
+        Patch test 验证调试工具的语义，真实 incident 还要验证 dump 的进程和窗口。
+      why_it_matters: |
+        很多 snapshot 误判来自证据采错位置：进程不对、窗口不对、或把 allocator cache 当成 tensor 泄露。
+      source_refs:
+        - title: Disabled test
+          repo_path: labs/l02.5_memory_snapshot/patch/tests/test_patch.py
+          lines: [21, 27]
+          note: |
+            L21-L27: disabled 状态下 alloc 返回 -1，snapshot 不应出现泄露。
+        - title: Balance test
+          repo_path: labs/l02.5_memory_snapshot/patch/tests/test_patch.py
+          lines: [30, 39]
+          note: |
+            L30-L39: alloc 后 free 应清空 live allocations，并让泄露总量归零。
+        - title: Caller stack test
+          repo_path: labs/l02.5_memory_snapshot/patch/tests/test_patch.py
+          lines: [114, 120]
+          note: |
+            L114-L120: `get_caller_stack` 必须返回字符串 tuple，第一帧指向调用者。
+      common_confusions:
+        - CPU patch 通过就认为真实 CUDA allocator 行为已经验证。
+        - 只保存 snapshot 文件路径，没有保存 rank、step 和命令。
+        - 看到 top stack 后不复测修复效果。
+      checkpoint_questions:
+        - 8 个 tests 各自覆盖哪类边界？
+        - 真实 snapshot 相比本关 mock 多出哪些信息？
+        - 修复后应该用什么证据证明泄露消失？
 
 mini_infra_targets:
   - mini_infra/gpu/
-
 notebooks:
   - notebooks/n21_memory_snapshot_walk.ipynb
-
 prereq: l02_pytorch_systems
 next_lab: l03_nccl_ddp_smoke
-
 gpu_modes:
   local: CPU OK
-  cluster: 真 GPU 上用 torch.cuda.memory._dump_snapshot 验证
+  cluster: 可换真 PyTorch CUDA memory snapshot 验证
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l02.5_memory_snapshot/system_map.md
+    description: L03 在训练系统基础路线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l02.5_memory_snapshot/lecture.md
+    description: 从长期 OOM、snapshot 数据模型、live set、stack 聚合讲到真实排查边界。
+  - title: 源码带读讲义
+    path: labs/l02.5_memory_snapshot/source_walkthrough.md
+    description: 按 starter、reference、tests 组织的源码阅读路线。
+
+source_reading:
+  - title: Memory Snapshot starter
+    repo_path: labs/l02.5_memory_snapshot/patch/starter/memory_snapshot.py
+    focus: 学生要补齐的事件记录、live set 和聚合接口。
+    highlights:
+      - title: AllocEvent 数据模型
+        lines: [21, 27]
+        note: |
+          L21-L27: `AllocEvent` 定义一次 allocation 的地址、大小、调用栈和时间戳。
+      - title: caller stack TODO
+        lines: [29, 37]
+        note: |
+          L29-L37: `get_caller_stack` 要跳过自身 frame，返回 `file:line:function` 字符串 tuple。
+      - title: tracker 内部状态
+        lines: [40, 47]
+        note: |
+          L40-L47: `_events`、`_live`、`_enabled` 和 `_next_addr` 是最小 tracker 的全部状态。
+      - title: alloc TODO
+        lines: [57, 67]
+        note: |
+          L57-L67: `alloc` 要在 enabled 时生成新 addr，并准备创建 `AllocEvent`。
+      - title: free TODO
+        lines: [73, 81]
+        note: |
+          L73-L81: `free` 要处理 disabled、负地址、未知地址和已知地址释放。
+      - title: snapshot TODO
+        lines: [83, 91]
+        note: |
+          L83-L91: `dump_snapshot` 要返回 events、live_allocations 和 total_leaked_bytes。
+      - title: top-k TODO
+        lines: [94, 102]
+        note: |
+          L94-L102: 聚合函数要按 stack tuple 求和，并返回累计 bytes 最大的前 k 项。
+
+  - title: Memory Snapshot reference
+    repo_path: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
+    focus: 参考实现中的状态推进顺序和边界处理。
+    highlights:
+      - title: start / stop
+        lines: [31, 35]
+        note: |
+          L31-L35: start 和 stop 只切换 `_enabled`，不清空已有事件和 live set。
+      - title: alloc 状态推进
+        lines: [37, 45]
+        note: |
+          L37-L45: enabled alloc 生成地址、推进 next_addr、创建 event，并写入 events/live。
+      - title: free 边界
+        lines: [47, 52]
+        note: |
+          L47-L52: disabled、负地址和未知地址不会抛错；已知地址会记录 free event。
+      - title: snapshot 输出
+        lines: [54, 59]
+        note: |
+          L54-L59: snapshot 的泄露总量只统计当前 live allocations。
+      - title: stack 聚合
+        lines: [62, 69]
+        note: |
+          L62-L69: 函数按完整 stack tuple 聚合 size，降序排序后截断 top-k。
+
+  - title: Patch tests
+    repo_path: labs/l02.5_memory_snapshot/patch/tests/test_patch.py
+    focus: 8 个 CPU tests 锁定 patch 行为合同。
+    highlights:
+      - title: disabled tracker
+        lines: [21, 27]
+        note: |
+          L21-L27: 未 start 时 alloc 返回 -1，snapshot 不应出现泄露。
+      - title: alloc/free balance
+        lines: [30, 39]
+        note: |
+          L30-L39: 分配后释放应清空 live allocations，并让 total_leaked_bytes 为 0。
+      - title: leak case
+        lines: [42, 50]
+        note: |
+          L42-L50: 只 alloc 不 free 时，snapshot 应保留一个 live allocation。
+      - title: double free safe
+        lines: [53, 62]
+        note: |
+          L53-L62: 重复释放和释放未知地址都不能让测试失败。
+      - title: snapshot shape
+        lines: [65, 76]
+        note: |
+          L65-L76: snapshot 必须包含三类 key，并正确计算 live bytes。
+      - title: top-k ordering
+        lines: [100, 111]
+        note: |
+          L100-L111: top-k 结果需要按 bytes 降序，并尊重 k 的截断。
+      - title: caller stack shape
+        lines: [114, 120]
+        note: |
+          L114-L120: caller stack 返回 tuple，元素是字符串，第一帧包含调用者函数名。

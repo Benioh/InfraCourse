@@ -1,5 +1,5 @@
 """
-WebDataset 风格 pipeline 模拟入口（L06.3 教学）。
+WebDataset 风格 pipeline 模拟入口（L19 教学）。
 
 教学目的：
     把 "tar shard → ShardList → split_by_node → split_by_worker → decode → batch"

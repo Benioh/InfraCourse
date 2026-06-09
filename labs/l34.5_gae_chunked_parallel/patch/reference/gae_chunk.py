@@ -1,4 +1,4 @@
-"""Reference solution for L11.7 · Chunked GAE (numerically equivalent to naive)."""
+"""Reference solution for L40 · Chunked GAE."""
 
 from __future__ import annotations
 

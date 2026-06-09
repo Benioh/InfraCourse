@@ -1,33 +1,55 @@
 mission: l34_grpo
-title: L11.8 Quiz · GRPO / RLOO
-pass_threshold: 0.8
+title: L39 Quiz · GRPO / RLOO
+pass_threshold: 1.0
 description: |
-  这 5 题确认你能讲清 GRPO 为什么 critic-free 还能稳定。
+  检查学习者是否理解 critic-free advantage、RLOO baseline、ratio clip、reference KL 和 mask 归一化。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L39 在 RL 主线中的位置
+    kind: doc
+    path: labs/l34_grpo/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 GRPO/RLOO 到 loss 和 smoke
+    kind: doc
+    path: labs/l34_grpo/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、测试、reward、PPO utils 和 smoke 阅读
+    kind: doc
+    path: labs/l34_grpo/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l34_grpo/patch/task.md
-  - title: 读 DeepSeek-R1 论文 GRPO 节
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 patch reference
     kind: source
-    path: https://arxiv.org/abs/2501.12948
+    path: labs/l34_grpo/patch/reference/grpo.py
+    estimate_min: 8
+  - title: 对照 SLiME PPO utils
+    kind: source
+    path: github_repo/slime/slime/utils/ppo_utils.py
+    estimate_min: 15
 
 questions:
   - id: q1_critic_free
-    prompt: GRPO 相对 PPO 的核心结构差异？
+    prompt: GRPO 相对带 value critic 的 PPO，核心差异是什么？
     options:
       - id: a
-        text: 不需要 value model；advantage 来自同 prompt 的 G 个 sample 间的相对 reward
+        text: 不训练 value model，advantage 来自同 prompt 多条 response 的相对 reward
         correct: true
       - id: b
         text: 不再需要 reward
       - id: c
-        text: 不需要 reference policy
+        text: 不再需要 reference policy 或 KL
       - id: d
-        text: 必须用 fp8
-    explanation: "GRPO 用 group-relative baseline 替代 critic，节省一倍参数。"
+        text: 必须使用 fp8
+    explanation: "GRPO 用 group-relative reward 构造 baseline，但仍需要 reward 和更新约束。"
   - id: q2_advantage
-    prompt: GRPO 的 advantage 公式？
+    prompt: GRPO advantage 的最小公式是什么？
     options:
       - id: a
         text: A_i = (r_i - mean(r)) / (std(r) + eps)
@@ -37,44 +59,44 @@ questions:
       - id: c
         text: A_i = r_i - V(s)
       - id: d
-        text: A_i = log π(y|x)
-    explanation: "组内归一化是 GRPO 关键。"
+        text: A_i = log pi(y|x)
+    explanation: "L39 patch 对同一 prompt 的 rewards 做组内归一化。"
   - id: q3_rloo
-    prompt: RLOO 与 GRPO 的差异？
+    prompt: RLOO baseline 的关键点是什么？
     options:
       - id: a
-        text: RLOO 用 leave-one-out 平均（A_i = r_i - mean_{j≠i} r_j），低偏差
+        text: 第 i 条 response 的 baseline 要排除 r_i 本身
         correct: true
       - id: b
-        text: RLOO 必须 fp16
+        text: baseline 等于所有 prompts 的全局均值
       - id: c
-        text: RLOO 不再需要 reward
+        text: baseline 必须来自 value model
       - id: d
-        text: RLOO 与 PPO 完全一样
-    explanation: "RLOO 给 r_i 排除自己的 baseline，更 unbiased。"
-  - id: q4_clip
-    prompt: PPO/GRPO 的 ratio clip 目的是？
+        text: baseline 等于 0
+    explanation: "RLOO 是 leave-one-out baseline。"
+  - id: q4_mask
+    prompt: mask 在 grpo_loss 中应影响哪些量？
     options:
       - id: a
-        text: 防止单步策略漂移过大，trust-region 近似
+        text: policy_loss、kl_loss、ratio_mean 和 ratio_clipped_frac
         correct: true
       - id: b
-        text: 提升吞吐
+        text: 只影响 report.md
       - id: c
-        text: 改变 reward
+        text: 只影响 reward parser
       - id: d
-        text: 替代 KL
-    explanation: "ratio = exp(log π - log π_old)；clip 在 [1-ε, 1+ε] 限制偏移。"
+        text: 不影响任何平均
+    explanation: "completion mask 决定哪些 token 参与训练和指标归一化。"
   - id: q5_kl
-    prompt: GRPO 在 PPO 之外通常还加显式 KL（β·KL(π_θ || π_ref)）的原因？
+    prompt: L39 patch 中 reference KL 的作用是什么？
     options:
       - id: a
-        text: 防止策略偏离 SFT 模型太远，对齐风格不丢
+        text: 约束当前 policy 不要离 reference policy 太远
         correct: true
       - id: b
-        text: 只是为了好看
+        text: 替代 reward
       - id: c
-        text: 替代 advantage
+        text: 删除 old_log_probs
       - id: d
-        text: 让 loss 变小
-    explanation: "KL anchor 在 reward 不靠谱时仍能保持 base policy 行为。"
+        text: 让 group size 自动变大
+    explanation: "KL 是 policy 更新的锚点，和 ratio clip 一起限制更新幅度。"

@@ -1,4 +1,4 @@
-"""Reference solution for L01 Patch · 显存账本."""
+"""Reference solution for L02 Patch · 显存账本."""
 
 from __future__ import annotations
 

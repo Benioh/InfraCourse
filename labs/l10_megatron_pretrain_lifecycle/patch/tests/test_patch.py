@@ -1,4 +1,4 @@
-"""L04.8 Patch tests · CPU only."""
+"""L11 Patch tests · CPU only."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    return importlib.import_module(f"{os.environ.get('IMPL', 'starter')}.train_step")
+    return importlib.import_module(f"{os.environ.get('IMPL') or 'starter'}.train_step")
 
 
 class DummyOptimizer:

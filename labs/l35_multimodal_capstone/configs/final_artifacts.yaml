@@ -13,7 +13,7 @@ artifacts:
   - architecture.mmd
   - risk_register.md
   - stage_reports/env.md
-  - stage_reports/data.md
   - stage_reports/training.md
   - stage_reports/serving.md
   - stage_reports/rl.md
+  - stage_reports/other.md

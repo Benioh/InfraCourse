@@ -1,8 +1,4 @@
-"""
-L11.7 Patch · GAE 分 chunk 并行计算
-
-灵感来源：Awesome-ML-SYS-Tutorial / rlhf/slime/batch-GAE/ppo-gae-chunk.md
-slime 实测约 100-300× 加速。数学上与 naive 反向递推完全等价。
+"""L40 Patch · GAE chunked parallel.
 
 填空规则：
 - TODO(student) 必须自己写
@@ -45,7 +41,7 @@ def gae_naive(
     #       next_value = v_t
     #       next_adv = adv
     #   return advantages
-    raise NotImplementedError("L11.7: implement gae_naive")
+    raise NotImplementedError("L40: implement gae_naive")
 
 
 def gae_chunked_parallel(
@@ -99,4 +95,4 @@ def gae_chunked_parallel(
     #       next_value = values[..., start]
     #
     #   return advantages
-    raise NotImplementedError("L11.7: implement gae_chunked_parallel")
+    raise NotImplementedError("L40: implement gae_chunked_parallel")

@@ -1,11 +1,9 @@
-# Debug Tickets — L09.8
+# L29 Debug Tickets
 
-| Ticket | 故障形态 | 主要练什么 |
-|---|---|---|
-| `sft_eos_truncation` | 推理时模型不停说，根因是 SFT 数据末尾没 EOS | EOS 必须算入 assistant loss |
-| `sft_loss_dropping_too_fast` | 100 步内 loss 几乎归零 → over-fit Alpaca 5k | lr / regularization / val split |
-| `sft_user_loss_leak` | 模型学会复述 user prompt | labels 必须 -100 屏蔽 prompt |
-| `sft_pad_token_collision` | pad_id == eos_id 导致 attention_mask 错 | pad 与 eos 必须在 mask 上区分 |
-| `sft_role_drift` | 推理 chat template 与训练不一致 | tokenizer.apply_chat_template 一致性 |
-
-工单 YAML 在 `InfraCourse/tickets/`。
+| Ticket | Stage | Symptom | First Check |
+|---|---|---|---|
+| `sft_user_loss_leak` | Tokenization | 模型学会复述 user prompt | 检查 user segment labels 是否全为 `-100` |
+| `sft_assistant_mask_empty` | Tokenization | loss 很低但模型没有学到回答 | 检查 assistant token 是否被保留到 labels |
+| `sft_eos_missing` | Generation | 推理时回答不停止 | 检查 assistant 段末尾 EOS 是否进入 labels |
+| `sft_pad_loss_leak` | Padding | pad token 被模型学习 | 检查 pad 的 labels 和 attention mask |
+| `sft_template_mismatch` | Serving / Train | 训练可用，推理格式漂移 | 对齐训练 tokenizer 和推理 chat template |

@@ -1,4 +1,4 @@
-"""Reference solution for L11 Patch · WeightSyncCoordinator."""
+"""Reference solution for L36 Patch · WeightSyncCoordinator."""
 
 from __future__ import annotations
 

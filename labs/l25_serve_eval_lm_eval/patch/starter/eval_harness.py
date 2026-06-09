@@ -1,4 +1,4 @@
-"""L08.8 Patch · 最小评测 harness。"""
+"""L26 Patch · 最小评测 harness。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ def extract_first_number(text: str) -> float | None:
     """Extract the first signed decimal number, ignoring $/% and thousands ','."""
     # TODO(student): regex like r"-?\$?\d{1,3}(,\d{3})*(\.\d+)?%?"
     # TODO(student): strip $ , %; convert to float
-    raise NotImplementedError("L08.8: implement extract_first_number")
+    raise NotImplementedError("L26: implement extract_first_number")
 
 
 def score_exact_match(prediction: str, reference: str) -> bool:

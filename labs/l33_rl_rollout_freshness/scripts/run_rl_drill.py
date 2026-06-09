@@ -1,8 +1,9 @@
-"""L11.5 · Drive student's versioned RolloutManager through a tiny RL loop."""
+"""L38 · Drive student's versioned RolloutManager through a tiny RL loop."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import statistics
 import sys
@@ -31,6 +32,15 @@ MISSION_ID = "l33_rl_rollout_freshness"
 
 
 def _impl():
+    requested = os.environ.get("IMPL")
+    if requested == "reference":
+        from reference import rollout_manager as mod  # type: ignore[import-not-found]
+
+        return mod, "reference"
+    if requested == "starter":
+        from starter import rollout_manager as mod  # type: ignore[import-not-found]
+
+        return mod, "starter"
     try:
         from starter import rollout_manager as mod  # type: ignore[import-not-found]
 
@@ -200,7 +210,7 @@ weight sync 节奏的关系。
 update 时间戳同时输出到 wandb。
 
 ## 11. 下一步
-进入 L12 capstone。
+进入 L39 GRPO。
 """,
     )
     print(run_dir)

@@ -27,11 +27,26 @@ export default async function DashboardPage() {
         />
       </div>
 
-      <Panel title="推荐下一条命令" eyebrow="Patch Track / 写补丁 + 跑测试">
-        <CommandBlock command={recommendedCmd} />
-        <p className="mt-2 text-sm text-quest-muted">
-          每关只做一件事：改 <code>patch/starter/</code> 里的代码，跑过测试就过关。
-        </p>
+      <Panel title="先听一小节课，再做一个小补丁" eyebrow="Lesson First / 先上课，再做题">
+        <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+          <div className="text-sm leading-7 text-quest-ink">
+            <p>每关都像一篇教学博客：先讲背景，再穿插源码，最后用 Quiz 和 Patch 检查你是否真的懂。</p>
+            <p className="mt-2 text-quest-muted">不要一进来就跑命令或读完整源码。先进入本关讲义，跟着高亮片段看真实实现。</p>
+            {active ? (
+              <Link
+                href={withPublicPrefix(`/missions/${active.id}#lesson`)}
+                className="mt-4 inline-flex rounded-full bg-quest-accent px-4 py-2 font-medium text-white hover:opacity-90"
+              >
+                进入本关讲义
+              </Link>
+            ) : null}
+          </div>
+          <div>
+            <p className="mb-2 text-[11px] uppercase tracking-eyebrow text-quest-muted">最后验证命令</p>
+            <CommandBlock command={recommendedCmd} />
+            <p className="mt-2 text-sm text-quest-muted">读完讲义、过 Quiz、写完 Lab 后，再用它确认实现正确。</p>
+          </div>
+        </div>
       </Panel>
 
       <Panel title="任务队列" eyebrow="按章节顺序学习">
@@ -89,7 +104,7 @@ export default async function DashboardPage() {
                         </div>
                       ) : null}
                       <div className="mt-3 text-xs text-quest-muted">
-                        {mission.patch_test_command ?? "尚未配置 Patch Track"}
+                        {mission.id === dashboard.active_mission ? "当前建议：先进入本关讲义" : (mission.patch_test_command ?? "进入讲义学习")}
                       </div>
                     </div>
                   </div>

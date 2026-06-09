@@ -1,5 +1,5 @@
 """
-L30.5 Patch · CUDA Graph Cache + Memory Savor (CPU 模拟)
+L34 Patch · CUDA Graph Cache + Memory Savor (CPU 模拟)
 
 填空规则：
 - TODO(student) 必须自己写
@@ -50,7 +50,7 @@ class GraphCache:
         #   else:
         #       self.replay_count += 1
         #       return self._graphs[key](*args, **kwargs)
-        raise NotImplementedError("L30.5: implement capture_or_replay")
+        raise NotImplementedError("L34: implement capture_or_replay")
 
 
 class MemorySavor:
@@ -71,21 +71,21 @@ class MemorySavor:
         #       "data": tensor.detach().clone().cpu(),
         #   }
         #   return handle
-        raise NotImplementedError("L30.5: implement pause")
+        raise NotImplementedError("L34: implement pause")
 
     def resume(self, handle: int) -> torch.Tensor:
         """从字典取出数据，从 pool 移除该 handle，返回 tensor。"""
         # TODO(student):
         #   meta = self._paused.pop(handle)
         #   return meta["data"].clone()
-        raise NotImplementedError("L30.5: implement resume")
+        raise NotImplementedError("L34: implement resume")
 
     def total_paused_bytes(self) -> int:
         """累加所有 paused tensor 的 numel * element_size。"""
         # TODO(student):
         #   return sum(m["data"].numel() * m["data"].element_size() for m in self._paused.values())
-        raise NotImplementedError("L30.5: implement total_paused_bytes")
+        raise NotImplementedError("L34: implement total_paused_bytes")
 
     def is_paused(self, handle: int) -> bool:
         # TODO(student): return handle in self._paused
-        raise NotImplementedError("L30.5: implement is_paused")
+        raise NotImplementedError("L34: implement is_paused")

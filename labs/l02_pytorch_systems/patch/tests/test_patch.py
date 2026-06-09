@@ -1,4 +1,4 @@
-"""L01 Patch tests · run with `make patch-test M=l02_pytorch_systems`. Pure CPU."""
+"""L02 Patch tests · run with `make patch-test M=l02_pytorch_systems`. Pure CPU."""
 
 from __future__ import annotations
 

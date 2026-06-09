@@ -1,5 +1,5 @@
 mission: l11_megatron_scale_optimization
-title: L05 Quiz · DDP Bucketing & Distributed Optimizer
+title: L12 Quiz · DDP Bucketing & Distributed Optimizer
 pass_threshold: 1.0
 description: |
   这 5 题打中 DDP bucketing 与 distributed optimizer 最容易混淆的点：
@@ -7,11 +7,16 @@ description: |
 
 prereq_checklist:
   - title: 读 patch/task.md
-    kind: read
+    kind: task
     path: labs/l11_megatron_scale_optimization/patch/task.md
-  - title: 读 Megatron distributed_data_parallel
+    href: "#patch"
+  - title: 读 L12 主讲义
+    kind: doc
+    path: labs/l11_megatron_scale_optimization/lecture.md
+    href: "#lesson"
+  - title: 对照 Megatron DDP config
     kind: source
-    path: github_repo/Megatron-LM/megatron/core/distributed/
+    path: github_repo/Megatron-LM/megatron/core/distributed/distributed_data_parallel_config.py
   - title: 读 PyTorch DDP reducer 注释
     kind: source
     path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py

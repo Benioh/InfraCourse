@@ -1,5 +1,5 @@
 """
-L02 Patch · 手写 Tensor Parallel Linear
+L06 Patch · 手写 Tensor Parallel Linear
 ========================================
 
 填空规则：
@@ -34,12 +34,12 @@ class _CopyToParallelRegion(torch.autograd.Function):
     def forward(ctx, x: torch.Tensor, group: Optional[dist.ProcessGroup]) -> torch.Tensor:
         ctx.group = group
         # TODO(student): 1 行 — 直接返回 x（identity）
-        raise NotImplementedError("L02 Patch: implement _CopyToParallelRegion.forward")
+        raise NotImplementedError("L06 Patch: implement _CopyToParallelRegion.forward")
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         # TODO(student): 在 ctx.group 上对 grad_output 做 all-reduce(SUM)，再返回 (grad_output, None)
-        raise NotImplementedError("L02 Patch: implement _CopyToParallelRegion.backward")
+        raise NotImplementedError("L06 Patch: implement _CopyToParallelRegion.backward")
 
 
 class _ReduceFromParallelRegion(torch.autograd.Function):
@@ -49,12 +49,12 @@ class _ReduceFromParallelRegion(torch.autograd.Function):
     def forward(ctx, x: torch.Tensor, group: Optional[dist.ProcessGroup]) -> torch.Tensor:
         ctx.group = group
         # TODO(student): 对 x 做 all-reduce(SUM) inplace 然后返回 x
-        raise NotImplementedError("L02 Patch: implement _ReduceFromParallelRegion.forward")
+        raise NotImplementedError("L06 Patch: implement _ReduceFromParallelRegion.forward")
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         # TODO(student): backward 是 identity；返回 (grad_output, None)
-        raise NotImplementedError("L02 Patch: implement _ReduceFromParallelRegion.backward")
+        raise NotImplementedError("L06 Patch: implement _ReduceFromParallelRegion.backward")
 
 
 class _GatherAlongLastDim(torch.autograd.Function):
@@ -70,14 +70,14 @@ class _GatherAlongLastDim(torch.autograd.Function):
         # TODO(student):
         #   1. 在最后一维 all-gather x 的所有分片
         #   2. 把 list[tensor] 拼成一个 tensor 返回
-        raise NotImplementedError("L02 Patch: implement _GatherAlongLastDim.forward")
+        raise NotImplementedError("L06 Patch: implement _GatherAlongLastDim.forward")
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         if ctx.world_size == 1:
             return grad_output, None
         # TODO(student): 把 grad_output 沿最后一维切成 world_size 份，返回当前 rank 那一份
-        raise NotImplementedError("L02 Patch: implement _GatherAlongLastDim.backward")
+        raise NotImplementedError("L06 Patch: implement _GatherAlongLastDim.backward")
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ class ColumnParallelLinear(nn.Module):
         #   2. 用 kaiming_uniform_(a=sqrt(5)) 初始化（与 nn.Linear 一致）
         #   3. 如果 bias，创建本地 bias self.bias，shape = (out_per_partition,)，初始化为 uniform(-bound, bound)，bound = 1/sqrt(in_features)
         #   4. 否则 self.register_parameter("bias", None)
-        raise NotImplementedError("L02 Patch: implement ColumnParallelLinear.__init__ params")
+        raise NotImplementedError("L06 Patch: implement ColumnParallelLinear.__init__ params")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # TODO(student):
@@ -139,7 +139,7 @@ class ColumnParallelLinear(nn.Module):
         #   3. if self.gather_output: out = _GatherAlongLastDim.apply(out_local, self.process_group)
         #      else:                   out = out_local
         #   4. return out
-        raise NotImplementedError("L02 Patch: implement ColumnParallelLinear.forward")
+        raise NotImplementedError("L06 Patch: implement ColumnParallelLinear.forward")
 
 
 class RowParallelLinear(nn.Module):
@@ -195,7 +195,7 @@ class RowParallelLinear(nn.Module):
         #
         # 为什么 bias 要 replicate 不切分？因为在 forward 里 bias 必须在 all-reduce
         # **之后** 加，且只加一次；如果 bias 切分了你就得自己拼回来——多此一举。
-        raise NotImplementedError("L02 Patch: implement RowParallelLinear.__init__ params")
+        raise NotImplementedError("L06 Patch: implement RowParallelLinear.__init__ params")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # TODO(student):
@@ -210,4 +210,4 @@ class RowParallelLinear(nn.Module):
         #   关键陷阱：如果你在第 2 步用 F.linear(x_local, self.weight, self.bias)，
         #   bias 会被加在每个 rank 的 local 输出上，all-reduce 求和后变成 bias × world_size。
         #   test_row_bias_added_once 就是来抓这个 bug 的。
-        raise NotImplementedError("L02 Patch: implement RowParallelLinear.forward")
+        raise NotImplementedError("L06 Patch: implement RowParallelLinear.forward")

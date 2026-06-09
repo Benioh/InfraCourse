@@ -1,79 +1,45 @@
-# L31 扩展 · CoLocate vs Disaggregate Placement
+# L35 扩展 · Co-locate vs Disaggregate Placement
 
-> 这是 L31 的可选扩展。**不在 patch-test 范围内**。
-> 完成后你会理解 RL 框架最关键的 placement 设计选择，并能解释 verl / slime / OpenRLHF / AReaL 各自的取舍。
+这份扩展不在 patch-test 范围内。它用来帮助你把 L35 的 rollout pool 放进真实 RL 资源布局里。
 
 ## 背景
 
-RL 训练的 train engine 与 rollout engine 怎么放在 GPU 上有两种主流策略：
+RL 训练通常同时需要 train engine 和 rollout engine。两者有两种常见部署方式：
 
-- **Co-locate**：两个 engine 在同一组 GPU 上，靠 offload/upload 轮流让出显存。优点是
-  resource utilization 高，缺点是 weight sync 通过 IPC 在同进程间走（见 L32.5），
-  以及 engine 切换时需要 memory savor pause/resume（见 L30.5）。verl 默认走这条路。
-- **Disaggregate**：train 与 rollout 在不同 GPU 资源组，常驻。weight sync 通过 NCCL/IB
-  跨组传递（见 L32.5 三种接口对比里的 `update_weights_from_distributed`）。优点是
-  避免 offload/upload 开销，缺点是显存利用率低，rollout 扩缩容协议复杂。AReaL / SLiME
-  支持这条路。
+| 方式 | 特点 | 代价 |
+|---|---|---|
+| Co-locate | 训练和 rollout 共享同一组 GPU，靠 pause/resume、offload 或 upload 轮流使用显存 | 切换和显存整理成本高，调度实现复杂 |
+| Disaggregate | 训练和 rollout 常驻不同 GPU 资源组，weight sync 跨组传参 | 显存利用率较低，扩缩容和同步协议更复杂 |
 
-L31 主线 `RolloutPool` 与 placement 无关。本扩展让你把这两种 driver 都写出来。
+L35 主线只实现 `RolloutPool` 的并发控制，不实现 placement driver。扩展练习的目标是让你能解释：为什么并发上限、placement 和 weight sync 必须一起看。
 
-## 你要扩展什么
+## 可选扩展接口
 
-在 `patch/starter/rollout_pool.py` 同目录新建 `patch/starter/placement_drivers.py`：
+在 `patch/starter/rollout_pool.py` 同目录新建 `placement_drivers.py`：
 
 ```python
 class PlacementDriver:
     async def rollout_step(self, prompts: list[str]) -> list[str]: ...
     async def sync_weights(self, train_state: dict) -> None: ...
 
+
 class CoLocateDriver(PlacementDriver):
-    """每个 step：
-        1. memory_savor.pause(train_state)
-        2. memory_savor.resume(rollout_state)  # restore from previous pause
-        3. await pool.rollout(prompts)
-        4. memory_savor.pause(rollout_state)
-        5. memory_savor.resume(train_state)
-        6. (optional) sync_weights via IPC handle (L32.5 mechanism)
-    """
+    """每个 step 暂停训练状态，恢复 rollout 状态，运行 rollout，再切回训练。"""
+
 
 class DisaggregateDriver(PlacementDriver):
-    """train / rollout 各自常驻；sync 走 NCCL broadcast：
-        - rollout 不 pause/resume
-        - sync_weights 通过 dist.broadcast (跨进程) 推送
-    """
+    """train / rollout 常驻不同资源组，sync_weights 通过跨组通信推送权重。"""
 ```
 
-## 不变量
+## 行为要求
 
-1. `CoLocateDriver` 在每个 step 都触发 pause/resume，`DisaggregateDriver` 不触发。
-2. 两种 driver 跑相同的 prompt 序列，输出 token 序列必须完全一致（除非显式注入 noise）。
-3. `CoLocateDriver` 的 sync_weights 延迟主要是 handle gather + IPC，`DisaggregateDriver`
-   的延迟主要是 NCCL broadcast bandwidth。
+1. `CoLocateDriver` 每个 step 都触发 train/rollout 状态切换。
+2. `DisaggregateDriver` 不在 rollout step 中 pause/resume 训练状态。
+3. 两种 driver 对相同 prompt 序列应返回相同输出，除非显式注入采样噪声。
+4. 复盘时记录 rollout time、sync time、GPU memory 和 server queue。
 
-## 怎么验证
+## 自检问题
 
-自己加 `patch/tests/test_placement.py`（可选）：
-
-```python
-def test_colocate_pause_resume_called_each_step():
-    ...
-
-def test_disaggregate_no_pause_during_step():
-    ...
-
-def test_both_produce_same_outputs():
-    ...
-```
-
-## 写完之后你能做什么
-
-- 在 RL 框架选型时给出 placement 推荐：什么情况下选 co-locate（小集群、资源紧），
-  什么情况下选 disaggregate（大模型、动态扩缩 rollout 节点）。
-- 解释 verl 默认 co-locate、AReaL 默认 disaggregate、SLiME 两者都支持的设计动机。
-- 评估为多模态 RL 选哪种更合适（提示：图像 encoder 的 batch 弹性会影响选择）。
-
-## 配套阅读
-
-- `github_repo/Awesome-ML-SYS-Tutorial/rlhf/sys-design/readme-1.md` —— 三种 weight sync 接口对比
-- `github_repo/Awesome-ML-SYS-Tutorial/rlhf/areal/code-walk-through_CN.md` —— AReaL disaggregate
-- `github_repo/Awesome-ML-SYS-Tutorial/rlhf/slime/code-walk-through/readme.md` —— SLiME placement
+- 小集群资源紧张时，为什么 co-locate 可能更合适？
+- 大模型或多 rollout 节点场景下，为什么 disaggregate 更容易扩展？
+- `max_concurrency`、server queue 和 weight sync interval 分别限制哪一层吞吐？

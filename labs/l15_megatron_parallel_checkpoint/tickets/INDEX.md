@@ -1,11 +1,11 @@
-# Debug Tickets — L05.8
+# Debug Tickets — L16
 
 | Ticket | 故障形态 | 主要练什么 |
 |---|---|---|
-| `ckpt_tp_mismatch` | resume 时 TP 改了但 strict load 居然不抛错 | parallel_state 校验、format 字段意义 |
-| `ckpt_resume_lr_jump` | resume 后 loss 跳变 / LR 不连续 | scheduler_state、global_step 必须进 checkpoint |
-| `ckpt_missing_marker` | save 之后没有 latest_checkpointed_iteration.txt | save 的"两件套"约定 |
-| `ckpt_strict_silently_skips_unknown_key` | 校验放过了未知 ep 维度 | 校验项前向兼容性 |
-| `ckpt_load_then_save_overwrites_iter` | resume 后又写到同一文件 | iteration 单调 / 文件命名规约 |
+| `ckpt_missing_marker` | checkpoint 文件存在但 latest marker 缺失 | 恢复入口必须由 marker 决定 |
+| `ckpt_tp_mismatch` | 保存 TP 与加载 TP 不一致 | strict parallel_state 校验 |
+| `ckpt_ep_introduced` | 新拓扑引入 EP 后旧 checkpoint 被接受 | 新并行轴也要进入 metadata |
+| `ckpt_resume_lr_jump` | resume 后学习率跳变 | scheduler_state / opt_param_scheduler |
+| `ckpt_optimizer_shard_shape` | optimizer state shape mismatch | distributed optimizer sharding metadata |
 
-工单 YAML 统一放在 `InfraCourse/tickets/`。
+工单 YAML 在 `InfraCourse/tickets/`。

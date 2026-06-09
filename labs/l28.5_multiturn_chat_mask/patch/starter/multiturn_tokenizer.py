@@ -1,5 +1,5 @@
 """
-L28.5 Patch · Multi-turn chat tokenization with loss mask.
+L30 Patch · Multi-turn chat tokenization with loss mask.
 
 填空规则：
 - TODO(student) 必须自己写
@@ -54,4 +54,4 @@ def tokenize_with_loss_mask(
     #
     #   attention_mask = [1] * len(token_ids)
     #   return token_ids, loss_mask, attention_mask
-    raise NotImplementedError("L28.5: implement tokenize_with_loss_mask")
+	    raise NotImplementedError("L30: implement tokenize_with_loss_mask")

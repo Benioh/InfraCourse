@@ -1,83 +1,106 @@
 mission: l27_sglang_pd_cache
-title: L09.5 Quiz · SGLang PD route / KV transfer
+title: L28 Quiz · SGLang PD Disaggregation
 pass_threshold: 1.0
 description: |
-  检查学习者是否理解 SGLang prefill/decode 分离后，route、prefix cache、KV transfer 为什么成为新的系统边界。
+  检查学习者是否理解 prefill/decode 分离、prefix cache 影响范围、KV transfer 边界、worker load metrics 和 complete 释放。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L28 在 Serving PD 链路中的位置
+    kind: doc
+    path: labs/l27_sglang_pd_cache/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 PD 执行模型到 debug 路线
+    kind: doc
+    path: labs/l27_sglang_pd_cache/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、MiniInfra、SGLang 主路径阅读
+    kind: doc
+    path: labs/l27_sglang_pd_cache/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l27_sglang_pd_cache/patch/task.md
-  - title: 读 SGLang DisaggregationService
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 MiniInfra disagg service
     kind: source
-    path: github_repo/sglang/python/sglang/srt/managers/disagg_service.py
-  - title: 读 PD disaggregation
+    path: mini_infra/sglang/srt/managers/disagg_service.py
+    estimate_min: 10
+  - title: 对照 SGLang RadixCache
     kind: source
-    path: github_repo/sglang/docs/advanced_features/pd_disaggregation.md
+    path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+    estimate_min: 15
+  - title: 对照 SGLang scheduler disagg queues
+    kind: source
+    path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+    estimate_min: 15
 
 questions:
-  - id: q1_transfer_boundary
-    prompt: PD disaggregation 中 KV transfer 的系统边界是什么？
+  - id: q1_prefix_scope
+    prompt: prefix cache 命中后，L28 patch 中哪一个值会减少？
     options:
       - id: a
-        text: prefill worker 计算出的 KV 被传给 decode worker 继续生成
+        text: prefill_tokens
         correct: true
       - id: b
-        text: 文本语义相似度
+        text: request_id
       - id: c
-        text: GPU 型号
+        text: 所有 KV transfer 都消失
       - id: d
-        text: optimizer state
-    explanation: "PD 把 prefill 和 decode 放到不同 worker 后，KV 交接就是关键边界。"
-  - id: q2_metrics
-    prompt: DisaggregationService 至少应该暴露什么指标？
+        text: decode worker 数自动增加
+    explanation: "本讲约定 `prefill_tokens = prompt_token_count - cached_prefix_tokens`，但 `kv_transfer_tokens` 仍等于 prompt token 数。"
+  - id: q2_transfer_boundary
+    prompt: L28 中 KVTransfer 表示什么系统边界？
     options:
       - id: a
-        text: kv_transfers、tokens_transferred、prefill/cache tokens、worker load
+        text: prefill worker 计算出的 KV 交给 decode worker 继续生成
         correct: true
       - id: b
-        text: 减少 checkpoint 文件数
+        text: tokenizer vocab 更新
       - id: c
-        text: 增大 LR
+        text: optimizer state 保存
       - id: d
-        text: 改变 tokenizer vocab
-    explanation: "没有 prefill/decode/transfer 的拆分指标，很难判断 PD 分离是优化还是瓶颈。"
-  - id: q3_pd
-    prompt: PD disaggregation 把什么执行阶段分开？
+        text: README 渲染
+    explanation: "PD 分离把 prefill 和 decode 放到不同角色后，KV handoff 是 decode 开始前必须可观测的边界。"
+  - id: q3_route
+    prompt: least-loaded worker 选择为什么还要用 `active_requests` 和 `worker_id` 做 tie-break？
     options:
       - id: a
-        text: prefill worker 和 decode worker
+        text: 让负载相同场景下选择稳定，并避免 active request 数失衡
         correct: true
       - id: b
-        text: README 和 quiz
+        text: 让 prompt token 数变成 0
       - id: c
-        text: Adam m 和 v
+        text: 让 counter 变成 gauge
       - id: d
-        text: image token 和 text token
-    explanation: "prefill/decode 资源画像不同，分离后可独立扩缩容。"
-  - id: q4_risk
-    prompt: PD 分离的新增风险是什么？
+        text: 让 pytest 跳过输入校验
+    explanation: "排序 key 是 `(load_tokens, active_requests, worker_id)`，后两项让平局选择更稳定、更容易复查。"
+  - id: q4_complete
+    prompt: complete_request 后，哪类状态应保留作为审计证据？
     options:
       - id: a
-        text: KV transfer、router misroute、decode starvation
+        text: transfers history
         correct: true
       - id: b
-        text: Python 不能 import
+        text: active route
       - id: c
-        text: 所有请求都会变快
+        text: worker active_requests 的占用
       - id: d
-        text: 不再需要 metrics
-    explanation: "PD 不是免费午餐，路由和 KV 传递会引入新瓶颈。"
-  - id: q5_metrics
-    prompt: prefix cache 命中对 PD 请求的直接影响是什么？
+        text: 负数 worker load
+    explanation: "complete 释放 active route 和 worker load，但历史 transfer 用于复查 handoff，不应清空。"
+  - id: q5_sglang_source
+    prompt: 真实 SGLang 中，Req 在哪里调用 tree cache 做 prefix match？
     options:
       - id: a
-        text: 减少需要 prefill 计算的新 token 数，但仍要看 decode 侧 KV 交接和负载
+        text: "`schedule_batch.py` 的 `Req.init_next_round_input`"
         correct: true
       - id: b
-        text: 自动让所有 KV transfer 消失
+        text: "`quiz.yaml` 的 prereq_checklist"
       - id: c
-        text: 改变 optimizer state
+        text: "`patch/task.md` 的表格"
       - id: d
-        text: 不再需要 metrics
-    explanation: "prefix cache 降低 prefill 计算量，但 PD 性能仍需要拆 prefill、decode、transfer 三层看。"
+        text: "`outputs/README.md` 的文件列表"
+    explanation: "`Req.init_next_round_input` 调用 `tree_cache.match_prefix`，并把 `prefix_indices` 等结果写回 request。"

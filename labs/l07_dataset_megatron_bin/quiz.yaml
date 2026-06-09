@@ -1,84 +1,103 @@
 mission: l07_dataset_megatron_bin
-title: L03.5 Quiz · Megatron IndexedDataset 文件格式
+title: L08 Quiz · Megatron IndexedDataset 数据格式
 pass_threshold: 0.8
 description: |
-  这 5 题确认你能解释 Megatron 为什么用自定义 .bin/.idx 而不是 HuggingFace
-  Arrow / WebDataset。
+  这 5 题检查 `.bin/.idx`、offset/length、dtype、mmap 和真实 Megatron 数据入口。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读 L08 主讲义
+    kind: doc
+    path: labs/l07_dataset_megatron_bin/lecture.md
+    href: "#lesson"
+  - title: 跟源码带读
+    kind: doc
+    path: labs/l07_dataset_megatron_bin/source_walkthrough.md
+    href: "#lesson"
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l07_dataset_megatron_bin/patch/task.md
-  - title: 读 Megatron preprocess_data.py
+    href: "#patch"
+  - title: 对照 preprocess drill 源码
     kind: source
-    path: github_repo/Megatron-LM/tools/preprocess_data.py
-  - title: 读 IndexedDataset 实现
-    kind: source
-    path: github_repo/Megatron-LM/megatron/core/datasets/indexed_dataset.py
+    path: labs/l07_dataset_megatron_bin/scripts/run_preprocess.py
 
 questions:
   - id: q1_layout
-    prompt: Megatron `.bin/.idx` 的核心设计目标是什么？
+    prompt: |
+      本关的 `.bin` 文件保存什么？
     options:
       - id: a
-        text: 通过 mmap 在多 worker 之间零拷贝、低开销随机读，兼容 GPT-style packing
-        correct: true
+        text: 原始 JSONL 文本。
       - id: b
-        text: 强制使用 fp16
+        text: 连续序列化的 token id。
+        correct: true
       - id: c
-        text: 替代 tokenizer
+        text: tokenizer vocab。
       - id: d
-        text: 只支持单卡训练
-    explanation: ".bin/.idx 的关键是 mmap + offset/length 表，方便 streaming + multi-worker。"
-  - id: q2_idx_header
-    prompt: idx 文件头里通常包含什么？
+        text: model checkpoint。
+    explanation: |
+      `.bin` 保存 token id 的连续二进制数组。样本边界保存在 `.idx` 的 offsets 和 lengths 中。
+
+  - id: q2_offset_length
+    prompt: |
+      本关 idx 中 offsets 和 lengths 的单位分别是什么？
     options:
       - id: a
-        text: magic + version + dtype + sample_count + total_tokens
+        text: offsets 是字节偏移，lengths 是 token 个数。
         correct: true
       - id: b
-        text: 完整 tokenizer vocab
+        text: offsets 是 token 个数，lengths 是字节数。
       - id: c
-        text: 完整 model state
+        text: 二者都是字符数。
       - id: d
-        text: HTTP header
-    explanation: "idx 头携带元数据；样本本身在 bin 文件。"
+        text: 二者都是 JSON 行号。
+    explanation: |
+      读取时需要先用 `offset // dtype_bytes` 转成 token 下标，再按 length 切出 token 数。
+
   - id: q3_dtype
-    prompt: 32k vocab 推荐 token id dtype？
+    prompt: |
+      tokenizer 可能产出 token id 70000 时，`uint16` 会怎样？
     options:
       - id: a
-        text: int32（uint16 也可，32k 刚好临界）
+        text: 应该显式报 ValueError，因为 70000 超过 uint16 上限。
         correct: true
       - id: b
-        text: float64
+        text: 自动截断成 4464。
       - id: c
-        text: bool
+        text: 自动改成 float32。
       - id: d
-        text: complex64
-    explanation: "32k vocab 要 ≥ 16 bit；常用 int32 留余量给特殊 token。"
-  - id: q4_random_access
-    prompt: IndexedDataset[i] 必须 O(1) 随机读，靠的是？
+        text: 写入 JSONL。
+    explanation: |
+      `uint16` 最大只能表示 65535。本关要求写入前做 range check，避免 silent wrap。
+
+  - id: q4_mmap
+    prompt: |
+      `IndexedDataset[i]` 为什么应使用 mmap 和 offsets？
     options:
       - id: a
-        text: idx 文件里 offsets 表 + bin 文件 mmap
+        text: 这样可以直接定位目标样本，避免每次读取时全量加载或重新 tokenize。
         correct: true
       - id: b
-        text: 全量 load 到内存
+        text: 这样可以跳过 dtype 检查。
       - id: c
-        text: 调用 HTTP 接口
+        text: 这样会自动训练模型。
       - id: d
-        text: 实时 tokenize
-    explanation: "offset 表把第 i 条直接 seek 到 bin 偏移。"
-  - id: q5_mistake
-    prompt: 做数据 dedup 后再 tokenize 的常见错误？
+        text: 这样能把 vocab 压缩成 1 字节。
+    explanation: |
+      mmap 让多个 reader 共享文件页；offsets/lengths 让第 i 条样本可以直接 seek 和切片。
+
+  - id: q5_data_path
+    prompt: |
+      后续 Megatron pretrain 的 `--data-path` 应该指向什么？
     options:
       - id: a
-        text: dedup 用 raw text 但 tokenize 后某些 token 序列高度重复，未做 sequence-level dedup
+        text: "`<prefix>`，也就是不带 `.bin` 或 `.idx` 后缀的路径。"
         correct: true
       - id: b
-        text: dedup 一定要用 SHA256
+        text: 只指向 `<prefix>.bin`。
       - id: c
-        text: tokenize 必须用 GPU
+        text: 只指向 `<prefix>.idx`。
       - id: d
-        text: dedup 必须删除 BOS token
-    explanation: "高质量 pretrain 数据需要 raw + tokenized 两层 dedup。"
+        text: 指向原始 JSONL。
+    explanation: |
+      Megatron 根据 prefix 找到配套的 `.bin` 和 `.idx`。drill 生成的命令模板也按这个口径传参。

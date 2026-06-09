@@ -1,6 +1,6 @@
 id: l20_vllm_scheduler_kv
 title: vLLM Scheduler 与 KV Block Manager
-level: L07.5
+level: L21
 act: 第 3 章：推理服务
 role: vLLM 调度学徒
 priority: 核心
@@ -24,15 +24,172 @@ patch:
   test_kind: 调度资源语义验证
 
 source_reading:
+  - title: MiniInfra LLMEngine
+    repo_path: mini_infra/vllm/v1/engine/llm_engine.py
+    focus: add_request、step、RequestOutput 生命周期
+    highlights:
+      - title: Engine 持有 KV manager 和 scheduler
+        lines: [20, 23]
+        note: |
+          L20: engine 初始化时接收 running 上限和 KV block 总量。
+          L21: 创建 `KVCacheManager`，把显存资源账本放到 engine 里。
+          L22: 创建 `Scheduler`，并把 KV manager 传进去，调度器才能做 admission。
+          L23: `outputs` 保存 request id 到可返回结果的映射。
+      - title: step 使用 SchedulerOutput 推进 decode
+        lines: [30, 36]
+        note: |
+          L30: `step()` 是 engine 的单步驱动入口。
+          L31: 先调用 `scheduler.schedule()`，让 scheduler 决定本 step 处理谁。
+          L32: 只遍历 `scheduled_decode`，说明 engine 不自行挑请求。
+          L33-L35: running 里找不到请求就跳过，finished 或已删除请求不会继续生成。
+          L36: 给被调度的请求追加一个 token，模拟一次 decode tick。
+  - title: MiniInfra Scheduler
+    repo_path: mini_infra/vllm/v1/core/sched/scheduler.py
+    focus: waiting/running/finished、admission、decode、finished 释放
+    highlights:
+      - title: add_request 只入队
+        lines: [38, 40]
+        note: |
+          L38: `add_request` 接收内部 `Request`。
+          L39: 教学版用 `prompt.split()` 得到 prompt token 数，用来估算 KV block。
+          L40: 新请求只进入 `waiting`，此时不占 KV block。
+      - title: admission 双门
+        lines: [46, 57]
+        note: |
+          L46: 只有 waiting 非空且 running 未满时才尝试 admit。
+          L47: 先查看队首请求，不立刻弹出，避免资源不足时丢请求。
+          L48: 用 prompt token 数估算需要多少 KV block。
+          L49-L52: 调用 KV manager 分配 block，成功后才有运行资源。
+          L53-L54: KV 不足时停止 admit，请求继续留在 waiting。
+          L55-L57: 分配成功后，从 waiting 移到 running，并记录本 step 的 prefill。
+      - title: finished 释放闭环
+        lines: [58, 66]
+        note: |
+          L58: 复制 running items，后面可以安全删除 running 请求。
+          L59: 输出 token 达到 `max_tokens`，请求进入完成路径。
+          L60: 写入 `finished`，保留完成请求的结果状态。
+          L61: 释放该请求占用的 KV blocks。
+          L62-L63: 从 running 删除，并把 request id 写入本 step 输出。
+          L64-L65: 未完成请求进入 `scheduled_decode`。
+          L66: 返回本 step 的调度结果。
+  - title: MiniInfra KVCacheManager
+    repo_path: mini_infra/vllm/v1/core/kv_cache_manager.py
+    focus: KV block owner、allocate_slots、free、snapshot
+    highlights:
+      - title: usage 是已占 block 比例
+        lines: [24, 27]
+        note: |
+          L24-L25: `usage` 暴露 KV cache 使用率。
+          L26: 统计 owner 非空的 block 数。
+          L27: 除以总 block 数，得到 0 到 1 之间的压力指标。
+      - title: allocate_slots 的资源合同
+        lines: [29, 38]
+        note: |
+          L29: 按 request id 和 block 数申请 KV slot。
+          L30-L31: 负数 block 是调用错误，直接拒绝。
+          L32: 找出所有 owner 为空的 block。
+          L33-L34: 空闲块不足时显式失败。
+          L35: 取前 `num_blocks` 个空闲块。
+          L36-L37: 写入 owner，建立 block 到 request 的归属。
+          L38: 返回 block id，供 request 记录自己占用的 KV。
   - title: vLLM LLMEngine
     repo_path: github_repo/vllm/vllm/v1/engine/llm_engine.py
     focus: add_request、step、RequestOutput 生命周期
+    highlights:
+      - title: raw input 转内部 request
+        lines: [241, 252]
+        note: |
+          L241: raw prompt 进入 input processor。
+          L242-L244: request id、prompt、sampling/pooling 参数一起参与内部 request 构造。
+          L245: supported task 约束这次请求能走哪类模型任务。
+          L246-L250: arrival time、LoRA、tokenization、trace、priority 等生产字段进入请求。
+          L252: 提取 prompt text，后续 output processor 需要它维护输出状态。
+      - title: 单请求进入 EngineCore
+        lines: [263, 268]
+        note: |
+          L263: `n == 1` 走单请求主路径。
+          L265: output processor 先建立请求输出状态。
+          L267: request 交给 EngineCore，后续调度在 core 内发生。
+          L268: 返回 request id 给上层。
   - title: vLLM Scheduler
     repo_path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
-    focus: waiting/running、token budget 和调度输出
+    focus: token budget、waiting/running、preemption 和调度输出
+    highlights:
+      - title: token catch-up 调度模型
+        lines: [352, 362]
+        note: |
+          L352: `schedule()` 是真实调度器单步入口。
+          L353-L354: 源码说明真实 scheduler 不固定区分 prefill/decode phase。
+          L355-L357: 每个请求维护 computed tokens 和 tokens with spec。
+          L358-L360: 本 step 分配 token，让 computed 追赶 tokens with spec。
+          L361-L362: 这个模型覆盖 chunked prefill、prefix cache、spec decode 和未来优化。
+      - title: waiting admission 的 KV 容量检查
+        lines: [744, 756]
+        note: |
+          L744-L746: 开启完整输入长度保留时，admission 要先问 KV manager。
+          L747-L752: 检查当前请求、已计算 token、prefix 命中、外部 KV、encoder token。
+          L753-L756: 完整序列放不下时释放 encoder cache，并停止 admit。
+      - title: waiting admission 的 KV 分配
+        lines: [758, 769]
+        note: |
+          L758-L767: 容量检查通过后才调用 `allocate_slots` 分配真实 KV blocks。
+          L758-L760: request 和本 step 新 token 数进入 KV 分配函数。
+          L761-L764: prefix 命中、lookahead、外部 KV 都影响分配。
+          L765-L767: 异步 KV load 和 encoder token 也会进入分配参数。
+          L769: `new_blocks is None` 表示本请求本 step 不能被调度。
+      - title: preemption 释放并回到 waiting
+        lines: [971, 980]
+        note: |
+          L971-L973: 只有 RUNNING 请求可以被抢占。
+          L974: 释放该请求占用的 KV cache。
+          L975: 同步释放 encoder cache。
+          L976: 状态改为 `PREEMPTED`。
+          L977: 已计算 token 清零，后续需要重算。
+          L978-L980: 清 draft token，并累计 preemption 次数。
+      - title: preemption 回到 waiting
+        lines: [984, 985]
+        note: |
+          L984-L985: 请求放回 waiting 队列。
   - title: vLLM KV Cache Manager
     repo_path: github_repo/vllm/vllm/v1/core/kv_cache_manager.py
-    focus: allocate/free KV blocks 与内存压力
+    focus: usage、can_fit_full_sequence、allocate_slots
+    highlights:
+      - title: usage 来自 block pool
+        lines: [162, 169]
+        note: |
+          L162-L163: `usage` 是 KV manager 对外暴露的压力指标。
+          L164-L168: 返回值语义是 0 到 1 之间的 KV cache 使用率。
+          L169: 真实数值来自 block pool，已经不是教学版的本地列表统计。
+      - title: full sequence gate 参数
+        lines: [225, 232]
+        note: |
+          L225-L232: `can_fit_full_sequence` 接收请求、prefix 命中、外部 KV 和 encoder token。
+      - title: full sequence gate 目的
+        lines: [233, 238]
+        note: |
+          L233-L238: 这个 gate 防止 chunked prefill 只看当前小段而过度 admit。
+      - title: full sequence gate 的 token 账
+        lines: [239, 251]
+        note: |
+          L239-L242: 取 prefix cache 命中的 block，没有命中则用空 block 集合。
+          L244-L250: 合并本地已计算 token 和外部 KV token，并受 `max_model_len` 限制。
+          L251: `full_num_tokens` 表示完整序列需要容纳的 token 数。
+      - title: full sequence gate 的 block 账
+        lines: [253, 263]
+        note: |
+          L253-L261: coordinator 计算还要分配多少 KV blocks。
+          L263: 需要的 block 数小于等于 free blocks 时，admission 才能继续。
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l20_vllm_scheduler_kv/system_map.md
+    description: L21 在 Serving 章中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l20_vllm_scheduler_kv/lecture.md
+    description: 从线上现象、核心机制、真实 vLLM 抽象讲到生产排查。
+  - title: 源码带读讲义
+    path: labs/l20_vllm_scheduler_kv/source_walkthrough.md
+    description: 按 MiniInfra 主线和真实 vLLM 主路径组织的读源码路线。
 
 mini_infra_targets:
   - mini_infra/vllm/v1/engine/llm_engine.py
@@ -54,3 +211,273 @@ next_lab: l21_sglang_serving_core
 gpu_modes:
   local: CPU 即可
   cluster: 可对照 vLLM benchmark
+
+lesson:
+  opening: |
+    # 第 21 讲：vLLM Scheduler 与 KV Block Manager
+
+    这一讲讲推理服务的控制面。一个请求到达 OpenAI-compatible API 后，还要经过 engine、scheduler、KV manager 和 worker，才能真正生成 token。scheduler 每一步都要决定哪些请求进入 prefill，哪些请求继续 decode，哪些请求完成并释放 KV cache。KV Cache Manager 负责记录显存块归属，两者共同决定 TTFT、ITL、吞吐、waiting queue 和 KV pressure。
+
+    新版课程按“系统地图 → 主讲义 → 源码带读 → notebook → quiz → patch → drill → 课后产物”的顺序组织。lab 只检查最小合同：请求如何从 waiting 进入 running，KV block 如何分配，running 请求如何进入 decode，finished 请求如何释放 KV。
+  sections:
+    - title: 课程定位：先看系统，再写 patch
+      plain_explanation: |
+        L21 属于 Serving control plane。它连接 L20 的服务入口和后续 SGLang、Spec Decode、PD 分离与观测课程。学习这节课时，先读 `system_map.md`，把 OpenAI facade、LLMEngine、Scheduler、KVCacheManager、Worker 的位置放进同一张图；再读 `lecture.md`，按问题、机制、源码和生产排查的顺序理解；最后用 `source_walkthrough.md` 带着问题读源码。
+
+        这节课的 patch 很小。它不是课程主体，只是检查你是否掌握了请求生命周期和 KV 资源合同。写代码前，应该能完整讲出这条链：`prompt length -> blocks_needed -> allocate_slots -> running admission -> scheduled_decode -> output token -> finished -> free KV blocks`。
+      mental_model: |
+        把 vLLM serving 想成一个调度台：入口收工单，engine 驱动循环，scheduler 决定本轮谁能动，KV manager 管显存车位，worker 执行模型计算。
+      why_it_matters: |
+        真实 vLLM 源码分支很多。先建立系统地图，再看主路径，学生更容易分清主线、扩展功能和暂时可以跳过的细节。
+      common_confusions:
+        - 直接打开 patch 猜测试，跳过系统位置和请求生命周期。
+        - 把 HTTP 入口、engine loop、scheduler 和 worker 混成一层。
+      checkpoint_questions:
+        - L21 在 Serving 章里解决的是协议入口、控制面、执行层，还是采样算法？
+        - 写 patch 前，你能否画出请求从 API 到 KV manager 的路径？
+
+    - title: 问题入口：为什么 HTTP 200 了，首 token 还很慢
+      plain_explanation: |
+        线上 serving 问题经常表现为：HTTP 请求都返回 200，GPU 利用率也不低，但用户等待首 token 的时间变长，waiting queue 增长，KV cache usage 接近上限。这个时候只看 HTTP 层或 GPU 利用率无法解释问题。请求到达入口，只说明服务接住了请求；它是否被 scheduler admit、是否拿到 KV block、是否已经完成 prefill，还要继续往下看。
+
+        这节课从这个现象进入。TTFT 变慢时，要把请求生命周期拆成 queue、tokenization、prefill、KV admission、decode 和 output processing。L21 主要讲 queue、scheduler admission 和 KV pressure 三个环节。
+      mental_model: |
+        HTTP 200 像前台收到了订单；首 token 慢通常发生在后厨排队、拿不到工位、或者前一道工序占满资源。
+      why_it_matters: |
+        只看吞吐或 HTTP 状态，很容易把调度问题误判成模型计算慢。拆开请求生命周期，排查才有方向。
+      common_confusions:
+        - HTTP 请求成功就等于请求已经开始生成。
+        - GPU 忙就等于每个请求都公平拿到了 first token。
+      checkpoint_questions:
+        - TTFT 升高时，你会先看 waiting queue、KV usage，还是只看 requests/sec？
+        - HTTP 层和 scheduler 层分别能证明什么？
+
+    - title: 请求路径：OpenAI API 到 Engine，再到 Scheduler
+      plain_explanation: |
+        MiniInfra 的 OpenAI facade 把 chat messages 拼成 prompt，然后调用 `LLMEngine.add_request`。Engine 内部持有 `KVCacheManager` 和 `Scheduler`。每次 `step()` 时，engine 调用 `scheduler.schedule()`，再给 `scheduled_decode` 里的 running 请求追加一个 token。完成请求会被包装成 `RequestOutput`。
+
+        真实 vLLM 的外层 `LLMEngine.add_request` 会把 raw prompt 或 EngineInput 处理成内部 request，交给 EngineCore；`step()` 从 EngineCore 拿输出，再交给 output processor 生成用户可见的输出。主线依然清楚：入口整理请求，engine 驱动循环，scheduler 决定本 step 的执行计划。
+      mental_model: |
+        请求像一张工单：入口登记工单，engine 推动工单流转，scheduler 决定本轮哪些工单进入加工区。
+      why_it_matters: |
+        读源码时先分清层次，才知道 TTFT、ITL、waiting、KV usage 分别应该在哪个边界观察。
+      source_refs:
+        - repo_path: mini_infra/vllm/entrypoints/openai/api_server.py
+          lines: [18, 22]
+          title: MiniInfra OpenAI-compatible facade
+          note: |
+            L18: 把 chat messages 拼成内部 prompt。
+            L19: 把 request id、prompt、`max_tokens` 交给 engine。
+            L20: 准备保存 engine 每步输出。
+            L21-L22: 只要 engine 还有未完成请求，就持续调用 `step()`。
+        - repo_path: mini_infra/vllm/v1/engine/llm_engine.py
+          lines: [30, 36]
+          title: MiniInfra LLMEngine
+          note: |
+            L30: `step()` 是 engine 单步驱动入口。
+            L31: 先调用 scheduler，拿到本 step 的调度结果。
+            L32: engine 只处理 `scheduled_decode` 中的请求。
+            L33-L35: running 里找不到请求时跳过，避免 finished 请求继续生成。
+            L36: 给当前请求追加一个 token，模拟 decode tick。
+        - repo_path: github_repo/vllm/vllm/v1/engine/llm_engine.py
+          lines: [241, 252]
+          title: 真实 vLLM：raw input 转内部 request
+          note: |
+            L241: 调用 input processor，进入内部请求构造层。
+            L242-L244: request id、prompt 和 params 是最小输入。
+            L245-L250: task、arrival time、LoRA、tokenization、trace、priority 都进入 request。
+            L252: 提取 prompt text，output processor 后面要用。
+        - repo_path: github_repo/vllm/vllm/v1/engine/llm_engine.py
+          lines: [263, 268]
+          title: 真实 vLLM：单请求进入 EngineCore
+          note: |
+            L263: `n == 1` 走单请求主路径。
+            L265: output processor 建立这个请求的输出状态。
+            L267: request 交给 EngineCore，后续调度在 core 内发生。
+            L268: 返回 request id 给上层调用方。
+      common_confusions:
+        - 把 OpenAI API 层当成调度器。
+        - 把 `RequestOutput` 当成 scheduler 的输入，它实际是输出处理后的结果形状。
+      checkpoint_questions:
+        - MiniInfra 中哪一层调用 `scheduler.schedule()`？
+        - 真实 vLLM 外层 `LLMEngine.step()` 为什么只看到 EngineCore output？
+
+    - title: 核心机制：Prefill、Decode、TTFT、ITL 和 KV Cache
+      plain_explanation: |
+        Prefill 阶段处理完整 prompt，计算 hidden states，并为 attention 生成 key/value。长 prompt 会增加 prefill 计算和 KV 写入，所以经常推高 TTFT。Decode 阶段每次生成一个新 token，只计算新 token，同时读取历史上下文对应的 KV cache。decode 的单步计算较小，但访存、batch 组织和调度节奏会影响 ITL。
+
+        KV cache 保存 attention 的 key/value 张量，减少 decode 阶段的重复计算。它也带来显存成本，显存随并发请求数、上下文长度、层数、KV head 数、head_dim 和 dtype bytes 增长。模型参数装得下，只说明静态权重能放进显存；KV cache 会随请求动态增长，常常成为 serving 并发上限。
+      mental_model: |
+        Prefill 像把整份资料读完并做索引；decode 像每次写一个新字时翻索引。索引越大，后续写作越省计算，但桌面空间占得越多。
+      why_it_matters: |
+        TTFT、ITL 和 KV usage 是一组联动指标。长 prompt、高并发、大上下文会把问题从模型计算推向调度和显存管理。
+      source_refs:
+        - repo_path: mini_infra/vllm/v1/core/kv_cache_manager.py
+          lines: [24, 27]
+          title: MiniInfra KV usage
+          note: |
+            L24-L27: `usage` 统计 owner 非空的 block 占比，是 KV pressure 的最小指标。
+            L24-L25: `usage` 作为属性暴露给 scheduler/drill。
+            L26: owner 非空说明该 block 已被请求占用。
+            L27: 使用率归一化到 0 到 1。
+        - repo_path: mini_infra/vllm/v1/core/kv_cache_manager.py
+          lines: [29, 38]
+          title: MiniInfra allocate_slots
+          note: |
+            L29: `allocate_slots` 按 request id 和 block 数申请资源。
+            L30-L31: 负数 block 是调用错误，直接拒绝。
+            L32: 找出当前所有空闲 block。
+            L33-L34: 空闲 block 不足时显式失败。
+            L35-L38: 成功时写入 owner，并返回分配到的 block id。
+      common_confusions:
+        - KV cache 是文本缓存。它实际保存 attention key/value 张量。
+        - 参数显存装得下，服务并发就一定够。KV cache 会随请求长度和并发动态增长。
+      checkpoint_questions:
+        - 长 prompt 更直接影响 TTFT 还是 ITL？原因是什么？
+        - KV cache 为什么既能加速 decode，又会限制并发？
+
+    - title: 调度主线：waiting、running、finished 和 admission
+      plain_explanation: |
+        教学版 scheduler 用三张表讲清主线。`waiting` 保存已经进入系统但还没有拿到运行资源的请求；`running` 保存已经拿到 KV block、可以参与本 step 的请求；`finished` 保存生成完成、需要返回输出并释放资源的请求。
+
+        admission 有两道门。第一道门是 running 数量，`len(running) < max_num_running_reqs`；第二道门是 KV block，教学版用 prompt token 数估算 `blocks_needed`。KV block 分配成功后，请求才从 waiting 移到 running。分配失败时，请求留在 waiting，等待后续 step 有请求完成并释放 block。
+      mental_model: |
+        waiting 是排队区，running 是已经拿到车位的活跃区，finished 是完成归档区。admission 就是入口闸机。
+      why_it_matters: |
+        这三张表能解释大量 serving 故障：waiting 增长说明 admission 卡住，running 不减少说明完成或释放逻辑可能有问题，KV usage 只涨不降说明 free 路径需要检查。
+      source_refs:
+        - repo_path: mini_infra/vllm/v1/core/sched/scheduler.py
+          lines: [46, 57]
+          title: MiniInfra Scheduler admission
+          note: |
+            L46: waiting 非空且 running 未满时才尝试 admit。
+            L47: 先看队首请求，资源不足时不会丢掉它。
+            L48: 用 prompt token 数估算 KV block 需求。
+            L49-L54: KV 分配失败就停止 admit，请求继续留在 waiting。
+            L55-L57: 分配成功后，请求从 waiting 进入 running。
+        - repo_path: mini_infra/vllm/v1/core/sched/scheduler.py
+          lines: [58, 66]
+          title: MiniInfra Scheduler decode / finished
+          note: |
+            L58: 复制 running items，允许循环中删除请求。
+            L59-L60: 达到 `max_tokens` 后进入 finished。
+            L61: finished 请求释放 KV blocks。
+            L62-L63: 从 running 删除，并记录 finished id。
+            L64-L65: 未完成请求进入本 step decode 列表。
+            L66: 返回本 step 的 prefill、decode、finished 决策。
+        - repo_path: labs/l20_vllm_scheduler_kv/patch/reference/scheduler.py
+          lines: [93, 104]
+          title: Patch reference admission
+          note: |
+            L93-L95: patch 参考解先检查 waiting 和 running 上限，再计算 block 需求。
+            L96-L101: KV 分配失败时保留 waiting 请求。
+            L102-L104: 分配成功才移动状态并记录 prefill。
+        - repo_path: labs/l20_vllm_scheduler_kv/patch/reference/scheduler.py
+          lines: [106, 115]
+          title: Patch reference decode / finished
+          note: |
+            L106-L111: finished 请求写入 finished、释放 KV、移出 running。
+            L112-L115: 未完成请求进入 decode，最后返回本 step 输出。
+      common_confusions:
+        - 在 `add_request` 里提前分配 KV，导致排队请求也占显存。
+        - 用 `max_tokens` 推导 prompt 需要多少 KV block。prompt 长度和输出长度是两件事。
+      checkpoint_questions:
+        - KV 不够时，请求为什么要留在 waiting？
+        - finished 请求需要同时更新哪几处状态？
+
+    - title: 真实 vLLM：token budget、prefix cache、chunked prefill 和 preemption
+      plain_explanation: |
+        真实 vLLM 的 scheduler 使用更通用的 token 进度模型。源码注释里说，scheduler 关注 `num_computed_tokens` 追赶 `num_tokens_with_spec`。这样可以统一表示普通 prefill、chunked prefill、decode、spec decode 和 prefix cache 命中。
+
+        真实系统还要同时管理 token budget 和 KV block budget。Token budget 限制本 step 的计算量，KV block budget 限制历史上下文显存。prefix cache 可以复用已有前缀的 KV；chunked prefill 可以把长 prompt 切成多步，避免长请求独占 step；preemption 可以在 KV 压力下把 running 请求临时移回 waiting，释放资源并等待后续重算。
+      mental_model: |
+        教学版看状态，真实 vLLM 看 token 进度和资源预算。状态机让你入门，token 进度模型让生产系统能覆盖更多优化。
+      why_it_matters: |
+        读真实源码时，很多分支都围绕同一个目标展开：在有限 token budget 和 KV budget 下推进请求，同时控制尾延迟和重算成本。
+      source_refs:
+        - repo_path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+          lines: [352, 362]
+          title: 真实 Scheduler 的 token catch-up 模型
+          note: |
+            L352: `schedule()` 是真实调度器单步入口。
+            L353-L354: 真实 scheduler 不固定使用 prefill/decode phase 标签。
+            L355-L357: 每个请求维护 computed tokens 和 tokens with spec。
+            L358-L360: 本 step 分配 token，让 computed 追赶 tokens with spec。
+            L361-L362: 这个模型覆盖 chunked prefill、prefix cache 和 spec decode。
+        - repo_path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+          lines: [744, 756]
+          title: 真实 vLLM：完整序列容量检查
+          note: |
+            L744-L746: 如果要求保留完整输入长度，先检查完整序列容量。
+            L747-L752: 检查 request、prefix 命中、外部 KV 和 encoder token。
+            L753-L756: 放不下时释放 encoder cache，并停止 admit。
+        - repo_path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+          lines: [758, 769]
+          title: 真实 vLLM：allocate_slots
+          note: |
+            L758-L767: 容量检查通过后，才调用 `allocate_slots` 分配 KV blocks。
+            L758-L760: request 和本 step 新 token 数进入 KV 分配函数。
+            L761-L764: prefix 命中、lookahead、外部 KV 都影响分配。
+            L765-L767: 异步 KV load 和 encoder token 也会进入分配参数。
+            L769: `new_blocks is None` 表示当前请求不能被调度。
+        - repo_path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+          lines: [971, 980]
+          title: preempt_request
+          note: |
+            L971-L973: 只有 RUNNING 请求可以被抢占。
+            L974-L975: 抢占先释放 KV cache 和 encoder cache。
+            L976-L977: 状态改为 `PREEMPTED`，已计算 token 清零。
+            L978-L980: 清理 spec token，并记录抢占次数。
+        - repo_path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+          lines: [984, 985]
+          title: preempt_request 回队列
+          note: |
+            L984-L985: 请求放回 waiting 队列，等待后续重算。
+        - repo_path: github_repo/vllm/vllm/v1/core/sched/output.py
+          lines: [178, 187]
+          title: SchedulerOutput
+          note: |
+            L178-L183: `scheduled_new_reqs` 表示首次调度的新请求，worker 需要缓存其请求数据。
+            L184-L187: `scheduled_cached_reqs` 表示 worker 已知道的请求，只发送增量。
+        - repo_path: github_repo/vllm/vllm/v1/core/sched/output.py
+          lines: [189, 191]
+          title: SchedulerOutput token 数
+          note: |
+            L189-L191: `num_scheduled_tokens` 给出每个请求本 step 处理多少 token。
+      common_confusions:
+        - 到真实源码里寻找固定的 prefill/decode 二分，忽略 token 进度模型。
+        - 把 token budget 和 KV block budget 混为一谈。
+      checkpoint_questions:
+        - "`num_computed_tokens` 追赶 `num_tokens_with_spec` 能覆盖哪些优化？"
+        - preemption 为什么会影响 TTFT 尾部和吞吐？
+
+    - title: Drill 与课后产物：把指标和源码连起来
+      plain_explanation: |
+        patch test 只证明函数合同，drill 用合成 workload 暴露服务形状。`run_serving_drill.py` 会记录 waiting 长度、KV usage、scheduled_prefill、scheduled_decode_count、finished、TTFT 和 ITL。读这些指标时，要把它们放回 scheduler 状态机里解释：waiting 增长通常说明 admission 受限，KV usage 接近 1.0 说明显存块紧张，finished 增长但 usage 不降说明释放路径要检查。
+
+        完成本讲后，建议填写 `outputs/serving_metrics_template.md`，再用 `outputs/debug_checklist.md` 做一次自查。`outputs/source_reading_card.md` 用来复习 MiniInfra 和真实 vLLM 的源码主路径。
+      mental_model: |
+        指标是调度器的体征。TTFT 看首轮放行，ITL 看 decode 节奏，KV usage 看显存压力，waiting 看资源是否卡住队列。
+      why_it_matters: |
+        学完一节课要能留下可复用的排查方法。下一次真实服务变慢时，这些产物可以直接拿来定位问题。
+      source_refs:
+        - repo_path: labs/l20_vllm_scheduler_kv/scripts/run_serving_drill.py
+          lines: [121, 129]
+          title: drill decode tick
+          note: |
+            L121: 每个 step 调用 scheduler，拿到调度结果。
+            L124-L127: 对 `scheduled_decode` 中的 running 请求追加一个 token。
+            L128-L129: 首次 decode step 用来计算 TTFT，decode 次数用来计算 ITL。
+        - repo_path: labs/l20_vllm_scheduler_kv/scripts/run_serving_drill.py
+          lines: [131, 137]
+          title: drill waiting / KV pressure
+          note: |
+            L131-L132: 记录 finished 请求的完成 step。
+            L134-L135: 每步记录 waiting 长度和 KV usage。
+            L136-L137: 高 KV usage 下 waiting 增长，说明 admission 真的受压。
+      common_confusions:
+        - patch-test 通过后就结束，没有把指标和生产排查联系起来。
+        - 只看 requests/sec，不看 TTFT、ITL、waiting 和 KV usage 的组合。
+      checkpoint_questions:
+        - 如果 KV usage 很高且 waiting 持续增长，你会先检查哪些字段？
+        - drill 结果如何转化成一次真实服务排查 checklist？

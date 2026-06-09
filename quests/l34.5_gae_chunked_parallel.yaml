@@ -1,39 +1,488 @@
 id: l34.5_gae_chunked_parallel
-title: GAE 分 chunk 并行 (slime 100-300× 优化)
-level: L11.7
+title: L40 · GAE Chunked Parallel：Boundary State and Long-Context RL
+level: L40
 act: 第 4 章：RL 与对齐
-role: PPO / GRPO 学徒
+role: PPO / GRPO 系统学徒
 priority: 高
-estimated_minutes: 80
+estimated_minutes: 95
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - slime / verl GAE 实现 (对照)
+  - SLiME
+  - PPO / GRPO
 
 patch:
   description: |
-    实现 naive 反向递推 GAE + 分 chunk 并行版本，要求两者数值精确等价。
-    chunk 之间通过单个标量 boundary correction 传递。在 slime 中实测 100-300×
-    加速；本关让你看清"算法不变 + 实现精明"的工程美学。
+    实现 naive GAE 和 chunked GAE 的最小数值合同：沿最后一维递推，
+    正确传播 last_value、chunk boundary advantage、余数 chunk 和 batched shape。
   task_md: labs/l34.5_gae_chunked_parallel/patch/task.md
   starter_file: labs/l34.5_gae_chunked_parallel/patch/starter/gae_chunk.py
   reference_file: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
-  test_command: make patch-test M=l34.5_gae_chunked_parallel
+  test_command: IMPL=reference make patch-test M=l34.5_gae_chunked_parallel
   status_file: labs/l34.5_gae_chunked_parallel/patch/.last_run.json
   test_count: 7
-  test_kind: 数值等价 + 边界情况 + batched
+  test_kind: naive GAE 与 chunked GAE 数值等价、终点 value 和 shape 验证
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l34.5_gae_chunked_parallel/system_map.md
+    description: L40 在 RL 与对齐主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l34.5_gae_chunked_parallel/lecture.md
+    description: 从 GAE 递推、chunk boundary、长上下文瓶颈讲到 SLiME 生产路径和测试排障。
+  - title: 源码带读讲义
+    path: labs/l34.5_gae_chunked_parallel/source_walkthrough.md
+    description: 按 patch、测试、SLiME vanilla GAE、chunked GAE 和返回值切片阅读。
 
 source_reading:
-  - title: PPO 中 GAE 的分 chunk 并行计算 (slime)
-    repo_path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/slime/batch-GAE/ppo-gae-chunk.md
+  - title: Patch starter
+    repo_path: labs/l34.5_gae_chunked_parallel/patch/starter/gae_chunk.py
+    focus: 学生要补齐的 naive GAE 和 chunked GAE 合同
+    highlights:
+      - title: naive signature
+        lines: [21, 33]
+        note: |
+          L21-L27: gae_naive 接收 rewards、values、last_value、gamma 和 lam。
+          L28-L33: docstring 固定最后一维为时间维，并写出递推公式。
+      - title: naive TODO
+        lines: [35, 47]
+        note: |
+          L35-L38: TODO 建立 T、advantages、next_value 和 next_adv。
+          L39-L47: TODO 从右到左计算 delta、adv，并推进两个状态。
+      - title: chunked signature
+        lines: [51, 63]
+        note: |
+          L51-L58: chunked 函数多接收 chunk_size。
+          L59-L63: docstring 说明输出要和 naive allclose，并描述切块步骤。
+      - title: chunked boundary description
+        lines: [64, 70]
+        note: |
+          L64-L66: chunk 内部把右侧 boundary 当作末尾 next_adv。
+          L68-L70: starter 明确这是教学顺序版，不是真实 GPU 并行 kernel。
+      - title: chunked setup TODO
+        lines: [71, 80]
+        note: |
+          L71-L76: TODO 初始化 T、advantages，并在单 chunk 时退回 naive。
+          L78-L80: TODO 计算 chunk 数，并初始化 next_value 和 boundary adv。
+      - title: chunked loop TODO
+        lines: [82, 94]
+        note: |
+          L82-L88: TODO 从最后一个 chunk 往前处理，并建立 chunk 内状态。
+          L89-L94: TODO 用当前 reward/value 与 running_next_value 计算 chunk 内 adv。
+      - title: chunk handoff TODO
+        lines: [92, 98]
+        note: |
+          L92-L95: TODO 把 chunk 起点 adv 和 value 交给左侧 chunk。
+          L97-L98: TODO 返回完整 advantages，未实现时抛 L40 错误。
+
+  - title: Patch reference
+    repo_path: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
+    focus: 参考实现中的状态推进、fallback、boundary handoff 和 batched shape
+    highlights:
+      - title: reference naive setup
+        lines: [8, 18]
+        note: |
+          L8-L14: gae_naive 的签名和 starter 一致。
+          L15-L18: 初始化 T、advantages、next_value 和 next_adv。
+      - title: reference naive loop
+        lines: [19, 27]
+        note: |
+          L19-L24: 反向计算 delta 与 adv，并写回最后一维。
+          L25-L27: 更新 next_value、next_adv，并返回 advantages。
+      - title: reference chunk setup
+        lines: [30, 42]
+        note: |
+          L30-L37: chunked 函数签名包含 chunk_size。
+          L38-L42: 单 chunk fallback 后创建输出张量。
+      - title: reference chunk state
+        lines: [45, 52]
+        note: |
+          L45-L46: boundary 初始化为 last_value 和 0 advantage。
+          L48-L52: 反向遍历 chunk，并把右侧 boundary 注入 chunk 内部。
+      - title: reference chunk loop
+        lines: [53, 64]
+        note: |
+          L53-L60: chunk 内使用 naive 公式更新 running_next_value 和 next_adv。
+          L61-L64: chunk 结束后把起点 adv/value 交给左侧 chunk。
+
+  - title: Patch tests
+    repo_path: labs/l34.5_gae_chunked_parallel/patch/tests/test_patch.py
+    focus: 七个测试覆盖方向、等价、余数 chunk、fallback、terminal value 和 batched 输入
+    highlights:
+      - title: known values
+        lines: [22, 32]
+        note: |
+          L22-L28: 构造 gamma=1、lambda=1 的三步手算样例。
+          L29-L32: 断言输出为 [3, 2, 1]。
+      - title: short equivalence
+        lines: [35, 45]
+        note: |
+          L35-L43: 随机短序列分别跑 naive 和 chunked。
+          L44-L45: allclose 失败时报告最大误差。
+      - title: long equivalence
+        lines: [48, 58]
+        note: |
+          L48-L56: T=1024、chunk=64 检查长链等价。
+          L57-L58: 长链容差放宽到 1e-5。
+      - title: remainder chunk
+        lines: [61, 71]
+        note: |
+          L61-L70: T=11、chunk=4 覆盖最后短 chunk。
+          L71: 结果必须与 naive allclose。
+      - title: one chunk fallback
+        lines: [74, 83]
+        note: |
+          L74-L82: chunk_size 大于 T 时走 fallback。
+          L83: fallback 输出必须等于 naive。
+      - title: terminal value
+        lines: [86, 96]
+        note: |
+          L86-L93: last_value=10 检查链尾 value 进入最后 token。
+          L94-L96: 最后一个 advantage 应接近 9.9。
+      - title: batched shape
+        lines: [99, 109]
+        note: |
+          L99-L107: B=4、T=32 检查 batched 输入。
+          L108-L109: 输出 shape 和 naive 等价都必须成立。
+
+  - title: SLiME single-sample GAE
+    repo_path: github_repo/slime/slime/utils/ppo_utils.py
+    focus: 单样本 GAE 如何处理 CP gather、反向递推、returns 和 CP slice
+    highlights:
+      - title: single-sample inputs
+        lines: [311, 318]
+        note: |
+          L311-L318: get_advantages_and_returns 接收长度、values、rewards、gamma 和 lambd。
+      - title: CP gather
+        lines: [341, 349]
+        note: |
+          L341-L346: CP 大于 1 时先 all-gather rewards 和 values。
+          L347-L349: 单卡路径直接使用本地 tensors。
+      - title: vanilla recurrence
+        lines: [351, 360]
+        note: |
+          L351-L358: 反向递推 lastgaelam，并收集 advantage。
+          L359-L360: 翻回原顺序并计算 returns。
+      - title: CP slice return
+        lines: [362, 371]
+        note: |
+          L362-L366: CP 路径把 full advantages 和 returns 切回本地片段。
+          L367-L371: 非 CP 路径直接返回 detach 后的结果。
+
+  - title: SLiME batched GAE entry
+    repo_path: github_repo/slime/slime/utils/ppo_utils.py
+    focus: batched GAE 如何 pad、选择 vanilla/chunked，并切回原长度
+    highlights:
+      - title: batch entry
+        lines: [374, 382]
+        note: |
+          L374-L382: batched GAE 入口接收长度列表、value/reward 列表和 chunked 开关。
+      - title: batch setup
+        lines: [397, 405]
+        note: |
+          L397-L405: 进入 no_grad，检查 batch 大小、CP size、device 和 dtype。
+      - title: pad to max_len
+        lines: [425, 435]
+        note: |
+          L425-L429: 按最大 response length 创建 padded tensors。
+          L431-L435: 每条样本按原长度写入 values 和 rewards。
+      - title: vanilla branch
+        lines: [436, 442]
+        note: |
+          L436-L442: chunked=False 时调用 vanilla_gae。
+      - title: chunked branch
+        lines: [443, 449]
+        note: |
+          L443-L449: chunked=True 时调用 chunked_gae。
+      - title: slice back
+        lines: [473, 479]
+        note: |
+          L473-L477: 非 CP 路径按 response length 去掉 padding。
+          L479: 返回每条样本的 advantages 和 returns 列表。
+
+  - title: SLiME vanilla and chunked GAE
+    repo_path: github_repo/slime/slime/utils/ppo_utils.py
+    focus: 生产实现中的 vanilla loop、chunk matrix scan、state propagation 和 returns
+    highlights:
+      - title: vanilla batch loop
+        lines: [488, 499]
+        note: |
+          L488-L493: vanilla_gae 初始化 batch 维状态。
+          L495-L499: 从右到左递推 delta 和 lastgaelam。
+      - title: vanilla returns
+        lines: [501, 503]
+        note: |
+          L501-L503: stack advantages，并计算 returns = advantages + values。
+      - title: chunked purpose
+        lines: [506, 518]
+        note: |
+          L506-L512: chunked_gae 接收 rewards、values、gamma、lambd 和 chunk_size。
+          L513-L518: docstring 说明它用 chunk 内 scan 与跨 chunk 状态传播降低依赖长度。
+      - title: chunked shape contract
+        lines: [521, 532]
+        note: |
+          L521-L527: 参数说明 rewards/values 为 [B,T]。
+          L529-L532: 返回 advantages 和 returns，形状仍是 [B,T]。
+      - title: deltas and reverse
+        lines: [544, 556]
+        note: |
+          L544-L551: 构造 delta，并把最后一步 next value 设为 0。
+          L553-L556: 把反向 GAE 改写为 reversed sequence 上的正向 scan。
+      - title: chunk padding
+        lines: [561, 570]
+        note: |
+          L561-L565: T 不能整除 chunk_size 时补 padding。
+          L567-L570: 计算 padded 长度、chunk 数并 reshape 成 chunk。
+      - title: scan kernel
+        lines: [585, 596]
+        note: |
+          L585-L590: 构造 chunk 内上三角 scan kernel。
+          L591-L596: mask 区域写入 w 的幂。
+      - title: local scan
+        lines: [598, 609]
+        note: |
+          L598-L602: pow_vec 用于注入上一 chunk 的 state。
+          L604-L609: 所有 chunk 的 local scan 通过矩阵乘法完成。
+      - title: state propagation
+        lines: [625, 637]
+        note: |
+          L625-L627: 初始化 reversed 输出和跨 chunk state。
+          L628-L637: 逐 chunk 注入 s_prev，并更新下一 chunk state。
+      - title: flip and returns
+        lines: [639, 646]
+        note: |
+          L639-L643: 移除 padding 并翻回原时间顺序。
+          L644-L646: returns 等于 advantages 加 values。
 
 mini_infra_targets:
-  - mini_infra/rl/
-
+  - github_repo/slime/slime/utils/ppo_utils.py
+notebooks: []
+tickets:
+  - gae_terminal_value_dropped
+  - gae_chunk_boundary_shift
+  - gae_remainder_chunk_off_by_one
+  - gae_batched_shape_misuse
+  - gae_speed_claim_without_gpu
 prereq: l34_grpo
 next_lab: l35_multimodal_capstone
-
 gpu_modes:
   local: CPU OK
-  cluster: 真长上下文 RL (T=32K) 验证 100-300× 加速 (可选)
+  cluster: 长上下文 GPU kernel 或 SLiME 训练 step 计时（可选）
+
+lesson:
+  opening: |
+    L40 讲 GAE 的 chunked 计算。L39 已经把 GRPO/RLOO 的 advantage 和 policy loss 讲到最小公式；这一讲回到 PPO/critic 路线里常见的 GAE，处理长上下文 RL 中沿时间维反向递推带来的实现瓶颈。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        GAE 位于 reward/value 已经产生、policy loss 还没计算之前。它把每个 token 的 TD error 累积成 advantage，再和 value 相加得到 returns。L40 patch 不启动 rollout，也不训练真实模型；它固定两件事：naive GAE 的递推语义，以及 chunked 写法必须和 naive 数值等价。
+      mental_model: |
+        L39 解决 critic-free 组内 reward；L40 解决带 critic 路线里的 token-level advantage 递推。
+      why_it_matters: |
+        长上下文 RL 会让 T 变大，时间维递推容易成为训练 step 的可见成本。优化前先把数值语义固定住，才能讨论真实 GPU 加速。
+      source_refs:
+        - title: batch entry
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [374, 382]
+          note: |
+            L374-L382: SLiME batched GAE 接收长度列表和 chunked 开关。
+        - title: chunked branch
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [443, 449]
+          note: |
+            L443-L449: chunked=True 时切到 chunked_gae。
+      common_confusions:
+        - 把 L40 patch 当作真实 CUDA kernel。
+        - 把 batch 维并行误认为时间维依赖已经消失。
+        - 用 CPU patch-test 的结果直接报告 GPU 加速比。
+      checkpoint_questions:
+        - L40 位于 L39 policy loss 之前还是之后？
+        - patch 要证明哪两个函数的关系？
+        - CPU patch-test 不能证明什么？
+
+    - title: GAE 递推合同
+      plain_explanation: |
+        naive GAE 的核心状态是 `next_value` 和 `next_adv`。第 t 步先计算 `delta = r_t + gamma * next_value - v_t`，再计算 `adv = delta + gamma * lam * next_adv`。写完 `advantages[..., t]` 后，当前 value 和当前 adv 才成为下一轮向左移动时的右侧状态。
+      mental_model: |
+        `next_value` 来自 critic，参与 TD error；`next_adv` 是右侧所有未来 delta 的折扣累积。
+      why_it_matters: |
+        这两个状态一旦混用，chunk 边界附近会出现系统性偏差，并且会向左传播。
+      source_refs:
+        - title: reference naive setup
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
+          lines: [8, 18]
+          note: |
+            L8-L14: naive 函数签名固定输入。
+            L15-L18: 初始化 T、advantages、next_value 和 next_adv。
+        - title: reference naive loop
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
+          lines: [19, 27]
+          note: |
+            L19-L24: 从右到左计算 delta 和 adv。
+            L25-L27: 推进状态并返回完整 advantages。
+        - title: vanilla batch loop
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [488, 499]
+          note: |
+            L488-L493: vanilla_gae 初始化 batch 状态。
+            L495-L499: 生产代码也沿时间维反向递推。
+      common_confusions:
+        - 忽略 last_value，导致最后一个 token 的 delta 少一项。
+        - 先更新 next_value 再计算 delta。
+        - 沿 batch 维递推，而不是沿最后一维递推。
+      checkpoint_questions:
+        - "`next_value` 和 `next_adv` 分别对应哪类状态？"
+        - 为什么 `last_value` 只作为链尾 next value？
+        - "`(B,T)` 输入时递推沿哪一维进行？"
+
+    - title: Chunk Boundary
+      plain_explanation: |
+        对 chunk `[start,end)`，如果已经知道右侧的 `A_end`，chunk 内就可以从 `end-1` 算到 `start`。教学版从最后一个 chunk 往前走，把右侧 chunk 起点的 advantage 作为当前 chunk 的末尾 `next_adv`。处理完一个 chunk 后，`advantages[..., start]` 成为左侧 chunk 的 boundary advantage，`values[..., start]` 成为左侧 chunk 末尾 token 的 next value。
+      mental_model: |
+        每个 chunk 内仍然使用 naive 公式，chunk 之间只交接一个 boundary advantage 和一个 boundary value。
+      why_it_matters: |
+        这份教学实现不是并行 kernel，但它固定了高性能版本必须保持的 boundary 语义。
+      source_refs:
+        - title: reference chunk setup
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
+          lines: [30, 42]
+          note: |
+            L30-L37: chunked 函数接收 chunk_size。
+            L38-L42: chunk_size 覆盖全序列时退回 naive。
+        - title: reference chunk state
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
+          lines: [45, 52]
+          note: |
+            L45-L46: 初始化右侧 value 和 boundary advantage。
+            L48-L52: 每个 chunk 开始时注入右侧状态。
+        - title: reference chunk loop
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/reference/gae_chunk.py
+          lines: [53, 64]
+          note: |
+            L53-L60: chunk 内按 naive 公式反向递推。
+            L61-L64: chunk 起点 adv/value 交给左侧 chunk。
+      common_confusions:
+        - 只传 advantage，不更新 boundary value。
+        - 正向遍历 chunk。
+        - 默认 T 一定能被 chunk_size 整除。
+      checkpoint_questions:
+        - 对 chunk `[start,end)`，右侧 boundary advantage 是什么？
+        - 处理完 chunk 后要交给左侧哪两个状态？
+        - 为什么余数 chunk 必须单独覆盖？
+
+    - title: SLiME 生产写法
+      plain_explanation: |
+        SLiME 的生产函数先把变长 response pad 到 batch 中，再按 `chunked` 开关选择 vanilla 或 chunked GAE。真实 `chunked_gae` 把反向递推改写成 reversed sequence 上的正向 scan，chunk 内用上三角矩阵做 local scan，chunk 之间用 `s_prev` 注入跨 chunk state，最后翻回原时间顺序并计算 returns。
+      mental_model: |
+        patch 是边界语义模型，SLiME 是把局部递推换成批量 scan 的生产形态。
+      why_it_matters: |
+        读真实源码时要分清：哪些代码保持数学语义，哪些代码服务于 padding、CP、矩阵 scan 和输出切片。
+      source_refs:
+        - title: pad to max_len
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [425, 435]
+          note: |
+            L425-L429: 为 batched GAE 创建 padded tensors。
+            L431-L435: 每条样本按 response length 写入 batch。
+        - title: deltas and reverse
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [544, 556]
+          note: |
+            L544-L551: 构造 delta，并把链尾 next value 设为 0。
+            L553-L556: 把反向递推变成 reversed sequence 上的正向 scan。
+        - title: scan kernel
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [585, 596]
+          note: |
+            L585-L590: 构造 chunk 内 scan kernel。
+            L591-L596: 上三角区域写入折扣幂。
+        - title: state propagation
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [625, 637]
+          note: |
+            L625-L627: 初始化 reversed 输出和跨 chunk state。
+            L628-L637: 注入 s_prev，并更新下一 chunk 的 state。
+      common_confusions:
+        - 把 local scan 的矩阵实现当成新算法。
+        - 忘记生产函数还要返回 returns。
+        - 只看 chunked_gae，不看 pad 和 slice back。
+      checkpoint_questions:
+        - SLiME 为什么先 pad 到 max_len？
+        - "`deltas_flat @ M` 解决的是 chunk 内还是 chunk 间问题？"
+        - "`s_prev` 对应 patch 里的哪个 boundary 状态？"
+
+    - title: 测试闭环
+      plain_explanation: |
+        七个测试覆盖了最小合同：手算方向、短序列等价、长序列等价、余数 chunk、单 chunk fallback、last_value 传播和 batched 输入。它们不验证真实 GPU 加速，也不验证 SLiME 训练稳定，只验证 GAE 数值语义。
+      mental_model: |
+        tests 先证明优化没有改公式，再允许你去讨论性能路径。
+      why_it_matters: |
+        GAE 直接进入 policy loss。一个边界 off-by-one 会让一段 token 的 advantage 都带偏。
+      source_refs:
+        - title: known values
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/tests/test_patch.py
+          lines: [22, 32]
+          note: |
+            L22-L28: 构造三步手算样例。
+            L29-L32: 输出应为 [3, 2, 1]。
+        - title: remainder chunk
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/tests/test_patch.py
+          lines: [61, 71]
+          note: |
+            L61-L70: T=11、chunk=4 覆盖短尾 chunk。
+            L71: 输出必须与 naive allclose。
+        - title: terminal value
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/tests/test_patch.py
+          lines: [86, 96]
+          note: |
+            L86-L93: last_value=10 同时喂给 naive 和 chunked。
+            L94-L96: 最后 token 的 advantage 应接近 9.9。
+        - title: batched shape
+          repo_path: labs/l34.5_gae_chunked_parallel/patch/tests/test_patch.py
+          lines: [99, 109]
+          note: |
+            L99-L107: B=4、T=32 覆盖 batched 输入。
+            L108-L109: shape 和 allclose 都必须成立。
+      common_confusions:
+        - 只跑随机长序列，不跑余数 chunk。
+        - allclose 通过后就报告加速。
+        - 忽略 terminal value 测试。
+      checkpoint_questions:
+        - 哪个测试覆盖 last_value？
+        - 哪个测试覆盖 chunk_size 大于 T？
+        - patch-test 没覆盖哪些生产条件？
+
+    - title: 报告边界
+      plain_explanation: |
+        本讲没有 dedicated smoke/drill target；CPU 侧验收以 patch-test 为准。报告里要分开写三类结论：数值等价由 patch-test 支撑，生产源码映射由 source walkthrough 支撑，真实加速比需要长 T、GPU kernel、固定 batch size 和计时方法支撑。
+      mental_model: |
+        数值正确、源码对齐、性能加速是三种证据，不能互相替代。
+      why_it_matters: |
+        长上下文优化很容易被一句速度数字带偏。没有 workload、硬件、dtype、batch、T、chunk_size 和 baseline 的数字不能用来判断生产收益。
+      source_refs:
+        - title: chunked purpose
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [506, 518]
+          note: |
+            L506-L512: 生产 chunked_gae 暴露 chunk_size。
+            L513-L518: 注释说明依赖长度从 O(T) 降到 O(T/chunk_size)。
+        - title: local scan
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [598, 609]
+          note: |
+            L598-L602: pow_vec 用于跨 chunk state 注入。
+            L604-L609: local scan 用矩阵乘法批量完成。
+        - title: flip and returns
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [639, 646]
+          note: |
+            L639-L643: 翻回原时间顺序。
+            L644-L646: returns 等于 advantages 加 values。
+      common_confusions:
+        - 用 patch-test 证明 GPU 加速。
+        - 只报 speedup，不报 baseline。
+        - 把短序列结果外推到长上下文训练。
+      checkpoint_questions:
+        - 为什么本讲没有 dedicated smoke target？
+        - 报告真实加速比至少要记录哪些条件？
+        - returns 和 advantages 的关系是什么？

@@ -1,4 +1,4 @@
-"""L04.8 · Drive a Megatron-shaped pretrain lifecycle using the student's patch.
+"""L11 · Drive a Megatron-shaped pretrain lifecycle using the student's patch.
 
 This script demonstrates that the patched ``train_step`` actually drives a real
 optimization loop: loss decreases, LR schedule fires, checkpoints are written,
@@ -44,6 +44,10 @@ MISSION_ID = "l10_megatron_pretrain_lifecycle"
 def _load_train_step():
     """Import student's patch first, fall back to reference for fallback mode."""
     sys.path.insert(0, str(LAB_DIR / "patch"))
+    if (__import__("os").environ.get("IMPL") or "") == "reference":
+        from reference.train_step import TrainStepError, train_step
+
+        return train_step, TrainStepError, "reference"
     try:
         from starter.train_step import TrainStepError, train_step
 
@@ -56,36 +60,28 @@ def _load_train_step():
 
 
 def _load_lr_scheduler_factory():
-    """Try to import the student's L04 CosineWithRestartsLR; else use a local fallback."""
-    l04_patch = ROOT / "labs" / "l08_megatron_text_pretrain" / "patch"
-    if l04_patch.is_dir():
-        spec = importlib.util.spec_from_file_location(
-            "l04_lr_scheduler", l04_patch / "starter" / "lr_scheduler.py"
-        )
-        if spec is not None:
-            module = importlib.util.module_from_spec(spec)
-            try:
-                spec.loader.exec_module(module)  # type: ignore[union-attr]
-                if hasattr(module, "CosineWithRestartsLR"):
-                    return module.CosineWithRestartsLR, "l04_starter"
-            except Exception:
-                pass
-        spec = importlib.util.spec_from_file_location(
-            "l04_lr_scheduler_ref", l04_patch / "reference" / "lr_scheduler.py"
-        )
-        if spec is not None:
-            module = importlib.util.module_from_spec(spec)
-            try:
-                spec.loader.exec_module(module)  # type: ignore[union-attr]
-                if hasattr(module, "CosineWithRestartsLR"):
-                    return module.CosineWithRestartsLR, "l04_reference"
-            except Exception:
-                pass
+    """Try to import the student's L09 CosineWithRestartsLR; else use a local fallback."""
+    l09_patch = ROOT / "labs" / "l08_megatron_text_pretrain" / "patch"
+    requested = __import__("os").environ.get("SCHED_IMPL") or __import__("os").environ.get("IMPL")
+    search_order = ("reference", "starter") if requested == "reference" else ("starter", "reference")
+    if l09_patch.is_dir():
+        for impl in search_order:
+            spec = importlib.util.spec_from_file_location(
+                f"l09_lr_scheduler_{impl}", l09_patch / impl / "lr_scheduler.py"
+            )
+            if spec is not None:
+                module = importlib.util.module_from_spec(spec)
+                try:
+                    spec.loader.exec_module(module)  # type: ignore[union-attr]
+                    if hasattr(module, "CosineWithRestartsLR"):
+                        return module.CosineWithRestartsLR, f"l09_{impl}"
+                except Exception:
+                    pass
     return _LocalCosineWithRestarts, "local_fallback"
 
 
 class _LocalCosineWithRestarts:
-    """Tiny fallback so this script runs even when L04 patch is empty."""
+    """Tiny fallback so this script runs even when the scheduler patch is empty."""
 
     def __init__(self, optimizer, max_lr, min_lr, restart_steps, total_steps):
         self.optimizer = optimizer
@@ -357,7 +353,7 @@ def main() -> None:
 
 ## 6. 诊断
 若 loss 不下降，先检查 train_step 是否在 forward_backward 之前 zero_grad；
-若 LR 没有重启，回到 L04 检查 `CosineWithRestartsLR.restart_steps` 处理；
+若 LR 没有重启，回到 L09 检查 `CosineWithRestartsLR.restart_steps` 处理；
 若 step 被频繁 skip，看 grad_norm 是否爆掉。
 
 ## 7. Debug 工单
@@ -377,7 +373,7 @@ def main() -> None:
 `pretrain_gpt.py`，把 metrics.jsonl 的 schema 保持一致即可。
 
 ## 11. 下一步
-进入 L05 学 bucketed DDP，用同一个 train_step 串到 multi-rank 训练。
+进入 L12 学 scale optimization，用同一个 train_step 继续连接更大的训练配置。
 """,
     )
     print(run_dir)

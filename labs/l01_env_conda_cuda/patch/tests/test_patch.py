@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LAB_ROOT / "starter"))
+IMPL = os.environ.get("IMPL", "starter")
+sys.path.insert(0, str(LAB_ROOT / IMPL))
 
 import env_probe  # noqa: E402  pylint: disable=wrong-import-position
 

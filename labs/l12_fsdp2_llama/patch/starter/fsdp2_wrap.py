@@ -1,4 +1,4 @@
-"""L05.3 Patch · Wrap a Llama-style model with FSDP2 ``fully_shard``.
+"""L13 Patch · Wrap a Llama-style model with FSDP2 ``fully_shard``.
 
 Implementation must NOT use ``torch.distributed.fsdp.FullyShardedDataParallel``
 (that is FSDP1, with flat-parameter semantics). Use the composable FSDP2 API:
@@ -54,4 +54,4 @@ def wrap_transformer_blocks_fsdp2(
     # TODO(student): finally call _fully_shard(model, ...) once on root
     # TODO(student): return a WrapReport listing the wrapped blocks (in traversal order),
     #               root_wrapped=True, the mp policy summary, and reshard_after_forward
-    raise NotImplementedError("L05.3: implement wrap_transformer_blocks_fsdp2")
+    raise NotImplementedError("L13: implement wrap_transformer_blocks_fsdp2")

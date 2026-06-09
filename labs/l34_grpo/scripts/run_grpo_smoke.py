@@ -1,8 +1,9 @@
-"""L11.8 · 在合成 reward + log-prob 上跑 GRPO 50 步，看 loss 下降。"""
+"""L39 · 在合成 reward + log-prob 上跑 GRPO smoke。"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +30,15 @@ MISSION_ID = "l34_grpo"
 
 
 def _impl():
+    requested = os.environ.get("IMPL")
+    if requested == "reference":
+        from reference import grpo as mod  # type: ignore[import-not-found]
+
+        return mod, "reference"
+    if requested == "starter":
+        from starter import grpo as mod  # type: ignore[import-not-found]
+
+        return mod, "starter"
     try:
         from starter import grpo as mod  # type: ignore[import-not-found]
 
@@ -77,22 +87,16 @@ def main() -> None:
     P = int(config["prompts"])
     T = int(config["seq_length"])
 
-    # tiny "policy" parameter we will train: per-token logit shift
-    policy = nn.Parameter(torch.zeros(T))
-    optimizer = torch.optim.SGD([policy], lr=1e-2)
-
-    # latent "good direction" — reward favors larger sum(log_probs along this direction)
-    direction = torch.randn(T)
-    direction = direction / direction.norm()
+    # Tiny trainable log-prob shift per response/token.
+    policy = nn.Parameter(torch.zeros(G, T))
+    optimizer = torch.optim.SGD([policy], lr=float(config.get("lr", 0.2)))
+    rewards = torch.linspace(-1.0, 1.0, G)
 
     losses: list[float] = []
     for step in range(50):
-        # sample G responses per prompt, simulate log-probs
-        log_probs_old = torch.randn(G, T) * 0.1
-        log_probs = log_probs_old + policy.detach()
+        # Simulate behavior and reference log-probs for one prompt group.
+        log_probs_old = torch.zeros(G, T)
         log_probs_ref = log_probs_old.clone()
-        # reward = projection onto direction
-        rewards = (log_probs * direction).sum(dim=-1)
         advantages = mod.grpo_advantage(rewards)
         mask = torch.ones(G, T)
         # forward with grad through policy

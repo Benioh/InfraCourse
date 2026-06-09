@@ -1,8 +1,10 @@
-"""L08.3 · Run eager vs FlashAttention benchmark grid."""
+"""L23 · Run eager vs PyTorch SDPA benchmark grid."""
 
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +31,10 @@ MISSION_ID = "l22_flash_attn_v2_bench"
 
 
 def _impl():
+    requested = os.environ.get("IMPL")
+    if requested in {"starter", "reference"}:
+        return importlib.import_module(f"{requested}.flash_bench"), requested
+
     try:
         from starter import flash_bench as mod  # type: ignore[import-not-found]
 

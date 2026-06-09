@@ -1,46 +1,454 @@
 id: l32.5_ipc_weight_sync
-title: CUDA IPC Weight Sync（handle tuple 共享显存）
-level: L11.3
+title: L37 · CUDA IPC Weight Sync：handle tuple 与共享 storage
+level: L37
 act: 第 4 章：RL 与对齐
-role: SLiME / verl 学徒
+role: RL co-locate 系统学徒
 priority: 核心
 estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - SGLang / verl / slime（对照）
+  - SGLang
+  - SLiME
 
 patch:
   description: |
-    实现 verl/slime co-locate 路径下 update_weights_from_tensor 的真正机制：
-    序列化的不是 tensor data 而是 IPC handle；接收端反序列化后与源 tensor 共享 storage。
-    CPU 模拟通过 IPCStoragePool 实现，API 形状与真实代码一致。
+    实现 CUDA IPC-shaped weight sync 的 CPU 模拟：序列化 handle 和元数据，
+    不把 tensor data 塞进 bytes；反序列化后共享 storage；按 rank gather handle；
+    用 LocalSerializedTensor 按 TP rank 取回 tensor，并只在最后一个参数上 flush。
   task_md: labs/l32.5_ipc_weight_sync/patch/task.md
   starter_file: labs/l32.5_ipc_weight_sync/patch/starter/ipc_weight_sync.py
   reference_file: labs/l32.5_ipc_weight_sync/patch/reference/ipc_weight_sync.py
-  test_command: make patch-test M=l32.5_ipc_weight_sync
+  test_command: IMPL=reference make patch-test M=l32.5_ipc_weight_sync
   status_file: labs/l32.5_ipc_weight_sync/patch/.last_run.json
   test_count: 7
-  test_kind: 行为契约 + 数据共享语义
+  test_kind: 行为契约 + 共享 storage 语义
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l32.5_ipc_weight_sync/system_map.md
+    description: 本讲在 RL co-locate weight sync 主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l32.5_ipc_weight_sync/lecture.md
+    description: 从 handle tuple、rank gather、LocalSerializedTensor、flush 时序讲到 SLiME/SGLang 对照。
+  - title: 源码带读讲义
+    path: labs/l32.5_ipc_weight_sync/source_walkthrough.md
+    description: 按 patch、SGLang update、SLiME bucket、serializer 和测试主路径组织源码阅读。
 
 source_reading:
-  - title: RL 系统深思 - 深入理解权重更新机制
-    repo_path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/sys-design/readme-1.md
-  - title: verl fsdp_sglang.update_weights
-    repo_path: github_repo/verl/
-  - title: SGLang model_runner.update_weights_from_tensor
-    repo_path: github_repo/sglang/
+  - title: Patch starter
+    repo_path: labs/l32.5_ipc_weight_sync/patch/starter/ipc_weight_sync.py
+    focus: IPCStoragePool、handle meta、rank gather、LocalSerializedTensor 和 flush 合同
+    highlights:
+      - title: CPU storage pool
+        lines: [26, 38]
+        note: |
+          L26-L38: `put` 注册 tensor 并保存引用，模拟 CUDA IPC handle 指向同一块 storage。
+      - title: serialize 合同
+        lines: [60, 68]
+        note: |
+          L60-L68: docstring 明确只序列化 handle、shape、dtype、stride 和 device 元数据。
+      - title: serialize TODO
+        lines: [69, 79]
+        note: |
+          L69-L79: 学生需要调用 pool.put，再 pickle meta，不能把 tensor data 放进 bytes。
+      - title: LocalSerializedTensor
+        lines: [95, 103]
+        note: |
+          L95-L103: `values` 按 source rank 保存 handle blob，`get` 要按 rank 反序列化。
+      - title: gather 规则
+        lines: [112, 123]
+        note: |
+          L112-L123: rank 0 未收齐时返回 None，收齐后才返回 world_size 个 blob。
+      - title: update loop
+        lines: [141, 148]
+        note: |
+          L141-L148: 每个 TP rank 取自己的 tensor，替换 inference state，并在最后统一 flush。
+
+  - title: Patch reference
+    repo_path: labs/l32.5_ipc_weight_sync/patch/reference/ipc_weight_sync.py
+    focus: 最小参考实现中的 handle 序列化、共享 storage 和 flush 时序
+    highlights:
+      - title: handle meta
+        lines: [39, 48]
+        note: |
+          L39-L48: reference 只 pickle handle 和 tensor 元数据，因此 blob 远小于 tensor data。
+      - title: deserialize
+        lines: [51, 53]
+        note: |
+          L51-L53: 反序列化后用 handle 从 pool 取 tensor，返回共享 storage。
+      - title: rank gather
+        lines: [64, 76]
+        note: |
+          L64-L76: 所有 rank 写 group，只有 rank 0 在收齐后返回完整列表。
+      - title: update and flush
+        lines: [79, 91]
+        note: |
+          L79-L91: 按 TP rank 取 tensor，替换 inference state，最后一个参数才清 pool。
+
+  - title: Patch tests
+    repo_path: labs/l32.5_ipc_weight_sync/patch/tests/test_patch.py
+    focus: handle 大小、data_ptr、rank gather、LST get、state 替换和 flush 时序
+    highlights:
+      - title: handle is not data
+        lines: [22, 29]
+        note: |
+          L22-L29: 4 MB fp32 tensor 的序列化 blob 必须小于 1024 bytes。
+      - title: storage sharing
+        lines: [32, 39]
+        note: |
+          L32-L39: 反序列化后的 tensor 必须和源 tensor 拥有相同 data_ptr。
+      - title: gather contract
+        lines: [52, 61]
+        note: |
+          L52-L61: 测试构造 4 个 rank 的 blob，并逐个调用 gather。
+      - title: gather final
+        lines: [67, 70]
+        note: |
+          L67-L70: rank 0 再次轮询后拿到完整 handle list。
+      - title: local tensor by rank
+        lines: [73, 81]
+        note: |
+          L73-L81: LocalSerializedTensor 按 rank 返回对应 tensor。
+      - title: update state
+        lines: [95, 107]
+        note: |
+          L95-L107: update 后 inference state 的两个参数都被源 tensor 替换。
+      - title: flush timing
+        lines: [128, 139]
+        note: |
+          L128-L139: flush_cache=True 时，两个参数更新完成后 pool size 才变成 0。
+
+  - title: SGLang ModelRunner
+    repo_path: github_repo/sglang/python/sglang/srt/model_executor/model_runner.py
+    focus: 在线 tensor update、LocalSerializedTensor unwrap 和 load_weights
+    highlights:
+      - title: update entry
+        lines: [1932, 1940]
+        note: |
+          L1932-L1940: `update_weights_from_tensor` 先 monkey patch，再处理 flattened bucket 或普通 named tensor。
+      - title: unwrap by rank
+        lines: [1944, 1951]
+        note: |
+          L1944-L1951: 根据当前 TP rank unwrap LocalSerializedTensor，并移动到当前 device。
+      - title: load weights
+        lines: [1952, 1961]
+        note: |
+          L1952-L1961: 根据 load_format 选择 direct/custom/default loader，最终写入模型。
+      - title: unwrap helper
+        lines: [3414, 3417]
+        note: |
+          L3414-L3417: 如果对象是 LocalSerializedTensor，就先按 TP rank 取 tensor。
+      - title: LocalSerializedTensor
+        lines: [3453, 3461]
+        note: |
+          L3453-L3461: 真实类也用 `values[rank]` 保存每个 rank 的 serialized tensor。
+
+  - title: SGLang serializer utilities
+    repo_path: github_repo/sglang/python/sglang/srt/utils/common.py
+    focus: ForkingPickler 序列化对象，CUDA tensor reduction 由 monkey patch 接管
+    highlights:
+      - title: serialize object
+        lines: [2179, 2190]
+        note: |
+          L2179-L2190: MultiprocessingSerializer 定义 serialize 入口和返回类型。
+      - title: forking pickler
+        lines: [2192, 2201]
+        note: |
+          L2192-L2201: ForkingPickler 写入 buffer，并可选转成 base64 字符串。
+      - title: deserialize entry
+        lines: [2203, 2215]
+        note: |
+          L2203-L2215: 反序列化入口处理 bytes 或 base64 string。
+
+  - title: SGLang torch reduction patch
+    repo_path: github_repo/sglang/python/sglang/srt/utils/patch_torch.py
+    focus: CUDA tensor reduction 的 device 信息修正
+    highlights:
+      - title: monkey patch entry
+        lines: [40, 51]
+        note: |
+          L40-L51: patch reduce/rebuild tensor，让跨进程 CUDA tensor 的 device 信息可被改写。
+      - title: reduce tensor
+        lines: [71, 76]
+        note: |
+          L71-L76: reduce tensor 时把 device 字段改成 UUID 表示。
+      - title: rebuild tensor
+        lines: [79, 85]
+        note: |
+          L79-L85: rebuild CUDA tensor 前把 UUID 解析回本进程可见 device。
+
+  - title: SGLang tensor bucket
+    repo_path: github_repo/sglang/python/sglang/srt/weight_sync/tensor_bucket.py
+    focus: 多 tensor flatten 成 bucket，并携带重建 metadata
+    highlights:
+      - title: bucket metadata
+        lines: [7, 16]
+        note: |
+          L7-L16: metadata 记录 name、shape、dtype 和 flattened tensor 中的区间。
+      - title: flatten tensors
+        lines: [49, 60]
+        note: |
+          L49-L60: bucket 收集 tensor metadata，并把 tensor view 成 uint8。
+      - title: concatenate bucket
+        lines: [61, 72]
+        note: |
+          L61-L72: metadata 记录 name/shape/dtype/offset，并把 flattened tensors 拼接。
+      - title: reconstruct
+        lines: [90, 99]
+        note: |
+          L90-L99: reconstruct_tensors 预分配结果，并按 metadata 遍历。
+      - title: reconstruct slice
+        lines: [100, 105]
+        note: |
+          L100-L105: 从 flattened tensor 切片，view 回 dtype，再 reshape 成原 shape。
+
+  - title: SLiME tensor updater
+    repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+    focus: co-locate 路径中的 bucket、IPC serialize、gather_object 和 engine update
+    highlights:
+      - title: update loop start
+        lines: [137, 143]
+        note: |
+          L137-L143: 每次 update 先递增 weight_version。
+      - title: pause and flush
+        lines: [144, 154]
+        note: |
+          L144-L154: rank 0 pause generation、flush cache，并处理量化前置步骤。
+      - title: chunk send and collect
+        lines: [156, 166]
+        note: |
+          L156-L166: 逐个 HF weight chunk 发送，等待 refs，并用 ipc_collect 释放 IPC 资源。
+      - title: colocated sender
+        lines: [209, 220]
+        note: |
+          L209-L220: 没有 IPC gather group 的 placeholder rank 会直接跳过。
+      - title: bucket serialize
+        lines: [234, 244]
+        note: |
+          L234-L244: flatten bucket、保存 metadata，并用 MultiprocessingSerializer 序列化。
+      - title: gather serialized tensors
+        lines: [245, 253]
+        note: |
+          L245-L253: gather_object 收集每个 rank 的 serialized tensors，目标是 ipc_gather_src。
+      - title: remote engine update
+        lines: [255, 267]
+        note: |
+          L255-L267: src rank 按 dtype bucket 调用 engine.update_weights_from_tensor。
 
 mini_infra_targets:
   - mini_infra/slime/
-
 notebooks:
   - notebooks/n22_weight_sync_handle_tuple.ipynb
-
+tickets: []
 prereq: l32_slime_rl_core
 next_lab: l33_rl_rollout_freshness
-
 gpu_modes:
-  local: CPU OK（用 IPCStoragePool 模拟）
-  cluster: 真 CUDA IPC 跨进程验证（需要 multiprocessing + spawn）
+  local: CPU OK（IPCStoragePool 模拟共享 storage）
+  cluster: 真 CUDA IPC 需要 multiprocessing spawn 和同机 GPU 环境
+
+lesson:
+  opening: |
+    L37 讲 co-locate RL 系统里权重同步的真实传输对象。L36 已经把 state_dict 的 key/shape/dtype 合同讲清；本讲继续看训练侧如何把 CUDA tensor 变成 handle tuple，让 SGLang rollout 进程按 TP rank 重建指向同一块 GPU storage 的 tensor。CPU patch 用 `IPCStoragePool` 模拟这条路径，验证 handle bytes 小、data_ptr 共享、rank 0 gather、LocalSerializedTensor 和 flush 时序。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        L37 位于 L36 的本地 weight sync 合同之后。训练侧 actor 更新权重后，co-locate 路径不希望把完整 tensor data 复制给 rollout engine；它更希望传一个可以重建共享 storage 的 handle。真实 CUDA IPC 需要同机进程、GPU allocation 生命周期和 PyTorch reduction 支持，本关用 CPU pool 只模拟结构语义。
+      mental_model: |
+        tensor data 是货物，handle tuple 是提货单。同步时传提货单，接收端按提货单找到同一块 storage。
+      why_it_matters: |
+        大模型 RL 每轮可能同步几十 GB 权重。若 co-locate 路径退化成数据复制，rollout 会被同步时间拖住，旧 KV cache 与新权重的边界也会变得不清楚。
+      source_refs:
+        - title: serialize contract
+          repo_path: labs/l32.5_ipc_weight_sync/patch/starter/ipc_weight_sync.py
+          lines: [60, 68]
+          note: |
+            L60-L68: starter 明确返回 bytes 只包含 handle 和 meta，不包含 tensor data。
+        - title: storage pool
+          repo_path: labs/l32.5_ipc_weight_sync/patch/starter/ipc_weight_sync.py
+          lines: [26, 38]
+          note: |
+            L26-L38: CPU pool 保存原 tensor 引用，用 data_ptr 相等模拟共享 storage。
+      common_confusions:
+        - 把 handle bytes 当成 tensor 压缩包。
+        - 认为 CPU pool 证明了真实 CUDA IPC 跨进程可用。
+        - 忽略 tensor 生命周期和 cache flush。
+      checkpoint_questions:
+        - L37 和 L36 的同步合同差异是什么？
+        - 为什么 handle bytes 应远小于 tensor data？
+        - CPU 模拟不能证明哪些 GPU 结论？
+
+    - title: Handle 和共享 storage
+      plain_explanation: |
+        `serialize_handle` 先把 tensor 注册进 pool 得到 handle，再 pickle shape、dtype、stride、device 和 handle。`deserialize_handle` 解出 handle 后从 pool 取回 tensor。测试要求 4 MB fp32 tensor 的 blob 小于 1024 bytes，并要求反序列化 tensor 的 `data_ptr()` 与源 tensor 相同。
+      mental_model: |
+        同步传访问凭证，不传完整参数。凭证小，storage 仍在原处。
+      why_it_matters: |
+        handle 大小和 data_ptr 是判断实现是否仍保持 IPC 语义的最小证据。
+      source_refs:
+        - title: reference handle meta
+          repo_path: labs/l32.5_ipc_weight_sync/patch/reference/ipc_weight_sync.py
+          lines: [39, 48]
+          note: |
+            L39-L48: reference 只序列化 handle、shape、dtype、stride 和 device。
+        - title: reference deserialize
+          repo_path: labs/l32.5_ipc_weight_sync/patch/reference/ipc_weight_sync.py
+          lines: [51, 53]
+          note: |
+            L51-L53: 反序列化后从 pool 按 handle 取回 tensor。
+        - title: handle size test
+          repo_path: labs/l32.5_ipc_weight_sync/patch/tests/test_patch.py
+          lines: [22, 29]
+          note: |
+            L22-L29: 测试用 blob 小于 1024 bytes 防止学生把数据塞进序列化结果。
+        - title: data_ptr test
+          repo_path: labs/l32.5_ipc_weight_sync/patch/tests/test_patch.py
+          lines: [32, 39]
+          note: |
+            L32-L39: 反序列化结果必须和源 tensor 共享 data_ptr。
+      common_confusions:
+        - 数值相等就等于共享 storage。
+        - pickle tensor 本体也算 handle 序列化。
+        - shape/dtype 足够重建 tensor，handle 可以省略。
+      checkpoint_questions:
+        - handle meta 至少要包含哪些字段？
+        - 为什么测试同时看 blob 大小和 data_ptr？
+        - clone 会破坏哪个合同？
+
+    - title: Rank Gather 和 LST
+      plain_explanation: |
+        真实路径里每个 training rank 都要参与 gather_object，但只有目标 rank 拿到完整列表。本关的 `gather_handles_to_rank0` 用 dict 模拟这件事：所有 rank 写入自己的 blob，非 0 rank 返回 None，rank 0 未收齐也返回 None，收齐后按 rank 顺序返回列表。`LocalSerializedTensor.values` 保存每个 rank 的 blob，SGLang TP rank 用 `values[rank]` 取自己的 handle。
+      mental_model: |
+        每个 rank 投递一张提货单，rank 0 收齐后装进一封信。接收端按自己的 TP rank 抽对应那张。
+      why_it_matters: |
+        co-locate sync 的常见错误是 rank 维度错配：collective 只有部分 rank 参与，rank 0 提前返回部分列表，或 SGLang rank 取错 blob。
+      source_refs:
+        - title: gather reference
+          repo_path: labs/l32.5_ipc_weight_sync/patch/reference/ipc_weight_sync.py
+          lines: [64, 76]
+          note: |
+            L64-L76: reference 保留 gather_object 的单目标返回语义。
+        - title: LST real class
+          repo_path: github_repo/sglang/python/sglang/srt/model_executor/model_runner.py
+          lines: [3453, 3461]
+          note: |
+            L3453-L3461: 真实 LocalSerializedTensor 也用 `values[rank]` 反序列化。
+        - title: gather test
+          repo_path: labs/l32.5_ipc_weight_sync/patch/tests/test_patch.py
+          lines: [52, 61]
+          note: |
+            L52-L61: 测试逐 rank 写入 blob，并调用 gather。
+      common_confusions:
+        - rank 0 第一次调用就能返回完整列表。
+        - 所有 rank 都应拿到完整列表。
+        - "`values` 可以是单个 bytes。"
+      checkpoint_questions:
+        - 为什么非 0 rank 返回 None？
+        - rank 0 未收齐时为什么不能返回部分列表？
+        - LocalSerializedTensor 的 rank 顺序错误会造成什么问题？
+
+    - title: SGLang 接收路径
+      plain_explanation: |
+        SGLang `ModelRunner.update_weights_from_tensor` 先 patch torch reduction，再把每个 named tensor unwrap。若输入是 LocalSerializedTensor，就按当前 TP rank 取出 tensor，再走 direct/custom/default loader 写模型。flattened bucket 路径会先根据 metadata reconstruct tensors，再调用模型加载。
+      mental_model: |
+        SGLang 收到的不是普通 dict；它先把每个提货单换成当前 rank 的 tensor，再交给模型 loader。
+      why_it_matters: |
+        如果 unwrap、device 映射或 loader 选择出错，问题会表现为权重更新失败、部分参数更新或服务端请求异常。
+      source_refs:
+        - title: update entry
+          repo_path: github_repo/sglang/python/sglang/srt/model_executor/model_runner.py
+          lines: [1932, 1940]
+          note: |
+            L1932-L1940: update 入口先 patch reduction，并分流 flattened bucket。
+        - title: unwrap and device
+          repo_path: github_repo/sglang/python/sglang/srt/model_executor/model_runner.py
+          lines: [1944, 1951]
+          note: |
+            L1944-L1951: SGLang 根据 TP rank unwrap tensor，并移动到当前 device。
+        - title: loader choice
+          repo_path: github_repo/sglang/python/sglang/srt/model_executor/model_runner.py
+          lines: [1952, 1961]
+          note: |
+            L1952-L1961: load_format 决定 direct、custom 或默认 load_weights。
+        - title: torch patch
+          repo_path: github_repo/sglang/python/sglang/srt/utils/patch_torch.py
+          lines: [40, 51]
+          note: |
+            L40-L51: monkey patch torch reductions，保证 CUDA tensor reduction/rebuild 可被定制。
+      common_confusions:
+        - SGLang 直接使用 serialized bytes 更新模型。
+        - load_format 只是日志字段。
+        - device 映射对 co-locate IPC 无关。
+      checkpoint_questions:
+        - SGLang 在哪里按 TP rank unwrap？
+        - "`monkey_patch_torch_reductions` 解决什么边界？"
+        - flattened bucket 和普通 named tensor 路径有什么区别？
+
+    - title: SLiME 分桶发送
+      plain_explanation: |
+        SLiME 的 tensor updater 先 pause generation 和 flush cache，再按 HF weight chunk 发送。co-locate 发送时把参数按 dtype 分组，构造 FlattenedTensorBucket，序列化 flattened tensor 和 metadata，然后用 gather_object 收集到 ipc_gather_src。源 rank 按 dtype bucket 调 rollout engine 的 `update_weights_from_tensor`，最后等待 refs 并调用 `torch.cuda.ipc_collect()`。
+      mental_model: |
+        训练侧按桶打包参数：一个 flattened tensor 加一份 metadata 清单。
+      why_it_matters: |
+        大模型 sync 的瓶颈可能来自 bucket 构造、HF 转换、gather、engine lock、IPC 资源释放和 cache flush，不只是 handle 本身。
+      source_refs:
+        - title: SLiME update loop
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+          lines: [137, 143]
+          note: |
+            L137-L143: update 开始时递增 version。
+        - title: send chunks
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+          lines: [156, 166]
+          note: |
+            L156-L166: 每个 HF weight chunk 发送后等待 refs，并释放 IPC 资源。
+        - title: serialize bucket
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+          lines: [234, 244]
+          note: |
+            L234-L244: flattened tensor 和 metadata 一起进入 MultiprocessingSerializer。
+        - title: gather object
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+          lines: [245, 253]
+          note: |
+            L245-L253: gather_object 收集每个 rank 的 serialized bucket。
+        - title: engine update
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+          lines: [255, 267]
+          note: |
+            L255-L267: src rank 组装 kwargs，并远程调用 rollout engine 的 tensor update。
+      common_confusions:
+        - from_tensor 完全没有显存峰值。
+        - bucket 只是性能装饰，不影响正确性。
+        - "`ipc_collect` 可以省略。"
+      checkpoint_questions:
+        - SLiME 为什么先 pause generation？
+        - FlattenedTensorBucket metadata 保存什么？
+        - "`torch.cuda.ipc_collect()` 放在什么边界之后？"
+
+    - title: Lab 验收边界
+      plain_explanation: |
+        本讲 patch 只验证 CPU 模拟合同：handle 小、共享 storage、rank 0 gather、LST get、state 替换和最后 flush。它不证明 CUDA IPC 跨进程、SGLang 真实 endpoint、Ray actor、NCCL/Gloo group 或 GPU 生命周期管理。本讲目录没有 dedicated smoke target，验证闭环是 patch-test 加 notebook 复盘。
+      mental_model: |
+        CPU patch 证明提货单格式和流程；GPU 集群验证才证明仓库真的能跨进程开门。
+      why_it_matters: |
+        只跑 CPU 测试就声称 co-locate weight sync 可用，会漏掉最关键的跨进程和生命周期风险。
+      source_refs:
+        - title: update state test
+          repo_path: labs/l32.5_ipc_weight_sync/patch/tests/test_patch.py
+          lines: [95, 107]
+          note: |
+            L95-L107: update 后 inference state 被源 tensor 替换。
+        - title: flush timing test
+          repo_path: labs/l32.5_ipc_weight_sync/patch/tests/test_patch.py
+          lines: [128, 139]
+          note: |
+            L128-L139: flush_cache=True 时最后一个参数后 pool 才清空。
+      common_confusions:
+        - patch-test 通过就等于 CUDA IPC 跨进程可用。
+        - notebook 可以替代真实 SGLang engine 更新。
+        - 不记录 handle/data 比例也能判断是否退化成 copy。
+      checkpoint_questions:
+        - 本讲 patch-test 覆盖哪 7 个合同？
+        - 真 CUDA IPC 还需要哪些证据？
+        - 为什么本讲不提供 smoke target？

@@ -1,4 +1,4 @@
-"""Reference solution for L07 Patch · typical_p_filter."""
+"""Reference solution for L20 Patch · typical_p_filter."""
 
 from __future__ import annotations
 

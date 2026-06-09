@@ -1,4 +1,4 @@
-"""Reference solution for L06.3 Patch · MinHash dedup."""
+"""Reference solution for L19 Patch · MinHash dedup."""
 
 from __future__ import annotations
 

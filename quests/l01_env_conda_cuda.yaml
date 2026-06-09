@@ -1,7 +1,7 @@
 id: l01_env_conda_cuda
-title: 环境、Conda、CUDA 与 Git 生存课（源码研读 + 项目实战）
+title: L01 · 环境探针：把环境变成可复查证据
 act: 第 0 章：入门与环境
-level: L00
+level: L01
 role: Infra 新兵
 priority: 核心
 frameworks:
@@ -13,7 +13,7 @@ gpu_modes:
   cluster: 8×H200 单节点验证
 datasets: []
 learning_goals:
-- 先在 MiniInfra 主线模块完成 L00 增量，再用 notebook、真实源码和 lab artifact 交叉验证。
+- 先在 MiniInfra 主线模块完成 L01 增量，再用 notebook、真实源码和 lab artifact 交叉验证。
 - 读懂关键源码路径，并画出 环境、Conda、CUDA 与 Git 生存课 的入口到指标/artifact 调用链。
 - 用 notebook 或最小脚本建立预测，再用真实运行验证 同一段 PyTorch 代码为什么会在 import、CUDA、NCCL、rank/device 映射四个层面分别失败？
 - 完成真实项目：Environment Flight Recorder：一键环境审计器，留下可复现 artifacts。
@@ -22,67 +22,558 @@ success_criteria:
 - 报告必须包含 MiniInfra 同构文件、对应真实源码、lab artifact/metrics 的三方对照，不能只提交 toy demo 结论。
 - 报告包含至少 3 个源码节点、关键不变量和失败边界。
 - metrics.jsonl、日志和 artifacts 能支撑实验矩阵中的结论。
-- 完成项目交付物：artifacts/check_cuda.json、check_torch.json、check_nccl.json、collect_env.json。; artifacts/torchrun_hello.log，含每个 rank 的 hostname、rank、local_rank、device。
+- 完成项目交付物：artifacts/check_cuda.json、check_torch.json、check_nccl.json、collect_env.json。; artifacts/torchrun_hello.log，含每个 rank
+  的 hostname、rank、local_rank、device。
 - 清楚区分本地 smoke、H200 真实运行与 validation-only。
+lesson:
+  opening: |
+    这节课解决一个开工前必须回答的问题：拿到一台陌生 4090 或 H200 机器时，怎样证明后面的 PyTorch、DDP、Megatron、Serving 和 RL 实验具备基本运行条件。这里的证明要落成一组可复查 artifact：Python 从哪里启动，Conda 环境是否符合课程文件，PyTorch wheel 是否带 CUDA，当前进程能看到几张 GPU，NCCL/Gloo 是否可用，torchrun 的每个 rank 绑定到哪个 device。
+
+    本讲的 patch 很小，只实现 `collect_python_env`、`parse_local_rank_mapping` 和 `summarize_drift`。小函数背后对应真实工程里的第一道 gate：把 import 失败、CUDA 不可用、`CUDA_VISIBLE_DEVICES` 重映射和 rank/device 错位拆成结构化证据。学完后，学生应能读懂 `check_cuda.json`、`check_nccl.json`、`collect_env.json`、`torchrun_hello.log`、`command.sh` 和 `config.resolved.yaml`，并知道下一步该查 Python、wheel、driver、容器可见性、通信后端还是启动参数。
+  sections:
+  - title: 目标和验收边界
+    plain_explanation: |
+      本讲的目标有四个。第一，能把环境检查拆成 Python/Conda、PyTorch wheel、CUDA 可见性、分布式后端和 torchrun 进程身份。第二，能解释 `torch_importable`、`torch.version.cuda`、`torch.cuda.is_available()`、`cuda_device_count`、`nccl_available` 各自回答的问题。第三，能实现三个环境探针函数，并让 7 个 CPU patch tests 通过。第四，能把一次 smoke run 的命令、配置、JSON、日志和报告串成证据链。
+
+      验收边界也要写清。本关不训练模型，不评估吞吐，不证明 NCCL 在多节点大规模训练中稳定；它只证明当前环境的基础事实是否可复查。`make patch-test M=l01_env_conda_cuda` 检查的是函数行为。`make smoke M=l01_env_conda_cuda` 或 lab 内 `make smoke` 检查的是环境证据产物。若运行在 CPU-only validation 模式，只能说明脚本路径和 gloo 分支可用，不能写成 H200 GPU/NCCL 已通过。
+    mental_model: |
+      把 L01 看成起飞前检查单。每一项只证明一件事：解释器、依赖、GPU 可见性、通信后端、rank 映射和证据落盘。
+    why_it_matters: |
+      后续实验的失败常会伪装成模型或框架 bug。先把环境层证据固定下来，排障时才能少猜一步，避免在错误层面修改训练代码。
+    source_refs:
+    - title: Smoke output
+      repo_path: labs/l01_env_conda_cuda/scripts/run_smoke.py
+      lines:
+      - 67
+      - 79
+      note: |
+        L67-L79: smoke run 写配置、命令快照和四类环境 artifact。
+    common_confusions:
+    - 把 patch-test 通过等同于 H200 环境通过；patch-test 只验证函数逻辑。
+    - 把 gloo smoke 写成 NCCL 通过；gloo 只能覆盖 CPU 或轻量分布式路径。
+    - 只保存终端截图；本关要求能被脚本读取和比较的 JSON、日志、配置和命令。
+    checkpoint_questions:
+    - 本关的 patch-test 和 smoke run 分别验证什么？
+    - CPU-only validation 的报告边界应该怎样写？
+    - 为什么 `command.sh` 也属于环境证据？
+  - title: Python、Conda 和 Wheel
+    plain_explanation: |
+      Python 解释器是实际执行脚本的二进制程序，`sys.executable` 能告诉你当前脚本从哪个 Python 启动。Conda 环境是一组隔离的 Python 包和部分动态库依赖，课程的 `envs/base.yaml` 固定了 Python 版本、基础工具和若干服务依赖。PyTorch wheel 是已经编译好的 PyTorch 包，它可能是 CPU-only，也可能内置某个 CUDA runtime。三者属于不同层，排障时不能混在一起。
+
+      `collect_python_env()` 故意不 import torch。它只读 `sys` 和 `os.environ`，返回 `python_version`、`python_executable`、`pythonpath`、`cuda_visible_devices`、`local_rank` 和 `world_size`。这样即使 torch 还没安装，探针也能先记录解释器和启动环境。`pythonpath` 必须是 list，空路径要过滤掉；`CUDA_VISIBLE_DEVICES` 未设置返回 `None`，设置为空串返回 `""`。这两个细节能直接暴露 import 污染和 GPU 可见性漂移。
+    mental_model: |
+      Python 是入口，Conda 是工具箱，PyTorch wheel 是工具箱里的大件工具。入口错了，工具箱再对也没用；wheel 版本错了，GPU 机器也可能只能跑 CPU。
+    why_it_matters: |
+      import 失败、包版本漂移和 CPU-only torch 是新环境里最早出现的故障。先记录解释器和路径变量，能把“包没装”和“进错环境”区分开。
+    source_refs:
+    - title: Conda 创建脚本
+      repo_path: scripts/env/create_env.sh
+      lines:
+      - 4
+      - 16
+      note: |
+        L4-L16: 创建环境前先验证环境名、yaml 文件和 conda 是否可用。
+    - title: Reference collect
+      repo_path: labs/l01_env_conda_cuda/patch/reference/env_probe.py
+      lines:
+      - 9
+      - 21
+      note: |
+        L9-L21: 参考实现只使用 `os.environ` 和 `sys`。
+    common_confusions:
+    - 认为 `pip show torch` 能证明当前脚本会 import 同一个 torch；脚本可能由另一个解释器启动。
+    - 把 `torch.version.cuda` 当成 driver 版本；它表示 wheel 编译时使用的 CUDA runtime。
+    - 把未设置的 `CUDA_VISIBLE_DEVICES` 和空串混成同一种状态；本关要求字段能区分。
+    checkpoint_questions:
+    - '`sys.executable` 能回答哪个排障问题？'
+    - 为什么 `collect_python_env()` 不应该 import torch？
+    - 空 PYTHONPATH 应该返回什么类型和值？
+  - title: CUDA 可见性和设备映射
+    plain_explanation: |
+      CUDA 可见性描述当前进程能看到哪些 GPU。它受驱动、容器、调度系统、PyTorch wheel 和 `CUDA_VISIBLE_DEVICES` 影响。`nvidia-smi` 主要证明 driver 能看到硬件；`torch.cuda.is_available()` 证明当前 Python 进程能通过 torch 使用 CUDA；`torch.cuda.device_count()` 证明当前进程能看到多少个逻辑 device。三条证据经常不同步，所以要分别保存。
+
+      `CUDA_VISIBLE_DEVICES=2,3` 是重映射表。对进程来说，物理 GPU 2 会变成逻辑 `cuda:0`，物理 GPU 3 会变成逻辑 `cuda:1`。torchrun 通常用 `LOCAL_RANK` 选择本机逻辑 device，所以 `LOCAL_RANK=1` 会调用 `set_device(1)`，进程内看到的是 `cuda:1`，对应物理 GPU 3。`parse_local_rank_mapping()` 的作用是把这个逻辑编号和物理编号写清楚，越界时用包含 `local_rank=`、`visible_devices=`、`out of range` 的异常提示定位问题。
+    mental_model: |
+      `CUDA_VISIBLE_DEVICES` 像一张座位重编号表。PyTorch 看逻辑座位号，`nvidia-smi` 看物理座位号，调试时要能把两张表对上。
+    why_it_matters: |
+      rank/device 映射错会导致某些 GPU 空闲、某些 GPU 被多个进程占用，甚至让 NCCL 初始化卡住。提前输出映射，比在训练 hang 后猜测要便宜得多。
+    source_refs:
+    - title: CUDA checker
+      repo_path: scripts/env/check_cuda.py
+      lines:
+      - 16
+      - 28
+      note: |
+        L16-L28: 检查 torch import、CUDA 可用性、设备数量、CUDA 版本和设备属性。
+    - title: Reference mapping
+      repo_path: labs/l01_env_conda_cuda/patch/reference/env_probe.py
+      lines:
+      - 29
+      - 41
+      note: |
+        L29-L41: 参考实现处理 unset、空串、非整数、越界和正常映射。
+    common_confusions:
+    - 用 `nvidia-smi` 替代 `torch.cuda.is_available()`；前者在 driver 层，后者在当前 Python 进程层。
+    - 认为 `LOCAL_RANK=1` 总是物理 GPU 1；CVD 重映射后它可能对应物理 GPU 3。
+    - 越界时只报普通 IndexError；工程上要把 local rank 和 visible device 列表写进错误信息。
+    checkpoint_questions:
+    - '`CUDA_VISIBLE_DEVICES=2,3` 时，进程内 `cuda:0` 对应哪张物理卡？'
+    - '`torch.cuda.is_available()` 和 `cuda_device_count` 分别回答什么？'
+    - rank 映射越界时，错误信息至少要包含哪三个片段？
+  - title: NCCL、Gloo 和 torchrun
+    plain_explanation: |
+      PyTorch Distributed 支持多种后端。NVIDIA Collective Communications Library（NCCL）通常用于 GPU 间集合通信，DDP、Megatron 和 Tensor Parallel 都会依赖它。Gloo 是另一种后端，常用于 CPU 或轻量 smoke test。`check_nccl.py` 只检查 torch distributed 是否可用、NCCL 是否可用、Gloo 是否可用；它不启动多个进程，也不证明通信在当前节点实际成功。
+
+      torchrun 才负责多进程身份。它为每个进程注入 `RANK`、`LOCAL_RANK` 和 `WORLD_SIZE`。`RANK` 是全局编号，跨节点唯一；`LOCAL_RANK` 是本机编号，常用于选择本机 GPU；`WORLD_SIZE` 是总进程数。`torchrun_hello.py` 会根据 GPU 数和 world size 选择 NCCL 或 Gloo，输出每个进程的 rank、local_rank、backend 和 device。报告里要同时看 backend 和 device，避免把“多进程启动了”误写成“GPU 通信通过”。
+    mental_model: |
+      torchrun 是点名器，RANK 是全班编号，LOCAL_RANK 是本机座位号，NCCL/Gloo 是进程之间传消息的通道。
+    why_it_matters: |
+      后面的多卡训练、推理并行和 RL rollout 都继承这套身份语义。第一讲先用短日志验证身份和设备绑定，能降低后续定位成本。
+    source_refs:
+    - title: NCCL checker
+      repo_path: scripts/env/check_nccl.py
+      lines:
+      - 16
+      - 28
+      note: |
+        L16-L28: 检查 distributed、NCCL、Gloo 和 import 错误。
+    - title: torchrun hello
+      repo_path: labs/l01_env_conda_cuda/scripts/torchrun_hello.py
+      lines:
+      - 17
+      - 29
+      note: |
+        L17-L29: 根据 world size 和 GPU 数选择 backend，并输出 rank/device payload。
+    common_confusions:
+    - 看到 `distributed_available=true` 就认为 NCCL 真实通信已通过；还需要 torchrun 多进程证据。
+    - 用全局 `RANK` 调 `torch.cuda.set_device`；多节点时本机 GPU 编号应该用 `LOCAL_RANK`。
+    - 忽略 `WORLD_SIZE` 和 GPU 数关系；world size 大于可见 GPU 数时脚本可能退到 CPU/Gloo。
+    checkpoint_questions:
+    - '`RANK` 和 `LOCAL_RANK` 的作用分别是什么？'
+    - '`check_nccl.json` 为什么不能替代 `torchrun_hello.log`？'
+    - H200 模板和 4090 smoke 在进程数、后端假设上有什么差异？
+  - title: Patch 实现路径
+    plain_explanation: |
+      第一个函数 `collect_python_env()` 建议先读原始环境变量，再做类型整理。`PYTHONPATH` 用 `os.pathsep` 切开，并过滤空字符串；`CUDA_VISIBLE_DEVICES` 直接用 `os.environ.get`，保留 unset 与空串的差异；`LOCAL_RANK` 和 `WORLD_SIZE` 只有在存在且非空时才转成整数。这个函数的边界是不能 import torch，因为它要在最干净的 Python 环境里运行。
+
+      第二个函数 `parse_local_rank_mapping()` 先检查 local rank 非负，再解析 CVD。CVD 为 `None` 或 `""` 时，约定 `visible_devices=[]`，表示没有显式重映射，物理编号等于 local rank；CVD 非空时，按逗号切成整数列表，再用 local rank 索引。第三个函数 `summarize_drift()` 对 baseline 和 current 的 key 做并集，按字母序输出变化；list 值用 `repr` 打印，缺失值用 `<missing>`。这三个函数合起来覆盖“记录现状、解释映射、比较漂移”三类动作。
+    mental_model: |
+      Patch 像三步排障工具：先拍快照，再把本地 rank 映射到物理设备，最后比较两次快照哪里变了。
+    why_it_matters: |
+      课程后面会不断要求学生保存 run artifact。L01 先用最小函数训练字段语义、异常信息和可 diff 输出，避免后面只写散乱日志。
+    source_refs:
+    - title: Starter TODO
+      repo_path: labs/l01_env_conda_cuda/patch/starter/env_probe.py
+      lines:
+      - 16
+      - 28
+      note: |
+        L16-L28: 三个待实现函数的输入、输出和异常边界。
+    - title: Reference implementation
+      repo_path: labs/l01_env_conda_cuda/patch/reference/env_probe.py
+      lines:
+      - 9
+      - 21
+      note: |
+        L9-L21: 完整实现了快照、rank 映射和漂移 diff。
+    - title: Patch tests
+      repo_path: labs/l01_env_conda_cuda/patch/tests/test_patch.py
+      lines:
+      - 22
+      - 34
+      note: |
+        L22-L34: 7 个测试覆盖必填字段、PYTHONPATH、CVD、映射和 drift。
+    common_confusions:
+    - 把 `pythonpath` 返回成字符串；测试要求 list，便于比较路径项。
+    - 把 CVD 空串当成 `[0]`；本关约定空串和 unset 都返回空 visible list。
+    - drift 只比较交集 key；任务要求新增 key 也算漂移。
+    checkpoint_questions:
+    - '`collect_python_env()` 的六个必填 key 是什么？'
+    - '`parse_local_rank_mapping()` 在 CVD 为空时怎样计算 physical_device？'
+    - '`summarize_drift()` 为什么要按 key 排序？'
+  - title: Smoke 流程和证据落盘
+    plain_explanation: |
+      完整 smoke 从配置文件进入。`run_smoke.py` 读取 `configs/4090_debug.yaml` 或 `configs/h200_node.yaml`，创建 run directory，写 `command.sh` 和 `config.resolved.yaml`，再依次运行 `check_cuda.py`、`check_torch.py`、`check_nccl.py`、`collect_env.py` 和 `torchrun_hello.py`。最后它从 `check_cuda.json` 提取 CUDA 可见性，写 `train.log`、`metrics.jsonl` 和 `report.md`。
+
+      最小复现可以按两层执行。函数层先跑：
+
+      ```bash
+      make patch-test M=l01_env_conda_cuda
+      ```
+
+      环境层再跑：
+
+      ```bash
+      make smoke M=l01_env_conda_cuda
+      ```
+
+      若只想缩小 CUDA 问题，可以直接运行：
+
+      ```bash
+      python scripts/env/check_cuda.py --pretty --output /tmp/check_cuda.json
+      ```
+
+      读报告时要把 artifact 和结论对应起来：`check_cuda.json` 说明 torch/CUDA/GPU，`check_nccl.json` 说明后端能力，`collect_env.json` 说明 Python、PATH、CONDA、外部命令，`torchrun_hello.log` 说明多进程身份和设备绑定。
+    mental_model: |
+      smoke 流程是一条证据流水线。配置和命令进入，多个探针产出 JSON 和日志，报告只负责解释这些证据。
+    why_it_matters: |
+      结构化产物能支持对比。两次 run 的 `config.resolved.yaml`、`command.sh` 和 JSON 字段不同，通常比训练日志里最后一个异常更接近根因。
+    source_refs:
+    - title: Run directory helpers
+      repo_path: scripts/runtime_utils.py
+      lines:
+      - 42
+      - 54
+      note: |
+        L42-L54: 创建 run 目录、写文本、JSON、YAML 和 JSONL。
+    - title: Smoke driver
+      repo_path: labs/l01_env_conda_cuda/scripts/run_smoke.py
+      lines:
+      - 60
+      - 72
+      note: |
+        L60-L72: 读取配置、写 artifact、写 metrics 和 train.log。
+    - title: Report writer
+      repo_path: labs/l01_env_conda_cuda/scripts/run_smoke.py
+      lines:
+      - 110
+      - 122
+      note: |
+        L110-L122: 报告记录目标、配置、结果、debug ticket 和 H200 迁移说明。
+    - title: collect_env
+      repo_path: scripts/env/collect_env.py
+      lines:
+      - 29
+      - 41
+      note: |
+        L29-L41: 汇总 Python、环境变量、torch 和外部命令输出。
+    common_confusions:
+    - 只看 `report.md`；报告里的判断必须能回到 artifacts 里的具体字段。
+    - 把 `make smoke` 和 `make run-h200` 写成同一类证据；二者配置和硬件假设不同。
+    - 忽略 `command.sh`；命令参数和环境变量漂移会直接改变结果。
+    checkpoint_questions:
+    - 一次 smoke run 至少会生成哪四类 artifact？
+    - '`check_cuda.json` 和 `collect_env.json` 的职责有什么不同？'
+    - 为什么两次 run 对比时要先看 `config.resolved.yaml` 和 `command.sh`？
+  - title: 性能和边界
+    plain_explanation: |
+      环境 smoke 的指标不是训练吞吐。`tokens_per_sec=0.0`、`peak_memory_gb=0.0` 在本关是合理值，因为没有模型 forward/backward。这里真正有用的指标是布尔和计数字段，例如 `torchrun_ok`、`cuda_available`、`cuda_device_count`、`distributed_available`、`nccl_available`。它们回答的是“基础条件是否成立”，不回答“训练能跑多快”。
+
+      边界要写得克制。本地 1×4090 或 CPU validation 可以证明脚本、artifact、gloo 分支和单机小规模启动；8×H200 模板才接近后续训练的硬件形态，但仍只覆盖本节点环境和 torchrun 入口。即使 L01 全部通过，后续仍可能因为显存、网络、文件系统、模型配置或数据 schema 出错。反过来，L01 失败时也不该先改模型代码，应该按环境层证据修复。
+    mental_model: |
+      L01 是红绿灯，不是测速仪。它告诉你能否进入后续实验路口，不给出模型训练性能结论。
+    why_it_matters: |
+      如果把 smoke 当成 benchmark，报告会夸大证据范围；如果忽略 smoke，后续每个失败都可能被误判成框架问题。
+    source_refs:
+    - title: Metrics writer
+      repo_path: labs/l01_env_conda_cuda/scripts/run_smoke.py
+      lines:
+      - 96
+      - 108
+      note: |
+        L96-L108: 本关 metrics 写环境布尔字段，吞吐和显存为占位值。
+    - title: Evidence scanner
+      repo_path: mini_infra/observability/evidence.py
+      lines:
+      - 11
+      - 23
+      note: |
+        L11-L23: MiniInfra 用 command、config、report、metrics 和 artifact 数量汇总证据。
+    common_confusions:
+    - 把 `tokens_per_sec=0.0` 当成性能失败；本关没有训练 workload。
+    - 把 H200 smoke 通过写成长期训练稳定；它只覆盖环境入口。
+    - 在 L01 失败时直接改模型 batch size；应先修复 import、CUDA、后端或 rank 映射。
+    checkpoint_questions:
+    - L01 中哪些字段比 tokens/s 更有解释价值？
+    - 本地 4090 smoke 和 H200 smoke 的证据边界分别是什么？
+    - 为什么环境检查通过后，后续仍可能出现 OOM 或数据错误？
+  - title: Debug 路线
+    plain_explanation: |
+      遇到 import 失败，先看 `python_executable`、`pythonpath`、`CONDA_PREFIX` 和 `torch.__file__`，判断脚本是否进入了预期解释器，以及是否被项目内同名目录污染。遇到 `torch.cuda.is_available()` 为 false，但 `nvidia-smi` 能看到 GPU，先看 `torch_importable`、`torch_version`、`cuda_version`、`import_error`、`LD_LIBRARY_PATH` 和容器设备可见性。遇到 rank/device 错位，先看 `CUDA_VISIBLE_DEVICES`、`LOCAL_RANK`、`WORLD_SIZE`、`torchrun_hello.log` 和 `parse_local_rank_mapping()` 的输出。
+
+      Debug ticket 的共同规则是单变量复现。先比较失败 run 和最近一次通过 run 的 `command.sh`、`config.resolved.yaml`、主日志和 `metrics.jsonl`；每次只改一个变量，保留修复前后 artifact。不要删除断言、吞掉异常或伪造 metrics。报告里的结论必须连接到具体字段，例如“CVD=2,3 且 LOCAL_RANK=1 映射到 physical_device=3”，而不是只写“环境已修好”。
+    mental_model: |
+      Debug 像分诊：import 看解释器和路径，CUDA 看 wheel/driver/可见性，rank 错位看启动器和 CVD 重映射。
+    why_it_matters: |
+      L01 的价值在失败时最明显。证据字段足够细，学生就能把故障分流到正确层面，减少无意义的环境重装和训练代码改动。
+    source_refs:
+    - title: Report debug section
+      repo_path: labs/l01_env_conda_cuda/scripts/run_smoke.py
+      lines:
+      - 133
+      - 145
+      note: |
+        L133-L145: 报告模板把 rank/device ticket、根因、最小修复和验证方式写出。
+    common_confusions:
+    - 重装整个环境作为第一反应；更稳妥的顺序是先定位变动字段。
+    - 只看最后一个异常；更早的 import、CUDA 或启动器提示常是根因。
+    - 把修复动作写成口头描述；报告必须给出能复查的 artifact 路径和字段。
+    checkpoint_questions:
+    - import 失败时，优先检查哪四类字段？
+    - '`torch.cuda.is_available()` 为 false 时，为什么还要记录 `nvidia-smi` 或 `libcuda` 相关证据？'
+    - rank/device 错位的最小修复如何用 artifact 验证？
+patch:
+  description: 实现环境快照、LOCAL_RANK 到物理 GPU 的映射、环境漂移摘要三个最小合同。
+  task_md: labs/l01_env_conda_cuda/patch/task.md
+  starter_file: labs/l01_env_conda_cuda/patch/starter/env_probe.py
+  reference_file: labs/l01_env_conda_cuda/patch/reference/env_probe.py
+  test_command: make patch-test M=l01_env_conda_cuda
+  status_file: labs/l01_env_conda_cuda/patch/.last_run.json
+  test_count: 7
+  test_kind: 最小行为合同验证
+mini_infra_targets:
+- mini_infra/observability/evidence.py
+notebooks:
+- notebooks/n00_env_warmup.ipynb
+lesson_docs:
+- title: 系统地图
+  path: labs/l01_env_conda_cuda/system_map.md
+  description: 本讲在章节中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l01_env_conda_cuda/lecture.md
+  description: 从真实问题、核心机制、源码抽象讲到 lab 验收和生产排查。
+- title: 源码带读讲义
+  path: labs/l01_env_conda_cuda/source_walkthrough.md
+  description: 按主路径组织的源码阅读路线，说明每步要读什么和跳过什么。
 source_reading:
-- title: MiniInfra 主线：mini_infra/observability/evidence.py
-  repo_path: mini_infra/observability/evidence.py
-  focus: 阅读 MiniInfra 主线模块，明确它保留的真实项目生命周期、系统边界和最小不变量。
-  questions:
-  - 这个 MiniInfra 文件对应真实项目中的哪个入口、类或生命周期？
-  - 它保留了哪些系统不变量，删掉了哪些生产复杂度？
-  - 本关 lab 的 metrics/artifacts 如何验证这个不变量，而不是只验证 toy 行为？
-- title: Conda 环境创建入口
-  repo_path: scripts/env/create_env.sh
-  focus: 梳理 env 名称、yaml 文件、conda/mamba fallback、失败退出路径。
-  questions:
-  - ENV 参数如何映射到 envs/*.yaml？
-  - 脚本如何避免静默创建错误环境？
-  - 如果 learner 在已有环境中运行，应该记录哪些漂移？
-- title: CUDA 与 PyTorch wheel 体检
+- title: Patch starter
+  repo_path: labs/l01_env_conda_cuda/patch/starter/env_probe.py
+  focus: 三个待实现函数的输入、输出和异常合同
+  highlights:
+  - title: collect_python_env 合同
+    lines:
+    - 16
+    - 28
+    note: |
+      L16-L18: 函数只返回当前 Python 和 launcher 环境快照。
+      L21-L26: 六个字段是测试和报告依赖的最小 schema。
+      L28: 明确禁止 import torch，保证 torch 坏掉时也能采集基础事实。
+  - title: parse_local_rank_mapping 合同
+    lines:
+    - 34
+    - 46
+    note: |
+      L34-L39: 输入是环境快照和非负 local rank。
+      L41-L45: `visible_devices` 表示 CVD 解析结果，空 list 表示没有显式重映射。
+      L46: `physical_device` 是最终要写进排查报告的物理卡编号。
+  - title: mapping 异常边界
+    lines:
+    - 50
+    - 58
+    note: |
+      L50-L53: 负 rank 和非整数 CVD 都要给出可定位异常。
+      L54-L55: rank 越界错误必须包含 local_rank、visible_devices 和 out of range。
+      L57-L58: starter 保留 TODO，学生只补合同内逻辑。
+  - title: summarize_drift 合同
+    lines:
+    - 61
+    - 73
+    note: |
+      L61-L64: 输入是两份环境快照。
+      L66-L69: 只输出变更字段，并用固定字符串格式。
+      L70-L72: 相同输入返回空 list，便于脚本判断无漂移。
+- title: Patch reference
+  repo_path: labs/l01_env_conda_cuda/patch/reference/env_probe.py
+  focus: 参考实现里的字段语义、CVD 映射和 drift 输出
+  highlights:
+  - title: PYTHONPATH 和 CVD
+    lines:
+    - 9
+    - 13
+    note: |
+      L9: `collect_python_env` 是纯 Python 探针入口。
+      L10-L11: `PYTHONPATH` 按 `os.pathsep` 拆分并过滤空项。
+      L13: CVD 用 `os.environ.get` 保留 unset 与空串差异。
+  - title: rank/world size 转换
+    lines:
+    - 15
+    - 26
+    note: |
+      L15-L17: `_maybe_int` 只在变量存在且非空时转整数。
+      L19-L25: 返回的六个字段形成环境快照 schema。
+      L26: 函数结束时仍未 import torch。
+  - title: CVD 解析
+    lines:
+    - 29
+    - 41
+    note: |
+      L29-L31: 负 local rank 直接拒绝。
+      L33-L35: CVD 未设置或空串时，`visible` 为空。
+      L37-L41: 非整数 CVD token 转成带上下文的 ValueError。
+  - title: physical device 映射
+    lines:
+    - 44
+    - 56
+    note: |
+      L44-L49: 有 CVD 时，local rank 是 `visible` 的索引。
+      L50-L51: 无显式 CVD 时，物理 device 等于 local rank。
+      L53-L57: 输出三个字段供报告和调试使用。
+  - title: drift 字段并集
+    lines:
+    - 63
+    - 72
+    note: |
+      L63-L66: 比较 baseline 和 current 的 key 并集。
+      L68-L70: 缺失字段用 `<missing>` 参与比较。
+      L71-L72: 相同值不进入 diff。
+  - title: drift 输出格式
+    lines:
+    - 74
+    - 82
+    note: |
+      L74-L79: list 用 `repr` 保持完整可读。
+      L81: 输出格式固定为 `key: old → new`。
+      L82: 返回按 key 排序后的 diff 列表。
+- title: CUDA checker
   repo_path: scripts/env/check_cuda.py
-  focus: 区分 driver、runtime、device_count、torch wheel CUDA ABI。
-  questions:
-  - torch.cuda.is_available 为 false 时有哪些可定位字段？
-  - 为什么 driver 正常不代表 PyTorch wheel 可用？
-  - 哪些字段必须写入 artifacts 才能复现？
-- title: NCCL 与 torchrun rank 语义
+  focus: 当前 Python 进程的 PyTorch 和 CUDA 可见性
+  highlights:
+  - title: CUDA payload
+    lines:
+    - 16
+    - 27
+    note: |
+      L16-L18: `torch_importable` 区分 import 层失败和 CUDA 层失败。
+      L19-L24: torch 版本、CUDA 可用性、设备数和 wheel CUDA runtime 分开记录。
+      L25-L27: 设备列表和 import_error 让报告能解释失败原因。
+  - title: device 枚举
+    lines:
+    - 28
+    - 40
+    note: |
+      L28: 只有 CUDA 可用才枚举 device。
+      L32-L36: 记录逻辑 index、设备名和 compute capability。
+      L37-L40: total memory 用 GB 写入，便于和预期 GPU 对照。
+  - title: JSON 输出
+    lines:
+    - 46
+    - 57
+    note: |
+      L46-L51: CLI 只负责选择输出位置和格式。
+      L51-L53: payload 同时打印到 stdout。
+      L54-L57: `--output` 时写入 artifact 文件。
+- title: NCCL checker
+  repo_path: scripts/env/check_nccl.py
+  focus: PyTorch distributed 后端可用性
+  highlights:
+  - title: distributed 后端字段
+    lines:
+    - 16
+    - 27
+    note: |
+      L16-L19: 默认值区分未安装 torch 和后端不可用。
+      L21-L24: distributed 与 NCCL 可用性分开记录。
+      L25-L27: Gloo 可用性也记录，CPU smoke 需要它。
+  - title: checker 输出
+    lines:
+    - 28
+    - 34
+    note: |
+      L28-L33: payload 不启动多进程，只说明后端是否存在。
+      L34: import_error 保留 torch import 失败上下文。
+- title: collect_env
+  repo_path: scripts/env/collect_env.py
+  focus: 系统上下文、环境变量和外部命令证据
+  highlights:
+  - title: Python 和环境变量
+    lines:
+    - 29
+    - 41
+    note: |
+      L30-L34: 记录 Python、平台、解释器和工作目录。
+      L35-L41: 记录 PATH、LD_LIBRARY_PATH、CUDA_HOME、PYTHONPATH 和 CONDA_PREFIX。
+  - title: torch 和系统命令
+    lines:
+    - 42
+    - 54
+    note: |
+      L42-L46: torch 版本和 CUDA 可用性进入 collect_env。
+      L47-L53: `nvidia-smi`、`nvcc`、`conda` 输出用于解释机器差异。
+      L54: 返回完整 payload。
+- title: torchrun hello
   repo_path: labs/l01_env_conda_cuda/scripts/torchrun_hello.py
-  focus: 读取 RANK、LOCAL_RANK、WORLD_SIZE，并验证每个进程绑定的 device。
-  questions:
-  - LOCAL_RANK 与 CUDA_VISIBLE_DEVICES 的关系是什么？
-  - 单机多进程和多机多进程的最小差异是什么？
-  - 哪一类 rank/device mismatch 不能靠重启解决？
-notebooks: []
-notebook_bridge: []
-project:
-  name: Environment Flight Recorder：一键环境审计器
-  scenario: 你接手一台陌生 4090/H200 机器，必须在 10 分钟内判断它能否安全运行后续训练/推理/RL lab，并留下别人可复现的环境证据。
-  milestones:
-  - 先运行 `make mini-infra M=l01_env_conda_cuda RUN_ID=<run_id>`，记录 MiniInfra 输出并标注 validation-only 边界。
-  - 生成 driver / CUDA runtime / PyTorch wheel / NCCL / torchrun 五段式报告。
-  - 构造一个故意错误的 PYTHONPATH 或 CUDA_VISIBLE_DEVICES 场景，并用最小证据定位。
-  - 把 4090 本地模式与 H200 单节点模式的差异写入 config.resolved.yaml。
-  - 产出一份给后来者运行的 env_report.md 和 command.sh。
-  deliverables:
-  - artifacts/check_cuda.json、check_torch.json、check_nccl.json、collect_env.json。
-  - artifacts/torchrun_hello.log，含每个 rank 的 hostname、rank、local_rank、device。
-  - report.md 中必须包含一次环境漂移诊断。
-  - report.md 必须包含 MiniInfra 同构模块 → 真实源码 → lab metrics/artifacts 的证据链。
-  stretch:
-  - 把 collect_env 的 JSON 转成 Markdown 表格。
-  - 为 ticket/env_rank_device_mismatch_003 写一个最小复现命令。
-commands:
-  setup: make env ENV=base
-  smoke: make smoke M=l01_env_conda_cuda
-  run_4090: make run-4090 M=l01_env_conda_cuda
-  run_h200: make run-h200 M=l01_env_conda_cuda
-  grade: make grade M=l01_env_conda_cuda
-  mini_infra: make mini-infra M=l01_env_conda_cuda RUN_ID=<run_id>
-tickets:
-- env_import_error_001
-- env_cuda_unavailable_002
-- env_rank_device_mismatch_003
-badge:
-  name: 环境生存者
-  pass_score: 80
+  focus: 多进程身份、backend 选择和 device 绑定
+  highlights:
+  - title: backend 和 device
+    lines:
+    - 17
+    - 29
+    note: |
+      L18-L20: world size 和 GPU 数决定是否能走 CUDA。
+      L21-L23: GPU 足够时选 NCCL，否则用 Gloo。
+      L24-L29: `LOCAL_RANK` 决定进程内 device。
+  - title: rank payload
+    lines:
+    - 30
+    - 41
+    note: |
+      L30-L37: 每个进程打印 rank、local_rank、world_size、backend 和 device。
+      L38: JSON 行进入 `torchrun_hello.log`。
+      L39-L41: barrier 后销毁进程组，避免脏状态影响后续命令。
+- title: Smoke runner
+  repo_path: labs/l01_env_conda_cuda/scripts/run_smoke.py
+  focus: 环境探针如何落成 run artifact
+  highlights:
+  - title: run 目录和配置
+    lines:
+    - 67
+    - 74
+    note: |
+      L67: 读取课程配置。
+      L68-L70: 创建 run 目录并写命令快照和 prediction。
+      L71-L74: 写解析后的配置，保证后续可复现。
+  - title: 探针执行
+    lines:
+    - 75
+    - 82
+    note: |
+      L75-L78: CUDA、torch、NCCL、环境上下文分别写成 JSON artifact。
+      L79-L82: `torchrun_hello.py` 的结果写入日志并转成布尔状态。
+  - title: 日志和 metrics
+    lines:
+    - 87
+    - 95
+    note: |
+      L87-L94: `train.log` 记录 CUDA 和 torchrun 结果。
+      L95: 结束日志写入。
+  - title: metrics JSONL
+    lines:
+    - 96
+    - 108
+    note: |
+      L96-L99: 向 `metrics.jsonl` 追加环境 smoke 结果。
+      L100-L105: 训练指标是统一 schema 占位。
+      L106-L108: 环境课重点看 `torchrun_ok` 和 `cuda_available`。
+  - title: 报告入口
+    lines:
+    - 110
+    - 114
+    note: |
+      L110-L112: 开始生成 mission report。
+      L113-L114: 报告第一节写明本讲目标。
+  - title: 报告结果和 ticket
+    lines:
+    - 129
+    - 139
+    note: |
+      L129-L134: 结果和诊断必须指向 artifact。
+      L135-L139: debug ticket 记录 rank/device mismatch 的验证方式。
+- title: Evidence scanner
+  repo_path: mini_infra/observability/evidence.py
+  focus: run 是否具备可审计材料
+  highlights:
+  - title: summarize_run
+    lines:
+    - 11
+    - 23
+    note: |
+      L11-L12: 从 run 目录读取 metrics。
+      L13-L21: 检查 command、config、report 是否存在。
+      L22-L23: 记录 metric 数量和最新 metric。
+  - title: artifact_count
+    lines:
+    - 24
+    - 29
+    note: |
+      L24-L28: 统计 artifacts 下的文件数量。
+      L29: 返回 run 摘要，用于后续批量审计。

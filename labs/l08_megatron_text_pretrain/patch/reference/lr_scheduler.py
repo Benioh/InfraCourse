@@ -1,4 +1,4 @@
-"""Reference solution for L04 Patch · CosineWithRestartsLR."""
+"""Reference solution for L09 Patch · CosineWithRestartsLR."""
 
 from __future__ import annotations
 

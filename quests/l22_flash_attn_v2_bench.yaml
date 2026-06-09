@@ -1,0 +1,630 @@
+id: l22_flash_attn_v2_bench
+title: L23 · PyTorch SDPA 与 FlashAttention benchmark
+level: L23
+act: 第 3 章：推理服务
+role: Attention kernel 调试学员
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+frameworks:
+- PyTorch
+- MiniInfra
+- SGLang
+- vLLM
+patch:
+  description: |
+    实现 eager attention baseline、PyTorch SDPA wrapper 和 attention benchmark 指标，
+    验证数值一致、causal mask、耗时、speedup 与峰值显存的最小合同。
+  task_md: labs/l22_flash_attn_v2_bench/patch/task.md
+  starter_file: labs/l22_flash_attn_v2_bench/patch/starter/flash_bench.py
+  reference_file: labs/l22_flash_attn_v2_bench/patch/reference/flash_bench.py
+  test_command: make patch-test M=l22_flash_attn_v2_bench
+  status_file: labs/l22_flash_attn_v2_bench/patch/.last_run.json
+  test_count: 6
+  test_kind: attention kernel 数值与性能合同验证
+source_reading:
+- title: Patch starter
+  repo_path: labs/l22_flash_attn_v2_bench/patch/starter/flash_bench.py
+  focus: eager baseline、SDPA wrapper 和 benchmark TODO
+  highlights:
+  - title: eager baseline 的 TODO
+    lines:
+    - 11
+    - 17
+    note: |
+      L11-L12: `eager_attention` 接收 `[B,H,T,D]` 的 q/k/v，并声明 baseline 语义。
+      L13-L16: TODO 顺序就是 attention 公式、score 矩阵、causal mask、softmax 和输出。
+      L17: 未实现时显式失败，patch-test 会从这里定位缺口。
+  - title: SDPA wrapper 的 TODO
+    lines:
+    - 20
+    - 23
+    note: |
+      L20-L21: `flash_attention` 保留和 eager 一样的输入输出合同。
+      L22: 学生要调用 `F.scaled_dot_product_attention` 并传入 causal 语义。
+      L23: 未实现时显式失败，避免 benchmark 静默使用空结果。
+  - title: benchmark 合同
+    lines:
+    - 26
+    - 35
+    note: |
+      L26-L34: `bench_attention` 的参数固定 shape、causal、device、dtype 和迭代次数。
+      L35: 返回值必须同时包含正确性、耗时和显存指标。
+  - title: benchmark 步骤
+    lines:
+    - 36
+    - 45
+    note: |
+      L36-L38: 正确性路径要求固定随机种子，并用 fp32 小 shape 对齐数值。
+      L39-L42: 性能路径使用目标 dtype，并在 CUDA 上同步和记录峰值。
+      L43-L45: 返回字段是 tests、drill 和报告共同依赖的接口。
+- title: Patch reference
+  repo_path: labs/l22_flash_attn_v2_bench/patch/reference/flash_bench.py
+  focus: 最小可运行实现、正确性路径和性能路径
+  highlights:
+  - title: eager attention 实现
+    lines:
+    - 12
+    - 20
+    note: |
+      L12-L14: baseline 用 head_dim 计算 scale，并显式生成 `[B,H,T,T]` scores。
+      L15-L18: causal 时构造上三角 mask，将未来位置填为 `-inf`。
+      L19-L20: softmax 后乘 value，输出回到 `[B,H,T,D]`。
+  - title: SDPA 调用
+    lines:
+    - 23
+    - 24
+    note: |
+      L23: wrapper 的签名和 eager baseline 对齐。
+      L24: 统一调用 PyTorch SDPA，实际 backend 由运行条件决定。
+  - title: CUDA 同步计时
+    lines:
+    - 37
+    - 45
+    note: |
+      L37: `_time_iters` 接收被测函数和张量。
+      L38-L40: CUDA 路径在计时前同步，避免只测到 launch 提交。
+      L41-L45: 循环执行后再次同步，返回每次调用的平均毫秒数。
+  - title: fp32 正确性路径
+    lines:
+    - 57
+    - 66
+    note: |
+      L57-L60: 固定随机种子，并把正确性序列长度限制到 256 以内。
+      L61-L63: 用 fp32 分配 q/k/v，减少半精度误差干扰。
+      L64-L66: 分别跑 eager 和 SDPA，记录最大绝对误差。
+  - title: 性能张量和 warmup
+    lines:
+    - 68
+    - 75
+    note: |
+      L68-L70: 性能路径按完整 `seq_len` 和目标 dtype 分配 q/k/v。
+      L72-L75: 先 warmup eager 和 SDPA，减少首次执行开销干扰。
+  - title: 峰值显存
+    lines:
+    - 76
+    - 84
+    note: |
+      L76-L79: eager 路径重置并读取 CUDA peak memory。
+      L81-L84: SDPA 路径独立重置并读取 peak memory，避免两段统计混在一起。
+  - title: 返回指标
+    lines:
+    - 86
+    - 93
+    note: |
+      L86-L93: 返回耗时、speedup、误差和显存峰值，供测试和 artifact 使用。
+- title: Patch tests
+  repo_path: labs/l22_flash_attn_v2_bench/patch/tests/test_patch.py
+  focus: 数值、causal mask、指标字段和 CUDA 条件测试
+  highlights:
+  - title: IMPL 选择
+    lines:
+    - 17
+    - 18
+    note: |
+      L17: `_impl` 是测试选择实现的入口。
+      L18: `IMPL=starter/reference` 决定导入哪个 patch 包。
+  - title: causal mask 不泄漏未来
+    lines:
+    - 30
+    - 40
+    note: |
+      L30-L37: 构造短序列和 one-hot value，再跑 causal eager attention。
+      L38-L40: 第 0 行只能来自位置 0，若未来 token 泄漏会直接失败。
+  - title: SDPA 和 eager 数值对齐
+    lines:
+    - 43
+    - 51
+    note: |
+      L43-L48: 用固定随机种子的 fp32 小张量构造对照输入。
+      L49-L51: causal=True 时 eager 和 SDPA 输出必须在容差内一致。
+  - title: benchmark 调用
+    lines:
+    - 54
+    - 58
+    note: |
+      L54-L58: CPU 小 shape 调用 `bench_attention`，验证无 GPU 环境也能 smoke。
+  - title: benchmark 字段
+    lines:
+    - 59
+    - 68
+    note: |
+      L59-L67: 指标字典必须包含耗时、speedup、误差和显存字段。
+      L68: CPU fp32 路径的最大误差必须低于阈值。
+  - title: GPU speedup
+    lines:
+    - 71
+    - 80
+    note: |
+      L71-L75: GPU 测试只在 CUDA 可用时运行。
+      L76-L80: bf16、seq_len=2048 的路径要求 speedup 达到最小阈值。
+  - title: GPU peak memory
+    lines:
+    - 83
+    - 93
+    note: |
+      L83-L87: 峰值显存测试同样只在 CUDA 可用时运行。
+      L88-L93: 若记录到 eager peak，SDPA peak 不应高于 eager peak。
+- title: run_bench drill
+  repo_path: labs/l22_flash_attn_v2_bench/scripts/run_bench.py
+  focus: config 解析、实现选择、artifact 写入和验收结果
+  highlights:
+  - title: 实现选择
+    lines:
+    - 33
+    - 45
+    note: |
+      L33-L36: `_impl` 先读取 `IMPL`，支持显式选择 starter 或 reference。
+      L38-L45: 未显式选择时尝试导入 starter，导入失败再退到 reference。
+  - title: run_dir 创建
+    lines:
+    - 54
+    - 63
+    note: |
+      L54-L58: CLI 接收 config 和 run id。
+      L60-L63: 加载实现、读取 config、创建 run_dir、记录命令快照。
+  - title: resolved config
+    lines:
+    - 64
+    - 68
+    note: |
+      L64-L68: 写入 resolved config，把 mission、impl 和原始配置落盘。
+  - title: 逐 shape 运行
+    lines:
+    - 78
+    - 89
+    note: |
+      L78-L80: 初始化 rows 和验收状态，并遍历 config 中的 shapes。
+      L81-L89: 调用 `bench_attention`，传入 shape、causal、device、dtype 和迭代次数。
+  - title: metrics.jsonl
+    lines:
+    - 90
+    - 97
+    note: |
+      L90-L93: 把 shape 字段补回单行结果。
+      L94-L97: 每个 shape 写入 `metrics.jsonl`，保留时间戳和指标类型。
+  - title: bench.csv
+    lines:
+    - 99
+    - 105
+    note: |
+      L99: CSV header 固定了报告字段。
+      L100-L105: 每个 shape 写入耗时、speedup、显存和误差，便于快速复盘。
+  - title: acceptance
+    lines:
+    - 107
+    - 118
+    note: |
+      L107-L118: config 中的 speedup 和 max_abs_diff 条件会更新 `accept_all`。
+  - title: summary
+    lines:
+    - 120
+    - 120
+    note: |
+      L120: `bench_summary.json` 写入实现标签、验收结果和全部 rows。
+- title: MiniInfra online softmax
+  repo_path: mini_infra/gpu/triton_softmax.py
+  focus: 分块 softmax 的 running max / running sum 数学骨架
+  highlights:
+  - title: stable softmax
+    lines:
+    - 31
+    - 40
+    note: |
+      L31-L34: 参考实现先把输入行转成列表。
+      L35-L40: 一次性求最大值、指数和分母，作为 online 版本的对照。
+  - title: online softmax 状态
+    lines:
+    - 43
+    - 55
+    note: |
+      L43-L50: 注释说明 running sum 必须随 running max 重缩放。
+      L52-L55: 初始化值、running max 和 running sum，并按 block 遍历。
+  - title: block 更新
+    lines:
+    - 56
+    - 63
+    note: |
+      L56-L58: 当前 block 给出局部最大值，并更新全局最大值。
+      L59-L62: 旧分母按最大值变化重缩放，再累加当前 block 的指数项。
+      L63: 最后用 running max 和 running sum 生成完整 softmax 输出。
+  - title: 数值误差指标
+    lines:
+    - 66
+    - 68
+    note: |
+      L66-L68: `max_abs_error` 给 stable 和 online 的对照提供单个误差指标。
+- title: Torchtitan SDPA wrapper
+  repo_path: github_repo/torchtitan/torchtitan/models/common/attention.py
+  focus: backend 列表、layout transpose 和 SDPA 调用
+  highlights:
+  - title: wrapper 语义
+    lines:
+    - 249
+    - 256
+    note: |
+      L249-L254: 类注释说明 wrapper 调用 SDPA，并在调用前后做 layout transpose。
+      L256: 注释提醒 forward 的参数顺序还要兼容 context parallel。
+  - title: backend 列表
+    lines:
+    - 271
+    - 276
+    note: |
+      L271-L276: 默认候选 backend 包含 cudnn、flash 和 math。
+  - title: SDPA 调用
+    lines:
+    - 289
+    - 296
+    note: |
+      L289-L290: q/k/v 从 `[B,T,H,D]` 转成 `[B,H,T,D]`。
+      L291-L294: 在 `sdpa_kernel` 约束下调用 PyTorch SDPA。
+      L295-L296: 输出再转回调用方使用的 layout。
+- title: SGLang torch native backend
+  repo_path: github_repo/sglang/python/sglang/srt/layers/attention/torch_native_backend.py
+  focus: KV cache、request token 映射、dtype 对齐和 SDPA
+  highlights:
+  - title: extend 输入合同
+    lines:
+    - 27
+    - 39
+    note: |
+      L27-L39: extend 路径接收 query、output、KV cache、请求映射、长度和缩放参数。
+  - title: 从 KV cache 取 key/value
+    lines:
+    - 89
+    - 99
+    note: |
+      L89-L94: 通过 request token 映射从 k_cache/v_cache 中取出当前请求上下文。
+      L96-L99: SDPA 要求 q/k/v dtype 一致，不一致时转换 key 和 value。
+  - title: extend SDPA 调用
+    lines:
+    - 101
+    - 113
+    note: |
+      L101-L109: 对单请求张量调用 SDPA，传入 GQA、scale 和 causal。
+      L110-L113: 输出去掉 batch 维并写回当前请求 slice。
+  - title: decode KV 输入
+    lines:
+    - 163
+    - 173
+    note: |
+      L163-L168: decode 路径按请求 token 映射取历史 key/value。
+      L170-L173: key/value dtype 对齐到 query dtype。
+  - title: forward extend 参数下传
+    lines:
+    - 224
+    - 236
+    note: |
+      L224-L228: 传入 query/output 以及 layer 对应的 key/value cache。
+      L229-L236: 请求池、长度、scale、GQA 和 causal 一起进入 SDPA 路径。
+- title: vLLM CPU attention backend
+  repo_path: github_repo/vllm/vllm/v1/attention/backends/cpu_attn.py
+  focus: mask、causal、scale 和 GQA 参数如何进入 SDPA
+  highlights:
+  - title: layout 和 causal
+    lines:
+    - 412
+    - 417
+    note: |
+      L412-L414: query/key/value 被移动维度以适配 SDPA 输入布局。
+      L416-L417: attention type 决定当前调用是否使用 causal attention。
+  - title: SDPA slice
+    lines:
+    - 419
+    - 426
+    note: |
+      L419-L423: 按序列边界取出当前 slice。
+      L424-L426: SDPA 输入使用当前 query/key slice。
+  - title: SDPA 参数
+    lines:
+    - 427
+    - 433
+    note: |
+      L427-L433: SDPA 调用显式传入 mask、dropout、causal、scale 和 GQA。
+  - title: 输出写回
+    lines:
+    - 434
+    - 437
+    note: |
+      L434-L435: SDPA 输出去掉临时 batch 维，并把 head 维移回原布局。
+      L437: 当前 slice 的结果写回 output。
+lesson_docs:
+- title: 系统地图
+  path: labs/l22_flash_attn_v2_bench/system_map.md
+  description: L23 在 Serving 性能路径中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l22_flash_attn_v2_bench/lecture.md
+  description: 从 eager attention 的中间矩阵成本讲到 SDPA dispatch、benchmark 证据和生产排查。
+- title: 源码带读讲义
+  path: labs/l22_flash_attn_v2_bench/source_walkthrough.md
+  description: 按 patch、MiniInfra online softmax 和真实 SDPA wrapper 组织的源码阅读路线。
+mini_infra_targets:
+- mini_infra/gpu/triton_softmax.py
+- mini_infra/gpu/microbench.py
+notebooks: []
+tickets:
+- fa_dtype_falls_back_to_math
+- fa_head_dim_unsupported
+- fa_causal_attn_mask_double
+prereq: l21_sglang_serving_core
+next_lab: l23_quant_serving
+gpu_modes:
+  local: CPU smoke 可完成数值和 artifact 验证
+  cluster: CUDA + bf16/fp16 benchmark 可观察速度和峰值显存趋势
+lesson:
+  opening: |
+    # 第 23 讲：PyTorch SDPA 与 FlashAttention benchmark
+
+    这一讲处理 attention kernel 的系统边界。eager attention 会显式生成 `[B,H,T,T]` 的 score 和 weight，长序列下会放大 HBM 流量和峰值显存。PyTorch SDPA 提供统一 API，在合适的 GPU、dtype、head_dim 和 mask 条件下可以走 FlashAttention 类 backend。我们先写 eager baseline，再调用 SDPA，最后用 benchmark artifact 判断数值、耗时、speedup 和显存峰值。
+
+    课程按“系统地图 -> 主讲义 -> 源码带读 -> quiz -> patch -> drill -> 课后产物”的顺序组织。lab 只检查最小合同：attention 数学公式、causal mask、SDPA API 和 benchmark 指标是否闭合。
+  sections:
+  - title: 课程定位：attention kernel 是 serving 性能路径的一层
+    plain_explanation: |
+      L20 到 L22 已经把请求入口、调度、KV cache 和 SGLang 前缀缓存放到系统图里。L23 下沉到模型层中的 attention kernel。同一个请求被 scheduler 选中后，prefill 和 decode 的实际成本仍然取决于 attention 如何访问 Q/K/V、是否显式保存 `[T,T]` 中间矩阵、以及 SDPA 是否走到合适 backend。
+
+      这节课的 patch 很小，但讲授重点在系统边界。写代码前，学生应该能说清 `B/H/T/D`、dtype、device、causal、mask 和 backend 条件怎样共同决定一次 attention benchmark 的结论。
+    mental_model: |
+      把 attention 看成一个数据通路：输入 shape 进入 eager baseline 或 SDPA，backend 决定中间矩阵是否落到 HBM，artifact 再记录数值、耗时和显存。
+    why_it_matters: |
+      线上看到 SDPA 调用，并不能直接说明服务已经拿到 flash backend 收益。只有把输入条件、dispatch、计时和 artifact 对齐，性能判断才可靠。
+    source_refs:
+    - title: IMPL 选择
+      repo_path: labs/l22_flash_attn_v2_bench/scripts/run_bench.py
+      lines:
+      - 33
+      - 45
+      note: |
+        L33-L36: `_impl` 支持用环境变量显式选择 starter 或 reference。
+        L38-L45: 默认导入路径把教学实现和参考实现放在同一个 drill 入口下。
+    - title: benchmark 合同
+      repo_path: labs/l22_flash_attn_v2_bench/patch/starter/flash_bench.py
+      lines:
+      - 26
+      - 35
+      note: |
+        L26-L34: `bench_attention` 固定输入 shape、device、dtype 和迭代次数。
+        L35: 返回值要同时承载正确性、性能和显存指标。
+    common_confusions:
+    - 看到 SDPA API 就断言使用了 flash backend。
+    - CPU smoke 通过后直接报告 CUDA speedup。
+    checkpoint_questions:
+    - L23 解决的是请求调度、KV cache 复用，还是 attention kernel 的中间矩阵和 backend 问题？
+    - 一次 benchmark 缺少 dtype 和 shape 时，结论还能迁移吗？
+  - title: eager baseline：显式暴露 O(T^2) 中间矩阵
+    plain_explanation: |
+      eager attention 的好处是直观：`q @ k^T`、scale、mask、softmax、乘以 `v`。它的成本也直观：`scores` 和 `weights` 都是 `[B,H,T,T]`。序列长度翻倍，中间矩阵元素数量约变成四倍。长 prompt prefill、长上下文 decode 和大 head 数都会把这个成本放大。
+
+      causal mask 是本讲的第一个边界。第 `i` 个 token 只能看 `j <= i` 的位置。baseline 用上三角 mask 把未来位置填成 `-inf`，测试用 one-hot value 检查第 0 行是否只来自位置 0。
+    mental_model: |
+      eager baseline 像把完整注意力表先写出来，再做归一化和加权求和。它适合做数学对照，也会暴露长序列下的内存问题。
+    why_it_matters: |
+      没有 baseline，就无法判断 SDPA 的输出是否保持语义，也无法解释 FlashAttention 类 kernel 省掉了哪一类中间存储。
+    source_refs:
+    - title: scores 和 mask
+      repo_path: labs/l22_flash_attn_v2_bench/patch/reference/flash_bench.py
+      lines:
+      - 12
+      - 20
+      note: |
+        L12-L14: `scores` 是显式 `[B,H,T,T]` 中间矩阵。
+        L15-L18: causal mask 把未来位置填成 `-inf`。
+        L19-L20: softmax 权重乘以 value，输出恢复到 `[B,H,T,D]`。
+    - title: one-hot 检查
+      repo_path: labs/l22_flash_attn_v2_bench/patch/tests/test_patch.py
+      lines:
+      - 30
+      - 40
+      note: |
+        L30-L37: 测试构造短序列和 one-hot value，专门观察未来位置是否泄漏。
+        L38-L40: 第 0 行只能等于位置 0 的 one-hot 前缀。
+    common_confusions:
+    - 把 `weights @ v` 的输出 shape 和 `scores` 的中间 shape 混淆。
+    - 忘记除以 `sqrt(D)`，导致 softmax 分布过尖或过平。
+    checkpoint_questions:
+    - eager baseline 中哪个张量随 `T^2` 增长？
+    - causal mask 为什么要在 softmax 前作用到 scores 上？
+  - title: SDPA 和 online softmax：同一语义，不同中间路径
+    plain_explanation: |
+      PyTorch SDPA 把 attention 暴露成统一 API。相同的 `F.scaled_dot_product_attention()` 在不同条件下可能走 math、memory efficient、flash 或 cudnn backend。FlashAttention 类 backend 的核心收益来自分块融合：每个 tile 更新 running max、running sum 和输出累积，减少完整 attention matrix 写入 HBM。
+
+      MiniInfra 的 online softmax 用 CPU-safe 代码展示这个数学骨架。它不证明 GPU 性能，只解释为什么 softmax 可以分块做数值稳定归一化。
+    mental_model: |
+      SDPA 是入口，backend 是执行路径。online softmax 是分块执行保持数值等价的关键状态机。
+    why_it_matters: |
+      排查性能时需要区分 API、backend 和数学语义。数值等价和速度收益来自不同证据。
+    source_refs:
+    - title: SDPA 调用
+      repo_path: labs/l22_flash_attn_v2_bench/patch/reference/flash_bench.py
+      lines:
+      - 23
+      - 24
+      note: |
+        L23: wrapper 维持和 eager baseline 相同的函数签名。
+        L24: 调用 PyTorch SDPA，backend 由运行时条件决定。
+    - title: running 状态
+      repo_path: mini_infra/gpu/triton_softmax.py
+      lines:
+      - 43
+      - 55
+      note: |
+        L43-L50: running sum 需要随 running max 变化重缩放。
+        L52-L55: 初始化值、running max、running sum，并开始按 block 遍历。
+    - title: block 更新
+      repo_path: mini_infra/gpu/triton_softmax.py
+      lines:
+      - 56
+      - 63
+      note: |
+        L56-L58: 每个 block 更新局部最大值和新的全局最大值。
+        L59-L62: 旧分母重缩放后累加当前 block 的指数项。
+        L63: 用最终 running 状态生成输出。
+    - title: backend 列表
+      repo_path: github_repo/torchtitan/torchtitan/models/common/attention.py
+      lines:
+      - 271
+      - 276
+      note: |
+        L271-L276: 默认候选 backend 包含 cudnn、flash 和 math。
+    - title: layout 和 SDPA
+      repo_path: github_repo/torchtitan/torchtitan/models/common/attention.py
+      lines:
+      - 289
+      - 296
+      note: |
+        L289-L290: 调用前把 layout 转成 SDPA 需要的 `[B,H,T,D]`。
+        L291-L296: 在 backend 约束下调用 SDPA，再把输出转回。
+    common_confusions:
+    - 把 online softmax 误解成改变了 attention 输出语义。
+    - 忽略 layout transpose，以为所有模型内部都天然使用 `[B,H,T,D]`。
+    checkpoint_questions:
+    - SDPA API 和实际 backend 的区别是什么？
+    - online softmax 中 running max 改变时为什么要重缩放旧分母？
+  - title: Benchmark 证据：正确性、耗时和显存要分开
+    plain_explanation: |
+      L23 的 benchmark 先用 fp32 小 shape 做正确性，再用配置里的 dtype 和完整 shape 做性能。这个设计避免把半精度误差、CPU smoke、长序列内存压力和 GPU kernel 差异混在一起。CUDA 计时还要同步，否则得到的可能只是 launch 提交时间。
+
+      输出 artifact 是复盘依据。`metrics.jsonl` 保留逐 shape 结构化指标，`bench.csv` 便于快速阅读，`bench_summary.json` 给出验收结果和全部 rows。
+    mental_model: |
+      正确性回答“算得对不对”，耗时回答“在这个条件下快不快”，峰值显存回答“中间矩阵是否带来压力”。三者不能互相替代。
+    why_it_matters: |
+      很多性能误判来自条件缺失：没有同步、没有 dtype、没有 shape、没有 backend 证据，speedup 数字就无法复查。
+    source_refs:
+    - title: CUDA 同步计时
+      repo_path: labs/l22_flash_attn_v2_bench/patch/reference/flash_bench.py
+      lines:
+      - 37
+      - 45
+      note: |
+        L37-L40: 计时前同步 CUDA，避免异步 launch 影响。
+        L41-L45: 执行多次后再次同步，返回平均耗时。
+    - title: 正确性路径
+      repo_path: labs/l22_flash_attn_v2_bench/patch/reference/flash_bench.py
+      lines:
+      - 57
+      - 66
+      note: |
+        L57-L60: 正确性序列长度被限制到 256 以内。
+        L61-L66: fp32 eager 和 SDPA 的最大绝对误差被记录。
+    - title: 峰值显存
+      repo_path: labs/l22_flash_attn_v2_bench/patch/reference/flash_bench.py
+      lines:
+      - 76
+      - 84
+      note: |
+        L76-L79: eager 路径单独 reset 并读取 peak memory。
+        L81-L84: SDPA 路径单独 reset 并读取 peak memory。
+    - title: metrics.jsonl
+      repo_path: labs/l22_flash_attn_v2_bench/scripts/run_bench.py
+      lines:
+      - 90
+      - 97
+      note: |
+        L90-L97: 每个 shape 的结果写入 `metrics.jsonl`。
+    - title: bench.csv
+      repo_path: labs/l22_flash_attn_v2_bench/scripts/run_bench.py
+      lines:
+      - 99
+      - 105
+      note: |
+        L99-L105: CSV 固定字段，便于比较 eager 和 SDPA。
+    - title: summary
+      repo_path: labs/l22_flash_attn_v2_bench/scripts/run_bench.py
+      lines:
+      - 107
+      - 118
+      note: |
+        L107-L118: 根据 config 检查 speedup 和误差阈值。
+    - title: summary 写入
+      repo_path: labs/l22_flash_attn_v2_bench/scripts/run_bench.py
+      lines:
+      - 120
+      - 120
+      note: |
+        L120: summary 写入实现标签、accept 和全部 rows。
+    common_confusions:
+    - 用 CPU smoke 的 speedup 说明 CUDA kernel 收益。
+    - 只看平均耗时，不记录 max_abs_diff。
+    checkpoint_questions:
+    - 正确性路径为什么使用 fp32 和较小 `seq_len`？
+    - '`bench_summary.json` 中哪些字段能支撑验收结论？'
+  - title: 真实 wrapper：layout、cache、mask 和 GQA 都会影响 SDPA
+    plain_explanation: |
+      真实 serving 或训练代码很少只有一行 SDPA。Torchtitan 先做 layout transpose，并用 `sdpa_kernel()` 排序 backend。SGLang 从 KV cache 和 request token 映射中取出 key/value，还要对齐 dtype。vLLM CPU backend 会按序列 slice 调用 SDPA，并传入 mask、dropout、scale、causal 和 GQA。
+
+      这说明 patch 的价值在最小合同，生产排查要继续看输入布局、cache 索引、mask 形态和 backend 条件。
+    mental_model: |
+      patch 是 attention kernel 的缩小图，真实 wrapper 是同一合同加上服务系统里的状态恢复和参数组合。
+    why_it_matters: |
+      数值不一致或 fallback 往往出现在 patch 之外：layout 转换错、KV cache slice 错、mask 和 causal 组合不符合 backend 条件。
+    source_refs:
+    - title: KV cache 输入
+      repo_path: github_repo/sglang/python/sglang/srt/layers/attention/torch_native_backend.py
+      lines:
+      - 89
+      - 99
+      note: |
+        L89-L94: 根据请求映射从 KV cache 中取 key/value。
+        L96-L99: key/value dtype 对齐到 query dtype。
+    - title: extend SDPA 输出
+      repo_path: github_repo/sglang/python/sglang/srt/layers/attention/torch_native_backend.py
+      lines:
+      - 101
+      - 113
+      note: |
+        L101-L113: 调用 SDPA 并把结果写回当前请求 slice。
+    - title: layout 和 causal
+      repo_path: github_repo/vllm/vllm/v1/attention/backends/cpu_attn.py
+      lines:
+      - 412
+      - 417
+      note: |
+        L412-L417: 移动 q/k/v 维度，并由 attention type 决定 causal。
+    - title: SDPA slice
+      repo_path: github_repo/vllm/vllm/v1/attention/backends/cpu_attn.py
+      lines:
+      - 419
+      - 426
+      note: |
+        L419-L423: 按序列边界取出当前 slice。
+        L424-L426: SDPA 输入使用当前 query/key slice。
+    - title: SDPA 参数
+      repo_path: github_repo/vllm/vllm/v1/attention/backends/cpu_attn.py
+      lines:
+      - 427
+      - 433
+      note: |
+        L427-L433: SDPA 调用带上 mask、dropout、causal、scale 和 GQA。
+    - title: 输出写回
+      repo_path: github_repo/vllm/vllm/v1/attention/backends/cpu_attn.py
+      lines:
+      - 434
+      - 437
+      note: |
+        L434-L437: 输出恢复布局并写回当前 slice。
+    common_confusions:
+    - 只看 patch reference，忽略真实项目的 KV cache 和 mask 分支。
+    - 把 GQA、sliding window、ALiBi 等参数当成和 backend 无关。
+    checkpoint_questions:
+    - SGLang 的 SDPA 输入为什么需要 request token 映射？
+    - vLLM 的 SDPA 调用比 patch 多传了哪些参数？

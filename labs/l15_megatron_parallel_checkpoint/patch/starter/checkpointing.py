@@ -1,4 +1,4 @@
-"""L05.8 Patch · Megatron-shaped distributed checkpointing."""
+"""L16 Patch · Megatron-shaped distributed checkpointing."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def save_checkpoint(
     # TODO(student): create output_dir.
     # TODO(student): write iter_XXXXXXX.json with format/iteration/states.
     # TODO(student): write latest_checkpointed_iteration.txt.
-    raise NotImplementedError("L05.8: implement save_checkpoint")
+    raise NotImplementedError("L16: implement save_checkpoint")
 
 
 def load_checkpoint(
@@ -38,4 +38,4 @@ def load_checkpoint(
     # TODO(student): validate FORMAT.
     # TODO(student): compare expected_parallel_state against checkpoint parallel_state.
     # TODO(student): strict=True raises CheckpointError; strict=False returns warnings.
-    raise NotImplementedError("L05.8: implement load_checkpoint")
+    raise NotImplementedError("L16: implement load_checkpoint")

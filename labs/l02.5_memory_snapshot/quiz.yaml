@@ -1,71 +1,108 @@
 mission: l02.5_memory_snapshot
-title: L02.5 Quiz · Memory Snapshot
+title: L03 Quiz · Memory Snapshot 泄露归因
 pass_threshold: 1.0
 description: |
-  3 题打中 memory snapshot 调试套路最容易混淆的点。
+  这 5 题检查长期 OOM、live allocation、caller stack 和 top-k 聚合的核心边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读 L03 主讲义
+    kind: doc
+    path: labs/l02.5_memory_snapshot/lecture.md
+    href: "#lesson"
+  - title: 跟源码带读
+    kind: doc
+    path: labs/l02.5_memory_snapshot/source_walkthrough.md
+    href: "#lesson"
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l02.5_memory_snapshot/patch/task.md
-  - title: 读 mem-snapshot 主线博客
+    href: "#patch"
+  - title: 对照 memory snapshot reference
     kind: source
-    path: github_repo/Awesome-ML-SYS-Tutorial/torch/mem-snapshot/readme.md
+    path: labs/l02.5_memory_snapshot/patch/reference/memory_snapshot.py
 
 questions:
   - id: q1_why_snapshot
     prompt: |
-      为什么定位显存泄露不能只靠 nvidia-smi，而需要 memory snapshot？
+      定位长期显存泄露时，为什么只看 `nvidia-smi` 不够？
     options:
       - id: a
-        text: nvidia-smi 只显示总量，不告诉你"哪行代码 alloc 了这块显存"
+        text: 它只给进程级总量，无法告诉你 live allocation 来自哪条调用栈。
         correct: true
       - id: b
-        text: nvidia-smi 不能在多 GPU 上工作
+        text: 它不能显示 GPU 型号。
       - id: c
-        text: nvidia-smi 数字不准，只能用 snapshot
+        text: 它只能用于 CPU 内存。
       - id: d
-        text: snapshot 比 nvidia-smi 快很多
+        text: 它会自动清理 PyTorch cache。
     explanation: |
-      A 对：nvidia-smi 给的是 process-level 总占用，看不到 stack frame；
-      `_record_memory_history` 记录的是每次 alloc/free 的调用栈，配合 viewer 才能
-      定位真凶。
-      记忆口诀：**总量靠 smi，归因靠 snapshot**。
+      `nvidia-smi` 可以确认进程占用，但不能给出 alloc/free 历史和 caller stack。
+      泄露归因需要知道仍存活对象来自哪里。
 
-  - id: q2_top_frame_grouping
+  - id: q2_live_allocations
     prompt: |
-      为什么 leak finder 按 `stack_frames[0]` (top frame) 聚合，而不是整条 stack？
+      在本关的 snapshot 里，`total_leaked_bytes` 应该从哪里计算？
     options:
       - id: a
-        text: 整条 stack 在反复调用同一函数时不会聚合，导致每次出现都是独立 entry，看不出"哪个函数贡献了多少"
-        correct: true
+        text: 所有历史 alloc event 的 size 总和。
       - id: b
-        text: top frame 计算更快
+        text: 所有 free event 的 size 总和。
       - id: c
-        text: stack 太长，hash 不稳定
+        text: 当前 `_live` 中仍未释放的 AllocEvent size 总和。
+        correct: true
       - id: d
-        text: top frame 即 root frame
+        text: "`_next_addr` 的当前值。"
     explanation: |
-      A 对：同一个 forward_hook 在 50 个 step 调用 50 次，整条 stack 因为外层调用栈
-      可能不同会被拆成 50 个 entry，每个只占一份；按 top frame 聚合则正确归到该函数
-      下，立刻看出 leak 的源头。
-      D 错：top frame = leaf（最近调用），不是 root。
+      泄露候选来自 live allocations。已经 free 的历史 alloc 只能说明曾经分配过，
+      不能计入当前泄露总量。
 
-  - id: q3_real_leak_pattern
+  - id: q3_caching_allocator
     prompt: |
-      VLM RL 训练的 forward_hook 持有 forward 本地变量导致泄露——这本质是
-      Python 哪个机制？
+      PyTorch reserved memory 长时间不下降时，下面哪个判断更稳妥？
     options:
       - id: a
-        text: 闭包捕获（closure capture）：hook 函数闭包了 forward 的局部变量，引用计数不归零
+        text: 一定是 tensor 泄露。
+      - id: b
+        text: 可能只是 caching allocator 保留了已释放 block，需要结合 live allocations 判断。
+        correct: true
+      - id: c
+        text: 一定是 NCCL 没初始化。
+      - id: d
+        text: 说明 optimizer state 为空。
+    explanation: |
+      Caching allocator 会缓存已经释放的 block。泄露分析要看仍存活对象和 stack，
+      不能只看 reserved memory 是否下降。
+
+  - id: q4_stack_grouping
+    prompt: |
+      `find_top_leaks_by_stack(snapshot, k)` 在本关按什么 key 聚合？
+    options:
+      - id: a
+        text: 完整的 `ev.stack` tuple。
         correct: true
       - id: b
-        text: GIL 死锁
+        text: 只按 allocation size。
       - id: c
-        text: Python 的 weakref 失效
+        text: 只按 timestamp。
       - id: d
-        text: torch.Tensor 不支持 GC
+        text: 只按 addr 的奇偶性。
     explanation: |
-      A 对：register_forward_hook 注册的 callable 通常是 lambda/局部函数，闭包引用了
-      forward 内部的中间 tensor。只要 hook 还挂着，被引用的 tensor 就 free 不掉。
-      解法：要么 hook 用 detach + 不闭包大变量，要么训练结束 remove() hook。
+      本关测试按完整 stack tuple 聚合 size，再按累计 bytes 降序返回 top-k。
+      真实排查中可以再加入 frame 归一化或 top-frame 分析。
+
+  - id: q5_wrong_process
+    prompt: |
+      多进程 RL 训练里显存上涨发生在 rollout worker，但你只 dump 了 rank0 trainer。这个 snapshot 最大的问题是什么？
+    options:
+      - id: a
+        text: 文件扩展名一定错误。
+      - id: b
+        text: 进程选错，snapshot 结构可能完整，但无法解释真正上涨的显存。
+        correct: true
+      - id: c
+        text: stack 会自动合并所有进程。
+      - id: d
+        text: "`dump_snapshot()` 会删除模型参数。"
+    explanation: |
+      Snapshot 是进程内证据。多进程系统必须先定位显存上涨的 rank、worker 或 server pid，
+      再 dump 对应进程。

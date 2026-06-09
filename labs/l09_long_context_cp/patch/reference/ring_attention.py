@@ -1,4 +1,4 @@
-"""Reference solution for L04.5 Patch · ring attention forward."""
+"""Reference solution for L10 Patch · ring attention forward."""
 
 from __future__ import annotations
 

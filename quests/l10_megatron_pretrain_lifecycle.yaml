@@ -1,20 +1,20 @@
 id: l10_megatron_pretrain_lifecycle
-title: Megatron-shaped Train Step
-level: L04.8
-act: 第 1 章：训练框架
-role: Megatron 源码主线学徒
+title: L11 · Megatron 预训练生命周期与 Train Step
+level: L11
+act: 第 2 章：训练系统、并行与数据
+role: Megatron 生命周期学徒
 priority: 核心
 estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - Megatron-LM
   - MiniInfra
+  - PyTorch
 
 patch:
   description: |
-    实现 Megatron-shaped train_step：zero_grad → forward_backward →
-    optimizer.step → scheduler.step → metrics，把 L04 scheduler 放回训练循环。
+    实现 Megatron-shaped `train_step`：zero_grad、forward/backward、optimizer step、
+    scheduler step 和 metrics，覆盖 update success、skip 和异常 loss 输入。
   task_md: labs/l10_megatron_pretrain_lifecycle/patch/task.md
   starter_file: labs/l10_megatron_pretrain_lifecycle/patch/starter/train_step.py
   reference_file: labs/l10_megatron_pretrain_lifecycle/patch/reference/train_step.py
@@ -23,32 +23,527 @@ patch:
   test_count: 5
   test_kind: 训练循环行为验证
 
+lesson:
+  opening: |
+    L11 把预训练生命周期拆成可测试的单步合同。任务入口提供 model provider、data iterator 和 forward step；通用训练循环负责 optimizer、scheduler、metrics 和 checkpoint。
+
+    本关 patch 实现 `train_step`，重点是调用顺序、microbatch loss 平均、optimizer skip、scheduler 边界和 metrics schema。Drill 会把 patch 接回 tiny lifecycle，产出 `metrics.jsonl`、`acceptance.json` 和 checkpoint marker。
+  sections:
+    - title: Task entry 与通用训练循环
+      plain_explanation: |
+        Megatron 预训练通常把任务入口和通用循环分开。任务入口提供 model provider、batch、loss 和 forward step；通用循环负责初始化、构造 optimizer/scheduler、执行 train_step、写日志和保存 checkpoint。
+      mental_model: |
+        任务入口说明训练什么，training loop 规定每一步怎么训练和怎么记账。
+      why_it_matters: |
+        分清边界后，换模型不需要重写训练框架；排查时也能定位问题在数据、模型、optimizer、scheduler 还是 checkpoint。
+      source_refs:
+        - title: MiniInfra provider and batch
+          repo_path: mini_infra/megatron/pretrain_gpt.py
+          lines: [6, 12]
+          note: |
+            L6-L7: `model_provider` 返回 GPT 风格模型配置。
+            L10-L12: `get_batch` 从 iterator 取文本并构造 tokens/labels。
+        - title: MiniInfra forward step
+          repo_path: mini_infra/megatron/pretrain_gpt.py
+          lines: [15, 27]
+          note: |
+            L15-L16: `loss_func` 从 output tensor 中取 loss。
+            L19-L27: `forward_step` 取 batch、计算 token_count，并返回 loss 与 model_type。
+        - title: Megatron pretrain contract
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [829, 841]
+          note: |
+            L829-L841: 真实 `pretrain` 接收 dataset provider、model provider、model type 和 forward step。
+        - title: Megatron pretrain order
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [842, 849]
+          note: |
+            L842-L849: docstring 列出初始化、构造模型/optimizer/lr schedule、获取数据集和训练的顺序。
+      common_confusions:
+        - 把 task entry 和 training loop 写成一个函数。
+        - 只看模型 forward，漏掉 optimizer、scheduler 和 checkpoint。
+        - 认为 MiniInfra 的小模型与真实 Megatron 没有结构对应关系。
+      checkpoint_questions:
+        - 任务入口提供哪些回调？
+        - 通用 training loop 负责哪些系统行为？
+        - 为什么这两层要分开？
+
+    - title: Train step 的最小合同
+      plain_explanation: |
+        `train_step` 接收 forward/backward 回调、data iterator、model、optimizer、scheduler 和 iteration。它返回 metrics dict，至少包含 iteration、loss、num_microbatches、skipped_iter 和 lr。
+
+        主顺序是 `zero_grad -> forward_backward -> optimizer.step -> scheduler.step if success -> metrics`。
+      mental_model: |
+        train_step 是训练循环里的关口清单，每个关口都决定下一个状态和日志字段。
+      why_it_matters: |
+        调用顺序错会让 loss、梯度、lr 和 checkpoint 全部失真。
+      source_refs:
+        - title: Starter signature
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/starter/train_step.py
+          lines: [17, 24]
+          note: |
+            L17-L24: `train_step` 接收 forward_backward、data iterator、model、optimizer、scheduler 和 iteration。
+        - title: Starter contract
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/starter/train_step.py
+          lines: [25, 31]
+          note: |
+            L25-L31: docstring 说明 forward/backward 输出和 optimizer.step 返回值。
+        - title: Starter TODOs
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/starter/train_step.py
+          lines: [32, 38]
+          note: |
+            L32-L37: TODO 列出 zero_grad、forward/backward、loss、optimizer、scheduler 和 metrics。
+            L38: 未实现时抛出 L11 提示。
+        - title: Reference step path
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/reference/train_step.py
+          lines: [52, 63]
+          note: |
+            L52-L53: optimizer 有 zero_grad 时先清梯度。
+            L55-L59: 调用 forward_backward 并计算平均 loss。
+            L61-L63: optimizer 成功后推进 scheduler。
+      common_confusions:
+        - 在 forward/backward 之后才清梯度。
+        - scheduler 在 optimizer skip 时仍前进。
+        - metrics 在 scheduler step 前读取 lr。
+      checkpoint_questions:
+        - "`train_step` 的最小 metrics 字段有哪些？"
+        - 为什么 scheduler 要等 optimizer update 成功？
+        - optimizer 没有 `zero_grad` 方法时应该怎样处理？
+
+    - title: Loss、optimizer result 和 metrics
+      plain_explanation: |
+        forward/backward 可以返回单个 loss，也可以返回 microbatch losses。`losses` 非空时取平均，并记录 `num_microbatches`。optimizer 返回 bool、None 或 dict；`False` 和 `success=False` 表示 skip。
+      mental_model: |
+        Loss 是计算收据，optimizer result 是更新收据，metrics 是交给日志的总账。
+      why_it_matters: |
+        loss 汇总和 skip 语义一旦写错，训练曲线和 lr 时间轴都会难以解释。
+      source_refs:
+        - title: Reference loss parsing
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/reference/train_step.py
+          lines: [13, 22]
+          note: |
+            L13-L18: 支持 `losses` 和 `loss` 两种返回。
+            L19-L22: 缺失或空 loss 时抛 `TrainStepError`。
+        - title: Reference step result
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/reference/train_step.py
+          lines: [25, 32]
+          note: |
+            L25-L27: dict 返回 success 和 grad_norm。
+            L28-L32: bool、None 和未知类型分别处理。
+        - title: Reference metrics
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/reference/train_step.py
+          lines: [65, 76]
+          note: |
+            L65-L71: metrics 写 iteration、loss、num_microbatches、skipped_iter 和 lr。
+            L72-L75: 可选写 grad_norm 和 tokens。
+        - title: Patch test assertions
+          repo_path: labs/l10_megatron_pretrain_lifecycle/patch/tests/test_patch.py
+          lines: [60, 69]
+          note: |
+            L60-L62: 断言调用顺序和 scheduler 调用次数。
+            L63-L69: 断言 iteration、loss、microbatch、tokens、grad_norm、skip 和 lr。
+      common_confusions:
+        - 多 microbatch loss 求和后直接写日志。
+        - optimizer 返回 None 时当成 skip。
+        - 忽略 tokens 和 grad_norm 这类辅助证据。
+      checkpoint_questions:
+        - "`_as_loss_list` 接受哪些输入？"
+        - optimizer 返回未知类型时为什么要抛错？
+        - metrics 中的 lr 从哪里读取？
+
+    - title: Lifecycle drill 和 checkpoint 证据
+      plain_explanation: |
+        `run_lifecycle.py` 把 patch 接回 tiny decoder 训练循环。它加载 train_step、加载 L09 scheduler 或 fallback，构造模型、optimizer、scheduler 和 synthetic data，循环写 metrics，并按配置写 checkpoint marker。
+      mental_model: |
+        Patch 验证单步，lifecycle drill 验证单步能在一个小训练闭环里反复工作。
+      why_it_matters: |
+        单步测试通过后仍可能在多步循环里暴露 lr、checkpoint、loss drop 或 artifact 问题。
+      source_refs:
+        - title: Load train_step
+          repo_path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
+          lines: [44, 55]
+          note: |
+            L44-L50: 支持 `IMPL=reference` 时直接加载 reference。
+            L51-L55: 默认尝试加载 starter train_step。
+        - title: Load L09 scheduler
+          repo_path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
+          lines: [62, 70]
+          note: |
+            L62-L66: 函数读取 L09 patch 目录，并根据环境变量决定查找顺序。
+            L67-L70: 按 starter/reference 顺序查找 scheduler 文件。
+        - title: Scheduler construction
+          repo_path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
+          lines: [231, 239]
+          note: |
+            L231-L239: 构造模型、optimizer 和 scheduler。
+        - title: Lifecycle loop metrics
+          repo_path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
+          lines: [264, 271]
+          note: |
+            L264-L271: 循环调用 train_step 并记录 loss/lr。
+        - title: Lifecycle metrics write
+          repo_path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
+          lines: [272, 284]
+          note: |
+            L272-L284: 写入 metrics.jsonl。
+        - title: Acceptance
+          repo_path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
+          lines: [294, 303]
+          note: |
+            L294-L303: 根据 loss drop 和 restart lr 判断局部 acceptance。
+      common_confusions:
+        - patch test 通过后不跑 lifecycle。
+        - 把 CPU tiny model 的 loss drop 当成真实集群吞吐证据。
+        - 只看 report，不检查 metrics.jsonl 和 acceptance.json。
+      checkpoint_questions:
+        - lifecycle 脚本如何选择 train_step 实现？
+        - acceptance.json 记录哪些判断？
+        - checkpoint marker 在哪一步写入？
+
+    - title: 真实 Megatron 对照
+      plain_explanation: |
+        真实 Megatron 的 `training.py` 包含更多并行、日志和保存分支，但主线相同：pretrain 构造系统，train_step 调用 forward_backward，optimizer 成功后推进 scheduler，主 loop 读取 lr 交给 training_log。
+      mental_model: |
+        MiniInfra 是真实 Megatron 的窄切片；源码带读要把窄切片映射回生产主路径。
+      why_it_matters: |
+        读真实源码时，如果没有这条主线，很容易被 activation logging、pipeline、distributed optimizer 和 monitor 分支带偏。
+      source_refs:
+        - title: Megatron forward_backward
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [1888, 1900]
+          note: |
+            L1888-L1899: 真实 train_step 调用 forward_backward_func 并传入 microbatch、序列长度和模型。
+            L1900: 后续处理 activation logging 等分支。
+        - title: Megatron optimizer step
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [1945, 1949]
+          note: |
+            L1945-L1948: 执行真实 optimizer step。
+            L1949: update_successful 决定后续 scheduler 行为。
+        - title: Megatron scheduler update
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [1976, 1983]
+          note: |
+            L1976-L1979: update 成功后按 batch 相关 increment 推进 scheduler。
+            L1980-L1983: 记录 skipped_iter。
+        - title: Megatron lr to log
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [3211, 3221]
+          note: |
+            L3211-L3216: 主 loop 读取 canonical lr。
+            L3217-L3221: 将 lr 传给 `training_log`。
+      common_confusions:
+        - 认为 MiniInfra 和真实 Megatron 的训练主线无关。
+        - 看到真实源码分支多，就忽略 optimizer/scheduler 主路径。
+        - 把 sample-based increment 简化成每 iteration 加 1。
+      checkpoint_questions:
+        - 真实 Megatron 在哪里调用 forward_backward_func？
+        - 真实 scheduler increment 和本关 patch 有什么差异？
+        - learning rate 怎样进入 training_log？
+
 source_reading:
-  - title: MiniInfra Megatron pretrain
+  - title: Patch starter
+    repo_path: labs/l10_megatron_pretrain_lifecycle/patch/starter/train_step.py
+    focus: 学生需要补齐的 train_step 最小合同
+    highlights:
+      - title: Function signature
+        lines: [17, 24]
+        note: |
+          L17-L24: `train_step` 接收 forward_backward、data iterator、model、optimizer、scheduler 和 iteration。
+      - title: Contract docstring
+        lines: [25, 31]
+        note: |
+          L25-L31: docstring 说明 forward/backward 输出和 optimizer.step 返回值。
+      - title: TODO list
+        lines: [32, 38]
+        note: |
+          L32-L37: TODO 覆盖 zero_grad、loss、optimizer、scheduler 和 metrics。
+          L38: 未实现时抛出 L11 提示。
+
+  - title: Patch reference
+    repo_path: labs/l10_megatron_pretrain_lifecycle/patch/reference/train_step.py
+    focus: 参考实现中的 loss 校验、optimizer 结果解析和 metrics
+    highlights:
+      - title: Loss parser
+        lines: [13, 22]
+        note: |
+          L13-L18: 支持 `losses` 和 `loss`。
+          L19-L22: 缺失或空 loss 时抛 `TrainStepError`。
+      - title: Step parser
+        lines: [25, 32]
+        note: |
+          L25-L27: dict 返回 success 和 grad_norm。
+          L28-L32: bool、None 和未知类型分别处理。
+      - title: LR reader
+        lines: [35, 41]
+        note: |
+          L35-L37: 优先从 scheduler.get_lr 读取。
+          L38-L41: fallback 到 optimizer param group 或 None。
+      - title: Main path
+        lines: [44, 53]
+        note: |
+          L44-L51: train_step 签名。
+          L52-L53: optimizer 有 zero_grad 时先清梯度。
+      - title: Forward and scheduler
+        lines: [55, 63]
+        note: |
+          L55-L59: 调用 forward_backward 并平均 loss。
+          L61-L63: optimizer 成功时推进 scheduler。
+      - title: Metrics
+        lines: [65, 76]
+        note: |
+          L65-L71: 写入核心 metrics。
+          L72-L75: 可选写 grad_norm 和 tokens。
+
+  - title: Patch tests
+    repo_path: labs/l10_megatron_pretrain_lifecycle/patch/tests/test_patch.py
+    focus: 调用顺序、skip、None success 和异常输入
+    highlights:
+      - title: Implementation switch
+        lines: [16, 17]
+        note: |
+          L16-L17: `IMPL` 环境变量选择 starter 或 reference，空值回退到 starter。
+      - title: Dummy optimizer
+        lines: [20, 31]
+        note: |
+          L20-L24: DummyOptimizer 保存调用列表、step_result 和 param_groups。
+          L26-L31: zero_grad 与 step 都记录调用。
+      - title: Dummy scheduler
+        lines: [34, 44]
+        note: |
+          L34-L41: DummyScheduler 记录 step 调用并更新 lr。
+          L43-L44: `get_lr` 返回当前 lr。
+      - title: Call order setup
+        lines: [47, 59]
+        note: |
+          L47-L53: forward_backward 记录事件并返回两个 microbatch loss。
+          L55-L59: 调用 train_step。
+      - title: Call order asserts
+        lines: [60, 69]
+        note: |
+          L60-L62: 断言 zero_grad、step 和 scheduler 调用顺序。
+          L63-L69: 断言 metrics 字段。
+      - title: Skip test setup
+        lines: [72, 83]
+        note: |
+          L72-L75: optimizer 返回 False，scheduler 初始为 0 次调用。
+          L76-L83: 调用 train_step。
+      - title: Skip test asserts
+        lines: [84, 87]
+        note: |
+          L84-L87: scheduler 不推进，skipped_iter 为 1，lr 保持 0.1。
+      - title: None success
+        lines: [90, 98]
+        note: |
+          L90-L94: optimizer 返回 None。
+          L95-L98: scheduler 推进，loss 保持输入值，skip 为 0。
+      - title: Error tests
+        lines: [100, 109]
+        note: |
+          L100-L103: 缺少 loss 时抛 `TrainStepError`。
+          L106-L109: 空 losses 时抛 `TrainStepError`。
+
+  - title: MiniInfra pretrain_gpt
     repo_path: mini_infra/megatron/pretrain_gpt.py
-    focus: 入口如何组装 provider
-  - title: MiniInfra training loop
+    focus: task entry 如何提供 provider、batch、loss 和 forward step
+    highlights:
+      - title: Provider and batch
+        lines: [6, 12]
+        note: |
+          L6-L7: `model_provider` 返回模型配置。
+          L10-L12: `get_batch` 从 data iterator 取文本。
+      - title: Loss and forward
+        lines: [15, 27]
+        note: |
+          L15-L16: `loss_func` 读取 loss。
+          L19-L27: `forward_step` 返回 loss 和 model_type。
+
+  - title: MiniInfra training lifecycle
     repo_path: mini_infra/megatron/training/training.py
-    focus: pretrain/train_step/log/checkpoint 生命周期
+    focus: 同构 train_step、pretrain 循环、metrics 和 checkpoint
+    highlights:
+      - title: Mini train_step inputs
+        lines: [83, 90]
+        note: |
+          L83-L90: MiniInfra train_step 接收 forward/backward、data iterator、model、optimizer、scheduler 和 iteration。
+      - title: Mini train_step metrics
+        lines: [100, 110]
+        note: |
+          L100-L102: optimizer 成功时推进 scheduler。
+          L104-L110: metrics 写入 iteration、loss、microbatch、skip 和 lr。
+      - title: Pretrain setup
+        lines: [125, 135]
+        note: |
+          L125-L132: pretrain 创建 run_dir、初始化并读取数据。
+          L133-L135: 构造 data iterator。
+      - title: Model optimizer scheduler
+        lines: [136, 140]
+        note: |
+          L136-L140: 构造模型、optimizer 和 MiniLRScheduler。
+      - title: Loop call
+        lines: [146, 154]
+        note: |
+          L146-L154: 每个 iteration 调用 train_step。
+      - title: Metrics enrichment
+        lines: [155, 167]
+        note: |
+          L155-L166: 补充 TP/PP、sequence_parallel、distributed_optimizer 和 pipeline bubble 指标。
+          L167: 结束补充指标字段。
+      - title: Training log
+        lines: [168, 168]
+        note: |
+          L168: 写 training log。
+      - title: Checkpoint save
+        lines: [169, 175]
+        note: |
+          L169-L174: checkpoint 保存 model、optimizer 和 scheduler state。
+          L175: 保存 parallel state。
+      - title: Artifacts
+        lines: [177, 187]
+        note: |
+          L177-L182: 写 config、schedule 和 checkpoint artifact。
+          L183-L187: 返回 run_dir、final_metrics 和 checkpoint。
+
+  - title: Lifecycle drill
+    repo_path: labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py
+    focus: patch 如何接回 tiny pretrain lifecycle
+    highlights:
+      - title: Load train_step
+        lines: [44, 55]
+        note: |
+          L44-L50: 支持 `IMPL=reference` 时直接导入 reference。
+          L51-L55: 默认导入 starter train_step。
+      - title: Load scheduler
+        lines: [62, 70]
+        note: |
+          L62-L66: 读取 L09 scheduler patch 目录和环境变量查找顺序。
+          L67-L70: 生成要加载的 scheduler 文件 spec。
+      - title: Scheduler import loop
+        lines: [72, 80]
+        note: |
+          L72-L77: 导入 scheduler module，发现 `CosineWithRestartsLR` 后返回。
+          L78-L80: 导入失败时继续，最终会进入 local fallback。
+      - title: Local scheduler fallback
+        lines: [83, 93]
+        note: |
+          L83-L93: 本地 fallback scheduler 保存 optimizer、lr 配置、restart_steps 和初始 step。
+      - title: Scheduler construction
+        lines: [231, 239]
+        note: |
+          L231-L239: 构造模型、optimizer 和 scheduler。
+      - title: Forward backward
+        lines: [248, 254]
+        note: |
+          L248-L254: forward_backward 取 batch、算 logits/loss、执行 backward 并返回 loss/tokens。
+      - title: Lifecycle loop head
+        lines: [264, 271]
+        note: |
+          L264-L271: 每步调用 train_step，并记录 loss/lr。
+      - title: Lifecycle metrics
+        lines: [272, 284]
+        note: |
+          L272-L284: 写入 metrics.jsonl。
+      - title: Checkpoint marker
+        lines: [285, 288]
+        note: |
+          L285-L288: 按 save_every 写 checkpoint 文件和 latest marker。
+      - title: Acceptance head
+        lines: [290, 299]
+        note: |
+          L290-L299: 计算 loss drop 和 restart 是否满足条件。
+      - title: Acceptance json
+        lines: [307, 319]
+        note: |
+          L307-L319: 写出 acceptance.json 的主要字段。
+      - title: Acceptance tail
+        lines: [320, 323]
+        note: |
+          L320-L323: 写 final_loss_ok 和 all_passed 并结束 JSON 写入。
+
+  - title: MiniInfra checkpointing
+    repo_path: mini_infra/megatron/training/checkpointing.py
+    focus: 保存、加载和 parallel state 一致性检查
+    highlights:
+      - title: Save checkpoint head
+        lines: [17, 29]
+        note: |
+          L17-L24: save_checkpoint 接收 iteration、model、optimizer、scheduler 和 parallel state。
+          L25-L29: 校验 iteration 并准备 payload。
+      - title: Save checkpoint body
+        lines: [30, 42]
+        note: |
+          L30-L36: payload 写入 model、optimizer、scheduler 和 parallel state。
+          L37-L42: 写 checkpoint 文件和 latest marker。
+      - title: Load checkpoint head
+        lines: [60, 69]
+        note: |
+          L60-L66: 读取 latest checkpoint。
+          L67-L69: 校验 checkpoint format。
+      - title: Parallel state check
+        lines: [70, 82]
+        note: |
+          L70-L78: 比较 actual 和 expected parallel state。
+          L79-L82: strict 模式抛错，非 strict 收集 warnings。
+      - title: Load checkpoint return
+        lines: [83, 85]
+        note: |
+          L83-L85: 返回 checkpoint path 和 warnings。
+
   - title: Megatron training.py
     repo_path: github_repo/Megatron-LM/megatron/training/training.py
-    focus: forward_backward_func、training_log、save_checkpoint 边界
+    focus: 真实 pretrain、train_step、optimizer/scheduler 和 lr logging
+    highlights:
+      - title: Pretrain signature
+        lines: [829, 841]
+        note: |
+          L829-L841: 真实 pretrain 接收 dataset provider、model provider 和 forward_step_func 等入口。
+      - title: Pretrain order
+        lines: [842, 849]
+        note: |
+          L842-L849: docstring 列出初始化、构造模型/optimizer/lr schedule、获取数据集和训练。
+      - title: Forward backward
+        lines: [1888, 1900]
+        note: |
+          L1888-L1899: train_step 调用 forward_backward_func。
+          L1900: 后续处理 activation logging。
+      - title: Optimizer update
+        lines: [1945, 1949]
+        note: |
+          L1945-L1948: 执行 optimizer step。
+          L1949: update_successful 会影响 scheduler。
+      - title: Scheduler update
+        lines: [1976, 1983]
+        note: |
+          L1976-L1979: update 成功后按 batch 相关 increment 推进 scheduler。
+          L1980-L1983: 记录 skipped_iter。
+      - title: LR logging
+        lines: [3211, 3221]
+        note: |
+          L3211-L3216: 主 loop 读取 canonical lr。
+          L3217-L3221: lr 传入 training_log。
 
 mini_infra_targets:
   - mini_infra/megatron/pretrain_gpt.py
   - mini_infra/megatron/training/training.py
-
 notebooks:
   - notebooks/n06_activation_recompute.ipynb
-
 tickets:
   - mgt_tokenizer_003
   - mgt_data_index_004
   - mgt_checkpoint_002
-
 prereq: l09_long_context_cp
 next_lab: l11_megatron_scale_optimization
-
 gpu_modes:
-  local: CPU 即可
+  local: CPU OK，patch 和 lifecycle drill 可运行
   cluster: 可对照真实 Megatron pretrain smoke
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l10_megatron_pretrain_lifecycle/system_map.md
+    description: L11 在预训练生命周期中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l10_megatron_pretrain_lifecycle/lecture.md
+    description: 从 task entry、train_step、loss、optimizer、scheduler、metrics 讲到 lifecycle drill 和真实 Megatron 对照。
+  - title: 源码带读讲义
+    path: labs/l10_megatron_pretrain_lifecycle/source_walkthrough.md
+    description: 按 patch、MiniInfra、lifecycle drill、checkpoint 和真实 Megatron 组织的阅读路线。

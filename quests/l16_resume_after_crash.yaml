@@ -1,0 +1,603 @@
+id: l16_resume_after_crash
+title: L17 · Crash Resume
+level: L17
+act: 第 2 章：训练系统、并行与数据
+role: 训练可靠性学员
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+frameworks:
+- MiniInfra
+- Megatron-LM
+- PyTorch
+patch:
+  description: |
+    实现 crash-safe checkpoint 的最小合同：payload 先写入临时文件并 fsync，
+    原子提交为正式 checkpoint，恢复时清理 dangling tmp，并用 latest marker
+    找到最近一个已提交 iteration。
+  task_md: labs/l16_resume_after_crash/patch/task.md
+  starter_file: labs/l16_resume_after_crash/patch/starter/crash_safe.py
+  reference_file: labs/l16_resume_after_crash/patch/reference/crash_safe.py
+  test_command: make patch-test M=l16_resume_after_crash
+  status_file: labs/l16_resume_after_crash/patch/.last_run.json
+  test_count: 6
+  test_kind: crash-safe checkpoint 行为合同验证
+source_reading:
+- title: Patch starter
+  repo_path: labs/l16_resume_after_crash/patch/starter/crash_safe.py
+  focus: 学生需要补齐的原子写、恢复入口和幂等保存合同
+  highlights:
+  - title: 读 atomic_save TODO
+    lines:
+    - 13
+    - 18
+    note: |
+      L13-L18: starter 把写 tmp、flush/fsync 和 replace 拆成三个 TODO。
+  - title: 读 load_latest TODO
+    lines:
+    - 21
+    - 29
+    note: |
+      L21-L29: 恢复入口必须先清理 dangling tmp，再读取 latest marker。
+  - title: 读 save_step 输入
+    lines:
+    - 32
+    - 39
+    note: |
+      L32-L39: save_step 的输入覆盖 iteration、model、optimizer、RNG 和额外状态。
+  - title: 读 save_step TODO
+    lines:
+    - 40
+    - 47
+    note: |
+      L40-L47: 保存顺序是建目录、组 payload、写 checkpoint、再更新 marker。
+- title: Patch reference
+  repo_path: labs/l16_resume_after_crash/patch/reference/crash_safe.py
+  focus: 参考实现中的提交边界、tmp 清理和 latest fallback
+  highlights:
+  - title: 读 atomic_save
+    lines:
+    - 13
+    - 24
+    note: |
+      L13-L16: target 和 tmp 都限制在同一目录。
+      L17-L24: 写入、flush、fsync 后用 os.replace 提交。
+  - title: 读 _cleanup_partial
+    lines:
+    - 27
+    - 35
+    note: |
+      L27-L35: 恢复前删除 suffix 或文件名以 .tmp 结尾的半成品。
+  - title: 读 load_latest marker
+    lines:
+    - 38
+    - 50
+    note: |
+      L38-L45: 没有目录或正式 checkpoint 时返回 None。
+      L46-L50: latest marker 指向 step，并转换成 checkpoint 文件名。
+  - title: 读 load_latest fallback
+    lines:
+    - 51
+    - 56
+    note: |
+      L51-L56: marker 不可用时回退到编号最大的已提交文件。
+  - title: 读 save_step payload
+    lines:
+    - 59
+    - 68
+    note: |
+      L59-L68: save_step 规范化目录和 step，并准备写入目标路径。
+  - title: 读 save_step commit
+    lines:
+    - 69
+    - 79
+    note: |
+      L69-L76: payload 明确保存 step、model、optimizer、RNG 和 extra。
+      L77-L79: checkpoint 提交成功后才提交 latest marker。
+- title: Patch tests
+  repo_path: labs/l16_resume_after_crash/patch/tests/test_patch.py
+  focus: patch-test 对 crash-safe 行为的验收边界
+  highlights:
+  - title: 读 atomic save 测试
+    lines:
+    - 21
+    - 28
+    note: |
+      L21-L28: 测试要求正式文件存在、tmp 消失、payload 可读。
+  - title: 读 dangling tmp 测试
+    lines:
+    - 31
+    - 40
+    note: |
+      L31-L40: 模拟 step 3 半写失败，load_latest 必须回到 step 2。
+  - title: 读 resume state 保存
+    lines:
+    - 43
+    - 52
+    note: |
+      L43-L52: 保存 model、optimizer、RNG 和 extra。
+  - title: 读 resume state 断言
+    lines:
+    - 53
+    - 57
+    note: |
+      L53-L57: load_latest 后逐项检查状态完整性。
+  - title: 读 idempotent 与 empty
+    lines:
+    - 60
+    - 71
+    note: |
+      L60-L67: 同 step 重复保存不能创建重复 checkpoint。
+      L69-L71: 空目录恢复必须返回 None。
+  - title: 读 loss step
+    lines:
+    - 74
+    - 80
+    note: |
+      L74-L80: 定义最小训练 step 和 loss。
+  - title: 读 loss baseline
+    lines:
+    - 82
+    - 89
+    note: |
+      L82-L89: baseline 连续跑完整梯度序列。
+  - title: 读 loss resume load
+    lines:
+    - 90
+    - 101
+    note: |
+      L90-L101: crash run 保存 step 4 并重新加载。
+  - title: 读 loss 对齐
+    lines:
+    - 102
+    - 109
+    note: |
+      L102-L109: 后续 loss 必须与 baseline 对齐。
+- title: Crash drill
+  repo_path: labs/l16_resume_after_crash/scripts/run_crash_drill.py
+  focus: baseline 与 crash+resume 的端到端对齐证据
+  highlights:
+  - title: 读实现选择
+    lines:
+    - 33
+    - 45
+    note: |
+      L33-L41: drill 按 IMPL 选择 starter 或 reference。
+      L42-L45: starter 不可用时回退 reference，便于课程演示。
+  - title: 读训练 step
+    lines:
+    - 48
+    - 54
+    note: |
+      L48-L54: 最小训练循环同时更新权重和优化器动量。
+  - title: 读配置和 run 目录
+    lines:
+    - 63
+    - 71
+    note: |
+      L63-L71: 记录实现、配置和 run 目录，保证复盘可追踪。
+  - title: 读 baseline 与 crash 前半程
+    lines:
+    - 73
+    - 81
+    note: |
+      L73-L78: 同 seed 生成完整梯度序列并跑 baseline。
+      L80-L81: crash 分支只跑到 crash_at。
+  - title: 读保存和加载
+    lines:
+    - 82
+    - 90
+    note: |
+      L82-L89: 在 crash 点保存 model 与 optimizer state。
+      L90: 恢复路径通过 load_latest 读取最近 committed checkpoint。
+  - title: 读 resume 判定
+    lines:
+    - 91
+    - 102
+    note: |
+      L91-L96: 恢复状态后继续跑剩余梯度。
+      L98-L102: 用相对 loss diff 判定是否通过。
+  - title: 读 summary artifact
+    lines:
+    - 117
+    - 125
+    note: |
+      L117-L125: artifact 记录实现、最大相对误差和 crash 配置。
+- title: MiniInfra checkpointing
+  repo_path: mini_infra/megatron/training/checkpointing.py
+  focus: 教学版 checkpoint save/load 的恢复合同
+  highlights:
+  - title: 读 save 输入
+    lines:
+    - 17
+    - 24
+    note: |
+      L17-L24: MiniInfra checkpoint 保存 model、optimizer、scheduler 和 parallel state。
+  - title: 读 save payload
+    lines:
+    - 28
+    - 36
+    note: |
+      L28-L36: payload 把 format、iteration、created_at 和各类状态写入同一对象。
+  - title: 读文件和 marker
+    lines:
+    - 37
+    - 43
+    note: |
+      L37-L43: checkpoint 文件和 latest marker 构成恢复入口。
+  - title: 读 latest helper
+    lines:
+    - 46
+    - 57
+    note: |
+      L46-L57: marker 缺失、不可解析或指向缺失文件都会失败。
+  - title: 读 load format
+    lines:
+    - 60
+    - 68
+    note: |
+      L60-L68: load 先定位 latest 文件，再校验 checkpoint format。
+  - title: 读 strict mismatch
+    lines:
+    - 70
+    - 78
+    note: |
+      L70-L78: 遍历 expected parallel state 并构造 mismatch。
+  - title: 读 strict 返回
+    lines:
+    - 79
+    - 85
+    note: |
+      L79-L85: strict 抛错，non-strict 返回 warning。
+- title: MiniInfra training save call
+  repo_path: mini_infra/megatron/training/training.py
+  focus: 训练主循环如何把运行状态交给 checkpointing
+  highlights:
+  - title: 读 save_checkpoint 调用
+    lines:
+    - 169
+    - 176
+    note: |
+      L169-L176: 训练结束时把 iteration、model、optimizer、scheduler 和 parallel state 交给 save_checkpoint。
+  - title: 读 artifacts
+    lines:
+    - 177
+    - 182
+    note: |
+      L177-L182: resolved config、schedule 和 checkpoint 结果都写入 run artifact。
+- title: Megatron save path
+  repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+  focus: 真实 save_checkpoint 如何收集 RNG、状态字典并提交 latest marker
+  highlights:
+  - title: 读 RNG 收集
+    lines:
+    - 548
+    - 552
+    note: |
+      L548-L552: 保存前按 TP/PP group 收集 RNG state。
+  - title: 读 state_dict metadata
+    lines:
+    - 598
+    - 606
+    note: |
+      L598-L606: distributed checkpoint 会先准备 sharded state metadata。
+  - title: 读 generate_state_dict
+    lines:
+    - 609
+    - 619
+    note: |
+      L609-L619: model、optimizer、scheduler、RNG 和 rerun state 统一进入 state_dict。
+  - title: 读 tracker 准备
+    lines:
+    - 770
+    - 774
+    note: |
+      L770-L774: checkpoint 保存后才准备更新 latest tracker。
+  - title: 读 tracker 写入
+    lines:
+    - 783
+    - 792
+    note: |
+      L783-L792: finalize 函数把 release 或 iteration 写入 tracker 文件。
+  - title: 读 async finalize
+    lines:
+    - 830
+    - 835
+    note: |
+      L830-L835: async save 把 tracker 更新挂到 finalize，sync save 直接执行。
+- title: Megatron load path
+  repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+  focus: 真实 load_checkpoint 如何恢复 iteration、optimizer、scheduler 和 RNG
+  highlights:
+  - title: 读 checkpoint version
+    lines:
+    - 1856
+    - 1868
+    note: |
+      L1856-L1858: 先记录 checkpoint version。
+      L1864-L1868: finetune/release 与普通 resume 的 iteration 处理不同。
+  - title: 读 iteration fallback
+    lines:
+    - 1869
+    - 1877
+    note: |
+      L1869-L1877: 从 state_dict 读取 iteration，旧格式用 total_iters fallback。
+  - title: 读 consumed samples
+    lines:
+    - 1879
+    - 1889
+    note: |
+      L1879-L1889: checkpoint args 恢复 consumed samples，并更新 microbatch 计数。
+  - title: 读 model load
+    lines:
+    - 1903
+    - 1912
+    note: |
+      L1903-L1912: 对单 stage 或多 stage 模型分别加载 state_dict。
+  - title: 读 optimizer load
+    lines:
+    - 1918
+    - 1929
+    note: |
+      L1918-L1929: 非 finetune 且未禁用时恢复 optimizer state。
+  - title: 读 scheduler load
+    lines:
+    - 1947
+    - 1953
+    note: |
+      L1947-L1953: scheduler 从 lr_scheduler 或 opt_param_scheduler key 恢复。
+  - title: 读 RNG load
+    lines:
+    - 1974
+    - 1986
+    note: |
+      L1974-L1986: resume 时从 checkpoint 取当前 rank 对应的 RNG state。
+  - title: 读 RNG setstate
+    lines:
+    - 1987
+    - 1999
+    note: |
+      L1987-L1999: 选择 RNG state 后恢复 random、numpy、torch 和 cuda RNG。
+  - title: 读 RNG tracker
+    lines:
+    - 2000
+    - 2007
+    note: |
+      L2000-L2007: CUDA RNG tracker states 也要转换并恢复。
+  - title: 读 RNG error
+    lines:
+    - 2020
+    - 2026
+    note: |
+      L2020-L2026: RNG 缺失会提示使用 no-load-rng 或 finetune，并退出。
+mini_infra_targets:
+- mini_infra/megatron/training/checkpointing.py
+- mini_infra/megatron/training/training.py
+notebooks: []
+gpu_modes:
+  local: CPU smoke 或单卡 drill
+  cluster: 按课程集群模板记录 checkpoint 目录、latest marker 和 resume 指标
+lesson:
+  opening: |-
+    # L17：Crash Resume
+
+    本讲处理训练系统里最朴素也最容易被低估的可靠性问题：作业在 checkpoint 写到一半时崩溃，下一次启动应该从哪个状态继续。
+
+    学完后，你要能把一次 checkpoint 拆成写入阶段、提交阶段和恢复阶段，解释为什么临时文件、fsync、latest marker、optimizer state 和 RNG state 都会影响 resume 结论。
+  sections:
+  - title: 课程定位：checkpoint 合同后的可靠写入
+    plain_explanation: |-
+      L16 已经定义了完整 resume 需要保存哪些状态。L17 把视角收窄到写入可靠性：同一份状态如果写到一半就被进程、机器或网络文件系统打断，恢复入口不能误读半成品。
+
+      这讲的 patch 只实现单进程、JSON payload 的最小版本。它不模拟多 rank barrier，也不覆盖远端对象存储，但它把生产系统里最核心的提交边界暴露出来：checkpoint 文件先完整落盘，latest marker 再指向它。
+    mental_model: 把 checkpoint 看成一次小事务：prepare 写 tmp，commit rename，recover 清理 tmp 并读取最近 committed 文件。
+    why_it_matters: 训练任务中断不可怕，恢复到错误状态才会污染后续实验和算力预算。
+    source_refs:
+    - title: 读 save_checkpoint 调用
+      repo_path: mini_infra/megatron/training/training.py
+      lines:
+      - 169
+      - 176
+      note: |
+        L169-L176: 训练结束时把 iteration、model、optimizer、scheduler 和 parallel state 交给 save_checkpoint。
+    - title: 读 save 输入
+      repo_path: mini_infra/megatron/training/checkpointing.py
+      lines:
+      - 17
+      - 24
+      note: |
+        L17-L24: MiniInfra checkpoint 保存 model、optimizer、scheduler 和 parallel state。
+    checkpoint_questions:
+    - L16 的完整状态合同和 L17 的 crash-safe 写入合同分别解决什么问题？
+    - latest marker 为什么不能早于 checkpoint 文件提交？
+  - title: Atomic save：从 tmp 到 committed checkpoint
+    plain_explanation: |-
+      `atomic_save` 的目标是限制 reader 的视角：它只能看到旧 checkpoint，或看到完整的新 checkpoint。写 tmp 是 prepare；flush/fsync 尽量把文件内容推到存储层；`os.replace` 是 commit。
+
+      同目录 tmp 很关键，因为跨文件系统 rename 可能退化成复制。课程 patch 用 JSON 方便测试，真实框架可能用 `torch.save`、分布式 checkpoint 或对象存储 API，但提交边界仍然要清楚。
+    mental_model: reader 不应该参与写入过程；它只读取已经提交的文件和 marker。
+    why_it_matters: 半写文件一旦被当成最新 checkpoint，训练恢复会在更隐蔽的位置失败。
+    source_refs:
+    - title: 读 atomic_save TODO
+      repo_path: labs/l16_resume_after_crash/patch/starter/crash_safe.py
+      lines:
+      - 13
+      - 18
+      note: |
+        L13-L18: starter 把写 tmp、flush/fsync 和 replace 拆成三个 TODO。
+    - title: 读 atomic_save
+      repo_path: labs/l16_resume_after_crash/patch/reference/crash_safe.py
+      lines:
+      - 13
+      - 24
+      note: |
+        L13-L16: target 和 tmp 都限制在同一目录。
+        L17-L24: 写入、flush、fsync 后用 os.replace 提交。
+    - title: 读 atomic save 测试
+      repo_path: labs/l16_resume_after_crash/patch/tests/test_patch.py
+      lines:
+      - 21
+      - 28
+      note: |
+        L21-L28: 测试要求正式文件存在、tmp 消失、payload 可读。
+    checkpoint_questions:
+    - 为什么 tmp 文件必须和目标文件在同一目录？
+    - atomic save 只能保证哪些现象，不能保证哪些存储故障？
+  - title: Recover：清理 dangling tmp 并定位 latest
+    plain_explanation: |-
+      恢复路径先处理上一次失败留下的痕迹。`.tmp` 文件没有经过 commit，不能被加载，也不能被随手改名成正式 checkpoint。清理后，loader 优先相信 latest marker；如果 marker 损坏，教学 patch 回退到编号最大的正式文件。
+
+      生产系统通常会加入 rank 间一致性、远端存储语义、保留策略和异步保存 finalize。你读 Megatron 时要抓住同一个问题：什么时候算保存完成，什么时候可以更新 tracker。
+    mental_model: recover 的第一步是丢弃 prepare 阶段残留，只保留 committed 集合。
+    why_it_matters: 恢复入口选错 iteration，会让后续 loss、LR schedule 和数据消费数全部偏离。
+    source_refs:
+    - title: 读 _cleanup_partial
+      repo_path: labs/l16_resume_after_crash/patch/reference/crash_safe.py
+      lines:
+      - 27
+      - 35
+      note: |
+        L27-L35: 恢复前删除 suffix 或文件名以 .tmp 结尾的半成品。
+    - title: 读 load_latest marker
+      repo_path: labs/l16_resume_after_crash/patch/reference/crash_safe.py
+      lines:
+      - 38
+      - 50
+      note: |
+        L38-L45: 没有目录或正式 checkpoint 时返回 None。
+        L46-L50: latest marker 指向 step，并转换成 checkpoint 文件名。
+    - title: 读 dangling tmp 测试
+      repo_path: labs/l16_resume_after_crash/patch/tests/test_patch.py
+      lines:
+      - 31
+      - 40
+      note: |
+        L31-L40: 模拟 step 3 半写失败，load_latest 必须回到 step 2。
+    - title: 读 tracker 准备
+      repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+      lines:
+      - 770
+      - 774
+      note: |
+        L770-L774: checkpoint 保存后才准备更新 latest tracker。
+    - title: 读 tracker 写入
+      repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+      lines:
+      - 783
+      - 792
+      note: |
+        L783-L792: finalize 函数把 release 或 iteration 写入 tracker 文件。
+    checkpoint_questions:
+    - dangling tmp 为什么必须被丢弃？
+    - marker 损坏、marker 指向缺失文件、目录为空时分别应该怎么处理？
+  - title: Resume state：loss 对齐靠状态完整性
+    plain_explanation: |-
+      crash-safe 写入只解决文件边界，不能替代状态完整性。要继续同一条训练轨迹，checkpoint 需要保存模型参数、optimizer 动量或二阶矩、step/iteration、RNG state，以及生产系统里的数据消费进度。
+
+      patch 的 loss continuation 测试把问题缩成一个标量权重和一个动量字段。baseline 连续跑完；crash run 中途保存，再加载继续。两条 loss 序列对齐，说明写入和恢复保住了后续计算需要的状态。
+    mental_model: 恢复的目标是拿到下一步训练所需的完整上下文，能 forward 的模型只覆盖其中一部分。
+    why_it_matters: 只加载 model weights 的 smoke 可以验证权重可读，但不能证明训练从中断点延续。
+    source_refs:
+    - title: 读 resume state 保存
+      repo_path: labs/l16_resume_after_crash/patch/tests/test_patch.py
+      lines:
+      - 43
+      - 52
+      note: |
+        L43-L52: 保存 model、optimizer、RNG 和 extra。
+    - title: 读 resume state 断言
+      repo_path: labs/l16_resume_after_crash/patch/tests/test_patch.py
+      lines:
+      - 53
+      - 57
+      note: |
+        L53-L57: load_latest 后逐项检查状态完整性。
+    - title: 读 loss resume load
+      repo_path: labs/l16_resume_after_crash/patch/tests/test_patch.py
+      lines:
+      - 90
+      - 101
+      note: |
+        L90-L101: crash run 保存 step 4 并重新加载。
+    - title: 读 loss 对齐
+      repo_path: labs/l16_resume_after_crash/patch/tests/test_patch.py
+      lines:
+      - 102
+      - 109
+      note: |
+        L102-L109: 后续 loss 必须与 baseline 对齐。
+    - title: 读 consumed samples
+      repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+      lines:
+      - 1879
+      - 1889
+      note: |
+        L1879-L1889: checkpoint args 恢复 consumed samples，并更新 microbatch 计数。
+    - title: 读 optimizer load
+      repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+      lines:
+      - 1918
+      - 1929
+      note: |
+        L1918-L1929: 非 finetune 且未禁用时恢复 optimizer state。
+    - title: 读 RNG setstate
+      repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+      lines:
+      - 1987
+      - 1999
+      note: |
+        L1987-L1999: 选择 RNG state 后恢复 random、numpy、torch 和 cuda RNG。
+    checkpoint_questions:
+    - 为什么恢复 optimizer state 会影响后续 loss？
+    - 保存 RNG state 和保存数据进度分别防止哪类偏离？
+  - title: Lab：从 patch-test 到 crash drill 复盘
+    plain_explanation: |-
+      本讲先跑 `IMPL=reference make patch-test M=l16_resume_after_crash` 确认最小行为合同，再跑 crash drill 生成端到端 artifact。复盘时不要只写通过或失败，要记录实现版本、seed、crash_at、total_steps、最大相对 loss diff、checkpoint 目录和 latest marker 内容。
+
+      真实项目排查时，把这份记录映射到生产系统：保存完成的日志、tracker 更新时间、目录里是否有半成品、各 rank 的 iteration 是否一致，以及 resume 后的 loss 是否出现跳变。
+    mental_model: patch-test 检查函数级合同，drill 检查训练轨迹是否真的接上。
+    why_it_matters: 可靠性问题往往不能只靠单个异常定位，artifact 是复盘和复现的共同语言。
+    source_refs:
+    - title: 读 baseline 与 crash 前半程
+      repo_path: labs/l16_resume_after_crash/scripts/run_crash_drill.py
+      lines:
+      - 73
+      - 81
+      note: |
+        L73-L78: 同 seed 生成完整梯度序列并跑 baseline。
+        L80-L81: crash 分支只跑到 crash_at。
+    - title: 读 resume 判定
+      repo_path: labs/l16_resume_after_crash/scripts/run_crash_drill.py
+      lines:
+      - 91
+      - 102
+      note: |
+        L91-L96: 恢复状态后继续跑剩余梯度。
+        L98-L102: 用相对 loss diff 判定是否通过。
+    - title: 读 summary artifact
+      repo_path: labs/l16_resume_after_crash/scripts/run_crash_drill.py
+      lines:
+      - 117
+      - 125
+      note: |
+        L117-L125: artifact 记录实现、最大相对误差和 crash 配置。
+    - title: 读 async finalize
+      repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+      lines:
+      - 830
+      - 835
+      note: |
+        L830-L835: async save 把 tracker 更新挂到 finalize，sync save 直接执行。
+    checkpoint_questions:
+    - patch-test 和 crash drill 分别能证明什么？
+    - 如果 loss diff 变大，你会先检查 checkpoint payload、optimizer state、RNG state 还是 marker？
+lesson_docs:
+- title: 系统地图
+  path: labs/l16_resume_after_crash/system_map.md
+  description: 本讲在训练可靠性主线中的位置、事务式 checkpoint 心智模型和易错边界。
+- title: 主讲义
+  path: labs/l16_resume_after_crash/lecture.md
+  description: 从 crash-safe 写入、恢复入口、状态完整性讲到 lab 验收和生产排查。
+- title: 源码带读讲义
+  path: labs/l16_resume_after_crash/source_walkthrough.md
+  description: 按 patch、MiniInfra 和 Megatron 主路径组织的源码阅读路线。

@@ -1,238 +1,102 @@
 mission: l32_slime_rl_core
-title: L11 Quiz · SLiME / Weight Sync / Distributed RL
+title: L36 Quiz · SLiME Weight Sync Coordinator
 pass_threshold: 1.0
 description: |
-  这 5 题打中 RL 训练系统最复杂的部分：跨集群 weight sync 的物理实现、
-  shape/dtype mismatch 的常见 bug、sharded sync、热切换。
+  检查学习者是否理解 weight sync 合同、shape/dtype mismatch、SLiME 更新链路、版本证据和本地 smoke 边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L36 在 RL rollout 主线中的位置
+    kind: doc
+    path: labs/l32_slime_rl_core/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从本地合同到 SLiME 生产链路
+    kind: doc
+    path: labs/l32_slime_rl_core/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、MiniInfra、SLiME updater 阅读
+    kind: doc
+    path: labs/l32_slime_rl_core/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l32_slime_rl_core/patch/task.md
-  - title: 读 SLiME weight_sync 真实实现
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 patch reference
     kind: source
-    path: github_repo/
+    path: labs/l32_slime_rl_core/patch/reference/weight_sync.py
+    estimate_min: 8
+  - title: 对照 SLiME Megatron updater
+    kind: source
+    path: github_repo/slime/slime/backends/megatron_utils/actor.py
+    estimate_min: 15
 
 questions:
-  - id: q1_sync_mechanism
-    prompt: |
-      生产环境 RL 训练里，weight 怎么从 train cluster 同步到 inference cluster？
+  - id: q1_contract
+    prompt: L36 patch 中，哪些 tensor 可以被写入 inference state？
     options:
       - id: a
-        text: 写到本地磁盘，inference 重新加载
-      - id: b
-        text: NCCL P2P broadcast (RDMA over IB)；train rank 0 把 weight tensor
-              直接 P2P 发到 inference rank 0+1+...，~50GB/s 带宽，秒级完成
+        text: key 存在、shape 一致、dtype 一致的 tensor
         correct: true
+      - id: b
+        text: train state 里所有 tensor
       - id: c
-        text: HTTP REST API 拉
+        text: key 名相同即可，不看 dtype
       - id: d
-        text: 共享内存
-    explanation: |
-      物理传输方式：
-        - **NCCL P2P / broadcast** (生产标配):
-          - 训练 rank 0 与 inference rank 0..N 处在同 NCCL group
-          - dist.broadcast(weight_tensor, src=train_rank_0, group=sync_group)
-          - 直接 GPU-to-GPU RDMA，不经 CPU
-          - 7B fp16 ≈ 14GB / 50GB/s ≈ 0.3s
-
-        - **磁盘写读**（开发期，慢）:
-          - train save → 文件 → infer load
-          - 14GB 通过 NFS 几十秒
-          - 仅用于 debug
-
-        - **HTTP**（不推荐）:
-          - 经 CPU + 网络协议栈，30 秒级
-          - 适合极简部署但性能差
-
-      SLiME / OpenRLHF 设计：
-        - Ray actor 协调 train 与 infer 进程
-        - actor.collective_rpc 触发 NCCL P2P sync
-        - sync 期间 infer 短暂 pause，避免 weight 半旧半新
-
-      工程要点：
-        - sync 必须**原子**——所有 weight 一起切换，避免请求看到 layer 1 是新的、
-          layer 2 是旧的（计算结果错误）
-        - **double buffer**: infer 持有两份 weights，sync 完原子切指针
-
-      面试金句："RL weight sync 的核心是 NCCL P2P；生产从不走磁盘或 HTTP，
-      因为 14GB / 几秒 vs 几十秒差太多。"
-
-  - id: q2_sharded_sync
-    prompt: |
-      Train cluster 用 ZeRO-3（每 rank 持 1/N weight），inference 用全量 replicated weight。
-      sync 怎么做？
+        text: inference state 里不存在的 key
+    explanation: "本地合同要求 key、shape、dtype 三项都匹配，才 clone 后写入 inference。"
+  - id: q2_dtype
+    prompt: train 是 fp32 master weight，inference 是 fp16 时，本讲 patch 应如何处理？
     options:
       - id: a
-        text: 每 train rank 自己 broadcast 自己那部分给 infer
-      - id: b
-        text: 训练 rank 之间先 all-gather 成完整 weight，再 broadcast 到 infer cluster；
-              或者 train 全量 dump 到 train rank 0 后再发
+        text: 记入 mismatch，不在 coordinator 内自动 cast
         correct: true
+      - id: b
+        text: 自动调用 half()
       - id: c
-        text: ZeRO-3 与 inference 不兼容
+        text: 直接覆盖 inference
       - id: d
-        text: infer 也用 ZeRO-3
-    explanation: |
-      ZeRO-3 的特点：每 rank 只持有 weight 的 1/N，forward 时 all-gather。
-      Inference 通常 replicated（每 rank 一份完整 weight，零通信 overhead）。
-
-      Sync 步骤：
-        1. **Train side gather**：
-           ```
-           for layer in model:
-               weight_full = all_gather(weight_shard)  # ZeRO-3 已经会做
-           ```
-        2. **Cross-cluster broadcast**:
-           - 由 train rank 0 持有完整 weight
-           - 通过 NCCL group 广播到 inference cluster
-        3. **Inference side receive**:
-           - 每 inference rank 收到完整 weight
-           - update local state_dict
-
-      性能：
-        - all-gather 在 train cluster 内：100GB/s NVLink，<1s
-        - broadcast 跨集群：50GB/s IB，~1-3s
-
-      代替方案：**partial sync**
-        - 如果 inference 也用 TP（每卡一份切片），可以 train rank → matching infer rank
-          P2P sync（更省带宽）
-        - 但需要 train shape 与 infer TP shape 兼容
-
-      Capstone Stage C 简化：
-        - policy 用 LoRA + small base；不用 ZeRO-3
-        - sync = 每 train step 后 send LoRA weights (~100MB) 到 vLLM
-        - 简单不容易出错
-
-  - id: q3_dtype_mismatch_bug
-    prompt: |
-      Train 的 weight 是 fp32 (master copy)，inference 用 fp16。直接 sync 会怎样？
+        text: 删除 inference 的旧 tensor
+    explanation: "dtype 策略应在发送方显式决定。同步函数静默转换会掩盖带宽和数值策略。"
+  - id: q3_stats
+    prompt: "`bytes_synced` 应该统计什么？"
     options:
       - id: a
-        text: 完美等价
-      - id: b
-        text: 报 shape/dtype mismatch（本关 patch 抓的）；正确做法是 sync 前先
-              `weight.half()` 显式转换
+        text: 只统计真正同步的 accepted tensors
         correct: true
+      - id: b
+        text: train state 中所有 tensor
       - id: c
-        text: PyTorch 自动转换
+        text: mismatched tensors
       - id: d
-        text: 数值精度损失但能工作
-    explanation: |
-      Mixed precision training 标准：
-        - master weights: fp32（用于 grad accumulation, optimizer state）
-        - autocast 在 forward 时把 weight 转 fp16/bf16 算 matmul
-
-      Inference: 通常 fp16 / bf16 / fp8（节省显存 + 算力）
-
-      Sync 时的 dtype 决策：
-        ```python
-        train_weight = master_weight.detach()  # fp32
-        if infer_dtype == torch.float16:
-            train_weight = train_weight.to(torch.float16)
-        coord.sync(...)  # 现在 dtype 匹配
-        ```
-
-      常见 bug:
-        - 直接传 fp32 master → infer 收到 14GB fp32（实际只能存 fp16）→ shape mismatch / OOM
-        - 自动 cast：PyTorch state_dict load 不会自动 dtype cast
-        - 不显式转 → 本关 test_dtype_mismatch_skipped 抓到
-
-      正确实现（SLiME / OpenRLHF）：
-        - sync 函数显式接 `target_dtype` 参数
-        - 转换发生在发送方（节省带宽 ½）
-        - 接收方校验 dtype 匹配
-
-      面试金句："Master fp32 weight 不能直接 sync 给 fp16 infer——必须显式 cast，
-      同时省带宽。"
-
-  - id: q4_atomic_swap
-    prompt: |
-      Inference 服务正在响应一批请求。weight sync 触发了，但传输需要 1 秒。
-      处理这 1 秒里到达的新请求最合理的做法？
+        text: rollout response 字节数
+    explanation: "`bytes_synced` 是同步传输量证据，不能把跳过的 mismatch 算进去。"
+  - id: q4_slime_path
+    prompt: 真实 SLiME 中 weight sync 的主要链路是什么？
     options:
       - id: a
-        text: 在 sync 期间用旧 weight 服务，sync 完原子切到新 weight
+        text: train loop 触发 actor update_weights，Megatron updater 整理权重，SGLang engine 在线接收
         correct: true
       - id: b
-        text: 拒绝所有新请求 1 秒
+        text: reward parser 直接写 SGLang 权重
       - id: c
-        text: 杀掉旧请求强制用新 weight
+        text: rollout pool 自动改 actor 参数
       - id: d
-        text: 边接收边逐 layer 更新 weight
-    explanation: |
-      Sync 期间的服务策略：
-
-      **Atomic swap with double buffer** (生产标配):
-        - GPU 持两份 weight: weight_old, weight_new
-        - sync 期间数据写入 weight_new，inference 仍用 weight_old
-        - 原子切换：sync 完成后单条指令把 inference pointer 改到 weight_new
-        - 老请求完成后 weight_old 可被复用为下次 sync 目标
-
-      **代价**：
-        - 显存翻倍（14GB → 28GB for 7B）
-        - 但避免请求中断 / 不一致
-
-      **错误模式**：
-        D 选项"边接收边更新"——request 跑到一半看到 layer 1 是新 layer 2 是旧，
-        计算结果完全错；这是实际 deployment 里很难 debug 的 bug
-
-      **简化版**：
-        - 不要双 buffer，sync 期间挂起 inference
-        - 1 秒钟无法服务，但实现简单
-        - 适合低 QPS 服务
-
-      vLLM / SGLang 0.6+ 都支持 in-place weight update + atomic swap。
-
-      面试金句："Hot weight swap = double buffer + atomic pointer flip。
-      省内存的简化版接受短暂 stall。"
-
-  - id: q5_sync_frequency
-    prompt: |
-      RL 训练 1 step 大约 5 秒（含 rollout + train），weight sync 1 秒。
-      最优 sync 频率是？
+        text: 只要写 checkpoint 文件即可
+    explanation: "SLiME 通过 Ray 协调 train actors，再由 updater 把权重交给 rollout engines。"
+  - id: q5_smoke
+    prompt: L36 本地 smoke 能证明什么？
     options:
       - id: a
-        text: 每 step 都 sync（最准确）
-      - id: b
-        text: 永不 sync
-      - id: c
-        text: 每 N step sync 一次，N 视 PPO importance ratio 偏离 + 总训练时间
-              N 太大 ratio 爆炸；N=1 浪费 20% 训练时间
+        text: 配置、toy 数据、validation artifact 和 sync 指标格式闭合
         correct: true
+      - id: b
+        text: H200 上 NCCL 带宽达标
+      - id: c
+        text: SGLang 在线权重已经真实更新
       - id: d
-        text: 看 GPU 温度
-    explanation: |
-      Trade-off：
-        - **每 step sync (N=1)**:
-          - 训练时间：5s + 1s = 6s/step（17% overhead）
-          - 优点：rollout 用最新 policy
-          - 缺点：sync 浪费
-
-        - **每 N step sync**:
-          - 训练时间：5s + 1s/N per step
-          - N=4：5.25s/step（5% overhead）
-          - N=8：5.125s/step（2.5% overhead）
-          - 缺点：rollout 用 N 步前的 policy → off-policy
-
-      PPO 容忍：
-        - importance ratio = π_θ / π_old
-        - π_old 用更老的 policy → ratio 偏离 1 越远，clip 越频繁
-        - 实践：ratio 平均 ∈ [0.95, 1.05] 算正常；> [0.9, 1.1] 训练不稳
-
-      经验值（DeepSeek / SLiME）：
-        - 7B model：N=4-8
-        - 70B model：N=1-2（每 step sync 才稳定）
-        - 数据效率敏感场景：N=1，吞吐降但收敛快
-
-      工程优化：
-        - **Async sync**：在 train step 进行时同时 sync（next batch 用新 weight）
-          → 隐藏 1s 同步开销
-        - **LoRA delta sync**：只传 LoRA 几 MB，几乎零成本，N 可以是 1
-
-      Capstone Stage C：
-        - 用 LoRA → sync 100MB → < 0.1s
-        - N=1 完全可行，rollout 始终最新
-
-      面试金句："Sync 频率是 throughput vs sample efficiency 的旋钮；
-      LoRA + async sync 让二者兼得。"
+        text: PPO 长训已经稳定
+    explanation: "本地 smoke 是证据格式检查，不替代真实 SLiME/NCCL/GPU 训练验证。"

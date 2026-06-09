@@ -1,5 +1,5 @@
 """
-L01 Patch · 显存账本
+L02 Patch · 显存账本
 
 填空规则：
 - 凡是 `# TODO(student): ...` 必须自己写。
@@ -23,7 +23,7 @@ def count_param_bytes(model: nn.Module) -> int:
     fp32: element_size=4，fp16/bf16: 2，int8: 1。
     """
     # TODO(student): 遍历 model.parameters()，把 p.numel() * p.element_size() 全加起来。
-    raise NotImplementedError("L01 Patch: implement count_param_bytes")
+    raise NotImplementedError("L02 Patch: implement count_param_bytes")
 
 
 def count_grad_bytes(model: nn.Module) -> int:
@@ -37,7 +37,7 @@ def count_grad_bytes(model: nn.Module) -> int:
     # TODO(student):
     #   遍历 model.parameters()，对每个 p:
     #     if p.grad is not None: 累加 p.grad.numel() * p.grad.element_size()
-    raise NotImplementedError("L01 Patch: implement count_grad_bytes")
+    raise NotImplementedError("L02 Patch: implement count_grad_bytes")
 
 
 def count_optimizer_state_bytes(optimizer: torch.optim.Optimizer) -> int:
@@ -56,4 +56,4 @@ def count_optimizer_state_bytes(optimizer: torch.optim.Optimizer) -> int:
     # TODO(student):
     #   遍历 optimizer.state.values()（每个 v 是一个 dict）；
     #   再遍历 v.values()，只对 isinstance(x, torch.Tensor) 累加 numel * element_size。
-    raise NotImplementedError("L01 Patch: implement count_optimizer_state_bytes")
+    raise NotImplementedError("L02 Patch: implement count_optimizer_state_bytes")

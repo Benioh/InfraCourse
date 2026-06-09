@@ -1,4 +1,4 @@
-"""L29.5 Patch tests · CPU OK.
+"""L32 Patch tests · CPU OK.
 
 Switch starter / reference via env var:  IMPL=reference make patch-test
 """

@@ -348,6 +348,8 @@ def patch_payload(mission_id: str) -> dict[str, Any]:
         "reference_file": patch.get("reference_file"),
         "status": status,  # null until first run
         "quiz_passed": quiz_passed,  # ★ gate signal for the frontend
+        "lesson": quest.get("lesson"),
+        "lesson_docs": quest.get("lesson_docs", []),
         "source_reading": quest.get("source_reading", []),
         "notebooks": quest.get("notebooks", []),
         "mini_infra_targets": quest.get("mini_infra_targets", []),
@@ -460,24 +462,24 @@ def dashboard_payload() -> dict[str, Any]:
 
 SELF_STUDY_LOOP = [
     {
-        "name": "读 task.md",
-        "duration": "5-10 分钟",
-        "action": "打开 patch/task.md，看清接口契约、不变量和验证条件。",
+        "name": "读本关讲义",
+        "duration": "15-30 分钟",
+        "action": "先像上课一样读懂背景，只在讲义提示时看高亮源码。",
     },
     {
-        "name": "跑 notebook / 读源码",
+        "name": "做小实验 / 对照源码",
         "duration": "20-40 分钟",
-        "action": "对应 notebook 建立预测，打开 source_reading 和 mini_infra_targets 对照真实源码。",
+        "action": "用 notebook 验证讲义里的直觉，再点源码片段跳到完整文件。",
     },
     {
-        "name": "改 starter",
+        "name": "做 Quiz，再写 Lab",
         "duration": "60-180 分钟",
-        "action": "在 patch/starter/ 里把 TODO 填实，不许改其它文件。",
+        "action": "Quiz 只检查讲义关键概念；通过后在 patch/starter/ 里实现讲义的核心小机制。",
     },
     {
-        "name": "跑 patch-test",
+        "name": "跑最后验证命令",
         "duration": "1-3 分钟",
-        "action": "make patch-test M=<lab> —— pytest 全绿说明代码不变量通过。",
+        "action": "make patch-test M=<lab> —— pytest 全绿说明这个小机制实现正确。",
     },
     {
         "name": "AI 框架理解口试",
@@ -515,6 +517,7 @@ STUCK_PLAYBOOK = [
 ]
 
 COMPLETION_CHECKS = [
+    "已经读完本关讲义，并能说出每段源码穿插在实现哪个概念。",
     "patch/starter/<file>.py 的所有 TODO 都填实，无 NotImplementedError。",
     "make patch-test M=<lab> 全绿（pytest 0 failed）。",
     "能讲清楚自己 patch 的核心 abstraction 是什么、哪一步必须通信 / 不能通信。",
@@ -577,6 +580,7 @@ def curriculum_payload() -> dict[str, Any]:
             "patch_description": patch.get("description"),
             "patch_test_count": patch.get("test_count"),
             "source_count": len(source_reading),
+            "lesson_section_count": len((quest.get("lesson") or {}).get("sections", [])),
             "notebook_count": len(notebooks),
             "ticket_count": len(tickets),
             "recommended_command": recommended,
@@ -622,7 +626,7 @@ def curriculum_payload() -> dict[str, Any]:
     )
     return {
         "title": "Infra Quest 自学路线",
-        "principle": "单人自学优先：先读源码，再建预测，只改一个变量，用证据写报告。",
+        "principle": "单人自学优先：先读本关讲义，再看穿插源码，最后用 Quiz 和 Patch 验证是否真的懂。",
         "stats": {
             "total_missions": len(mission_cards),
             "completed_missions": completed_count,
@@ -795,6 +799,14 @@ SOURCE_FILENAME_LANG: dict[str, str] = {
     "dockerfile": "dockerfile",
 }
 
+SOURCE_ASSET_MEDIA_TYPES: dict[str, str] = {
+    ".gif": "image/gif",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
 
 def _is_within_root(candidate: Path, root: Path) -> bool:
     try:
@@ -891,6 +903,18 @@ def source_payload(rel_path: str) -> dict[str, Any]:
         "content": content,
         "truncated": False,
     }
+
+
+def source_asset_path(rel_path: str) -> tuple[Path, str]:
+    path = _safe_source_path(rel_path)
+    if path.is_dir():
+        raise IsADirectoryError(rel_path)
+    media_type = SOURCE_ASSET_MEDIA_TYPES.get(path.suffix.lower())
+    if not media_type:
+        raise PermissionError(
+            f"binary or unsupported asset type: {path.suffix or path.name}"
+        )
+    return path, media_type
 
 
 def source_tree_payload(rel_dir: str) -> dict[str, Any]:

@@ -1,11 +1,11 @@
-"""L03.5 · 把 jsonl 切成 Megatron `.bin/.idx`，并打印真实 pretrain 命令。"""
+"""L08 · 把 jsonl 切成 Megatron `.bin/.idx`，并打印真实 pretrain 命令。"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import random
-import sys
+import os, sys
 from pathlib import Path
 
 import yaml
@@ -31,11 +31,14 @@ MISSION_ID = "l07_dataset_megatron_bin"
 
 
 def _impl():
+    name = os.environ.get("IMPL")
+    if name in {"starter", "reference"}:
+        return __import__(f"{name}.megatron_bin", fromlist=["megatron_bin"]), name
     try:
         from starter import megatron_bin as mod  # type: ignore[import-not-found]
 
         return mod, "starter"
-    except (ImportError, NotImplementedError):
+    except ImportError:
         from reference import megatron_bin as mod  # type: ignore[import-not-found]
 
         return mod, "reference"
@@ -167,7 +170,7 @@ def main() -> None:
 - 若 dtype 报错：换成 int32 或在 tokenize 阶段裁剪 vocab
 
 ## 6. 下一步
-进入 L04 跑 Megatron pretrain；用 `--data-path` 指向上面的 prefix。
+进入 L09 跑 Megatron pretrain；用 `--data-path` 指向上面的 prefix。
 """,
     )
     print(run_dir)

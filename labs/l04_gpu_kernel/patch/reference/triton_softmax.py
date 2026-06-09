@@ -1,4 +1,4 @@
-"""Reference solution for L01.7 Patch · Triton softmax."""
+"""Reference solution for L05 Patch · Triton softmax."""
 
 from __future__ import annotations
 

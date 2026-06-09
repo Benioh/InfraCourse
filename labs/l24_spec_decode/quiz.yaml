@@ -1,224 +1,102 @@
 mission: l24_spec_decode
-title: L08.7 Quiz · Speculative Decoding 加速原理
+title: L25 Quiz · Speculative Decoding Greedy Verify
 pass_threshold: 1.0
 description: |
-  这 5 题打中 spec decode 最容易混的点：为什么省时间、acceptance rate 影响、
-  Medusa / EAGLE 的差别、KV cache 在 rejection 时怎么处理。
+  检查学习者是否理解 greedy verify、bonus token、accepted draft count、acceptance/speedup 和 KV 提交边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L25 在 Serving decode 加速路径中的位置
+    kind: doc
+    path: labs/l24_spec_decode/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 greedy verify 合同到生产排查
+    kind: doc
+    path: labs/l24_spec_decode/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、MiniInfra、vLLM 和 SGLang 主路径阅读
+    kind: doc
+    path: labs/l24_spec_decode/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l24_spec_decode/patch/task.md
-  - title: 跑 notebook n18 · spec decode acceptance
-    kind: notebook
-    path: notebooks/n18_spec_decode_acceptance.ipynb
-  - title: 读 vLLM spec decode 源码
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 MiniInfra draft runner
     kind: source
-    path: github_repo/vllm/
+    path: mini_infra/vllm/spec_decode/draft_runner.py
+    estimate_min: 10
+  - title: 对照 vLLM spec decode metrics
+    kind: source
+    path: github_repo/vllm/vllm/v1/spec_decode/metrics.py
+    estimate_min: 15
 
 questions:
-  - id: q1_speedup_intuition
-    prompt: |
-      Spec decode 为什么能加速 LLM 解码？
+  - id: q1_bonus_token
+    prompt: "`draft_tokens` 长度为 4 且四个 draft 都被 target greedy argmax 接受时，`greedy_verify` 应返回什么？"
     options:
       - id: a
-        text: 因为 draft 模型比 target 快
-      - id: b
-        text: target 模型一次 forward 验证 k 个 draft token，相当于 k 次 decode 时间
-              缩到 1 次 forward + k×draft_cost；当 acceptance rate α 高时，
-              平均每秒生成 token 数提升
+        text: 5 个 token，前 4 个是 draft，第 5 个是 target 在位置 4 的 bonus
         correct: true
+      - id: b
+        text: 4 个 token，只返回 draft 前缀
       - id: c
-        text: 因为 GPU 并行更好
+        text: 0 个 token，因为还要等下一轮 target decode
       - id: d
-        text: 因为减少了 attention 计算
-    explanation: |
-      Spec decode 核心数学：
-
-      No spec：每个 token 需要一次 target forward
-        Time per token = T_target
-
-      Spec：每 round 跑 k 个 draft + 1 个 target
-        Round time = k × T_draft + T_target
-        Tokens per round = 1 + α × k （平均，α = acceptance rate）
-        Time per token = (k × T_draft + T_target) / (1 + α × k)
-
-      实际加速比：
-        speedup = T_target / time_per_token_spec
-                = T_target × (1 + αk) / (k × T_draft + T_target)
-
-      边界条件：
-        - α=0（draft 全错）：no benefit, but extra cost from k draft forwards
-        - α=1（draft 全对）：speedup = (1+k) × T_target / (k×T_draft + T_target)
-          → 上限是 (T_target / T_draft) when k → ∞
-
-      实测数字（Llama-7B target + Llama-7B-distilled-1B draft）：
-        - α ≈ 0.6, k=5
-        - speedup ≈ 1.5-2× wall-clock
-        - 7B-target + 7B-draft：α 高但 draft 不够便宜，反而变慢
-        - 所以 draft 必须**显著快于 target**
-
-      面试金句："Spec decode 是用 draft 的多次便宜推理换 target 的一次贵推理——
-      只在 draft cheap + acceptance high 时赚。"
-
-  - id: q2_acceptance_with_temperature
-    prompt: |
-      Spec decode 的 acceptance rate α 与下列哪个因素**最相关**？
+        text: 只返回 target 在位置 0 的 argmax
+    explanation: "全接受时 target verify forward 已经算出第 k 行 logits，因此可以追加一个 bonus token；accepted draft 数仍然是 k。"
+  - id: q2_mismatch
+    prompt: "`draft=[3,7,11,23]`，`target_argmax=[3,7,99,0,0]` 时返回值应是什么？"
     options:
       - id: a
-        text: target 模型大小
-      - id: b
-        text: draft 模型与 target 模型的"输出分布相似度"——distilled 的 draft α 高，
-              随机的 draft α≈0
+        text: "`accepted_tokens=[3,7,99]`，`num_accepted_drafts=2`"
         correct: true
+      - id: b
+        text: "`accepted_tokens=[3,7,11,23]`，`num_accepted_drafts=4`"
       - id: c
-        text: GPU 内存大小
+        text: "`accepted_tokens=[99]`，`num_accepted_drafts=0`"
       - id: d
-        text: 输入 prompt 长度
-    explanation: |
-      α 的本质是"draft 给的 token 与 target 自己想要的一致的概率"。
-
-      影响因子：
-        1. **训练相关性**：draft 是 target 的 distillation → α=0.5-0.8
-           draft 是从同一数据集预训练 → α=0.4-0.6
-           draft 与 target 完全不相关 → α≈0.1
-        2. **temperature**：temperature 高 → token 随机性高 → α 低
-           greedy (T=0)：α 上限取决于"两模型 argmax 一致率"
-           T=1：α 一般 0.3-0.5（即使是 distilled draft）
-        3. **领域分布**：训练数据相似 vs target 用 → α 高
-           如：code generation 的 draft 在 chat workload 上 α 低
-
-      工程优化：
-        - **EAGLE/Medusa**：把 draft "嵌入" target（共享部分参数），α 提升到 0.6-0.8
-        - **fine-tune draft on target outputs**：进一步提高 α
-        - **dynamic k**：根据 recent acceptance 自动调 k
-
-      面试金句："Spec decode 的 ROI 主要看 α；α 来自 draft 训练得多接近 target，
-      不是来自算法本身的精巧。"
-
-  - id: q3_target_one_forward
-    prompt: |
-      为什么 spec decode 里 target 模型只需要**一次** forward 验证 k 个 draft，
-      而不是 k 次？
+        text: "`accepted_tokens=[3,7]`，`num_accepted_drafts=3`"
+    explanation: "位置 2 是第一处 mismatch，前两个 draft 被接受，位置 2 由 target argmax 99 接管，后面的 draft 不再使用。"
+  - id: q3_count_boundary
+    prompt: "`num_accepted_drafts` 和 `len(accepted_tokens)` 的关系是什么？"
     options:
       - id: a
-        text: 因为 GPU 算得快
-      - id: b
-        text: target 一次 forward 输入 prompt + k draft tokens 时，每一层 attention
-              内部已经算出了所有 k+1 个位置的 logits（causal mask 下每个位置都看完整的过去）
+        text: "`num_accepted_drafts` 不含 bonus，通常等于 `len(accepted_tokens) - 1`"
         correct: true
+      - id: b
+        text: 二者永远相等
       - id: c
-        text: 一次 forward 误差小
+        text: "`num_accepted_drafts` 包含 target bonus，`accepted_tokens` 不包含"
       - id: d
-        text: 因为 batch size 是 k+1
-    explanation: |
-      关键 insight：causal LM 的 forward(seq) 自动产出**每个位置**的下一 token logits。
-
-      Forward 流程（输入 seq 长度 N）：
-        1. embed → (N, hidden)
-        2. layers (with causal mask) → (N, hidden) 每位置看完整过去
-        3. lm_head → (N, vocab)
-        4. 输出 logits[i] 是预测"位置 i+1 应该是什么"
-
-      所以 target_logits[i] = "target 看到 prompt + draft[0:i] 后，对 token i 的预测"。
-      这正是 spec decode 想要的——一次 forward 就够。
-
-      KV cache 行为：
-        - Forward 时 K, V 自动 cache 到每个位置
-        - 接受 draft[0:m]：cache[0..prompt_len + m + 1] 都是有效的（包含 bonus 位置）
-        - 拒绝从位置 m 开始：cache[prompt_len + m..] 失效，下一轮要 reset
-        - 实际实现里 KV 是连续 buffer，回退是改 length 指针
-
-      vLLM / SGLang 的 spec decode 模块就是基于这个原理。Tree spec decode (Medusa)
-      把 k 个 draft 扩展到 tree of drafts，target 一次 forward 验证整棵树。
-
-      面试金句："Spec decode 不需要 target 多次 forward——causal LM 的 forward 天然
-      给出每个位置的 next-token logits，一次跑完。"
-
-  - id: q4_kv_cache_invalidation
-    prompt: |
-      Draft 在位置 i 被拒绝（accept m 个，reject 第 m+1 个）。target 模型的 KV cache 怎么处理？
+        text: 二者都只用于日志，不影响 KV"
+    explanation: "返回列表包含一个 target bonus；accepted draft count 只统计被 target 接受的 draft token。"
+  - id: q4_speedup
+    prompt: "判断 spec decode 是否值得打开时，哪些字段必须一起看？"
     options:
       - id: a
-        text: 全部丢弃，下一轮重新 prefill
-      - id: b
-        text: 保留 prompt + 接受的 m 个 + bonus token 共 prompt_len + m + 1 个位置的 KV；
-              拒绝 token 之后的 KV 丢弃（实际是 length 指针回退）
+        text: acceptance rate、draft latency、K、ITL p50/p99、draft memory、baseline 和质量指标
         correct: true
+      - id: b
+        text: 只看 acceptance rate
       - id: c
-        text: 只保留 prompt 的 KV
+        text: 只看 draft 模型参数量
       - id: d
-        text: 不需要管 KV cache
-    explanation: |
-      Spec decode 的 KV 管理：
-
-      接受 m 个 draft + 1 个 bonus 之后，target 看过的有效 sequence 是：
-        [prompt..., draft[0..m-1], bonus_token]
-      长度 = prompt_len + m + 1
-
-      KV cache 状态：
-        - target forward 算了 prompt_len + k 个位置的 KV
-        - 但只有前 prompt_len + m + 1 个位置在"被接受的 sequence"里
-        - 第 prompt_len + m + 1 之后的 KV（draft 被拒绝部分）废弃
-
-      工程实现：
-        - vLLM：PagedAttention 的 page table 里 sequence length 直接改成 prompt_len + m + 1
-        - 物理 page 自动复用（因为 sequence shorter）
-        - 下一轮 spec decode 接着 append 新 draft，KV 计算从 prompt_len + m + 1 开始
-
-      Draft 模型的 KV 同样回退：
-        - draft 之前算到了 prompt_len + k 位置
-        - 现在 sequence length = prompt_len + m + 1，draft KV 也截断
-
-      性能 tip：rejection 越多，KV 浪费越多。这就是为什么 Medusa 的"tree"方式更优——
-      多个 candidate sequence 共享前缀 KV，只有最长接受的那条 path 保留。
-
-      面试金句："Spec decode 的 KV cache 是'按需截断'——拒绝的部分等于做了无用功，
-      但只浪费 GPU 时间，不浪费显存（PagedAttention 自动回收）。"
-
-  - id: q5_medusa_eagle_advantage
-    prompt: |
-      Medusa / EAGLE 比 vanilla spec decode 强在哪？
+        text: 只看是否生成了 metrics 文件
+    explanation: "高 acceptance 也可能被 draft 成本、显存或长尾延迟抵消；速度结论要有 baseline、硬件、workload 和质量边界。"
+  - id: q5_kv_boundary
+    prompt: "SGLang 中 `accept_lens` 包含 bonus token 时，accepted draft 数应该如何计算？"
     options:
       - id: a
-        text: 不需要 draft 模型
-      - id: b
-        text: 在 target 模型基础上加几个轻量"head"或"adapter"代替 draft 模型，
-              天然利用 target 自己的 hidden state；α 高 + draft cost 接近 0
+        text: "每个请求用 `accept_lens[i] - 1`，因为 bonus 不属于 draft acceptance"
         correct: true
+      - id: b
+        text: 直接等于 `accept_lens[i]`
       - id: c
-        text: 用 GPU 加速
+        text: 永远等于 K
       - id: d
-        text: 减少了 KV cache
-    explanation: |
-      **Vanilla spec decode** (Leviathan 2023)：
-        - 用一个独立的 small draft model（如 Llama-1B distilled from 7B）
-        - draft cost ≈ 1/k of target cost
-        - α ≈ 0.5-0.6
-        - speedup ≈ 1.5-2×
-
-      **Medusa** (Cai 2024)：
-        - 在 target 最后一层加 N 个 "Medusa heads"，每个 head 直接预测 t+1, t+2, t+3...
-        - draft cost ≈ heads cost ≈ 5% target cost
-        - 不需要独立 draft model，部署简单
-        - α ≈ 0.6-0.7
-        - speedup ≈ 2-2.5×
-
-      **EAGLE** (Li 2024)：
-        - 训练一个 small "auto-regressive head"，用 target 的 hidden state 作为输入
-        - 比 Medusa 的并行 head 更准确（因为是自回归 chain）
-        - α ≈ 0.7-0.85
-        - speedup ≈ 2.5-3.5×
-
-      共同关键：
-        - 利用 target 自己的 representation（不重新算）
-        - draft "成本"接近 0
-        - 配合 tree spec decode，每次验证多条 draft path
-
-      实际部署：
-        - vLLM 0.6+ 支持 EAGLE-2
-        - SGLang 支持 Medusa
-        - 适合 high-throughput 生产服务
-
-      面试金句："Vanilla spec decode 浪费两次 forward 的 KV computation；
-      Medusa / EAGLE 让 draft 共享 target 的 hidden state——是工程优化的下一代。"
+        text: 只看 prompt length"
+    explanation: "bonus 会推进输出和 KV committed length，但 accepted draft tokens 的计数要排除 bonus。"

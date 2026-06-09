@@ -1,5 +1,5 @@
 """
-L12 Capstone Patch · MM-Tiny-Omni Components
+L41 Capstone Patch · MM-Tiny-Omni Components
 
 填空规则：
 - TODO(student) 必须自己写
@@ -38,7 +38,7 @@ class MultimodalProjector(nn.Module):
         #   self.audio_proj = nn.Linear(whisper_dim, llm_dim)
         #   self.image_pos_emb = nn.Parameter(torch.zeros(num_image_tokens, llm_dim))
         #   nn.init.normal_(self.image_pos_emb, std=0.02)
-        raise NotImplementedError("L12: implement __init__")
+        raise NotImplementedError("L41: implement __init__")
 
     def forward(
         self,
@@ -58,7 +58,7 @@ class MultimodalProjector(nn.Module):
         #   if audio_features is not None:
         #       out["audio_emb"] = self.audio_proj(audio_features)
         #   return out
-        raise NotImplementedError("L12: implement forward")
+        raise NotImplementedError("L41: implement forward")
 
 
 def wer_score(hypothesis: str, reference: str) -> float:
@@ -80,7 +80,7 @@ def wer_score(hypothesis: str, reference: str) -> float:
     #     dp[i][j] = dp[i-1][j-1] if hyp[i-1] == ref[j-1] else 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
     #   distance = dp[len(hyp)][len(ref)]
     #   return distance / max(1, len(ref))
-    raise NotImplementedError("L12: implement wer_score")
+    raise NotImplementedError("L41: implement wer_score")
 
 
 def clip_score(image_embed: torch.Tensor, text_embed: torch.Tensor) -> float:
@@ -92,4 +92,4 @@ def clip_score(image_embed: torch.Tensor, text_embed: torch.Tensor) -> float:
     #   norm_a = image_embed / (image_embed.norm() + 1e-9)
     #   norm_b = text_embed / (text_embed.norm() + 1e-9)
     #   return (norm_a * norm_b).sum().item()
-    raise NotImplementedError("L12: implement clip_score")
+    raise NotImplementedError("L41: implement clip_score")

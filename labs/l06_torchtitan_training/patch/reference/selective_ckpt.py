@@ -1,4 +1,4 @@
-"""Reference solution for L03 Patch · Selective Activation Checkpoint."""
+"""Reference solution for L07 Patch · Selective Activation Checkpoint."""
 
 from __future__ import annotations
 

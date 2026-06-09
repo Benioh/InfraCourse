@@ -1,4 +1,4 @@
-# L01.7 Patch · Triton 行 Softmax
+# L05 Patch · Triton 行 Softmax
 
 ## 你要交付什么
 
@@ -55,5 +55,5 @@ make patch-test M=l04_gpu_kernel
 ## 写完之后你能做什么
 
 - 解释 FlashAttention 的 online softmax 数学（你刚写过简化版）。
-- 在 L08.7 spec decode、L05.5 MoE router 用同样 pattern 写小 kernel。
+- 在后续 speculative decoding 和 MoE router 课程里用同样 pattern 写小 kernel。
 - 看懂 SGLang / Megatron 的自定义 Triton 内核（attention、layernorm、rmsnorm）。

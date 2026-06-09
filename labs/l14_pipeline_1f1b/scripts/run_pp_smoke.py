@@ -1,8 +1,9 @@
-"""L05.7 · 在 mock 时间模型上演练 1F1B schedule，量化 bubble ratio。"""
+"""L15 · 在 mock 时间模型上演练 1F1B schedule，量化 bubble ratio。"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -29,10 +30,14 @@ MISSION_ID = "l14_pipeline_1f1b"
 
 
 def _impl():
+    selected = os.environ.get("IMPL") or "starter"
     try:
-        from starter import pp_schedule as mod  # type: ignore[import-not-found]
+        if selected == "reference":
+            from reference import pp_schedule as mod  # type: ignore[import-not-found]
+        else:
+            from starter import pp_schedule as mod  # type: ignore[import-not-found]
 
-        return mod, "starter"
+        return mod, selected
     except (ImportError, NotImplementedError):
         from reference import pp_schedule as mod  # type: ignore[import-not-found]
 
@@ -123,7 +128,7 @@ def main() -> None:
         f"""# Mission Report：{MISSION_ID}
 
 ## 1. 目标
-生成 D={D}, N={N} 的 1F1B schedule，并测算 bubble ratio。
+    生成 D={D}, N={N} 的 1F1B schedule，并测算 bubble ratio。
 
 ## 2. 结果
 - bubble count: {bubble}（理论 2(D-1)={2 * (D - 1)}）
@@ -133,7 +138,7 @@ def main() -> None:
 
 ## 3. 下一步
 - 在 Megatron 上对照 `--pipeline-model-parallel-size {D}`
-- N 越大 bubble_ratio 越小，但 microbatch 太大会损害 BS 收敛
+    - N 增大通常会降低 bubble_ratio，但要同时检查 microbatch size 和收敛行为
 """,
     )
     print(run_dir)

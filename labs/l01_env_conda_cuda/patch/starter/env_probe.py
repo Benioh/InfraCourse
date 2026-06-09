@@ -1,4 +1,4 @@
-"""L00 patch starter — Environment Probe.
+"""L01 patch starter — Environment Probe.
 
 Implement three functions so a downstream lab can ask "is this machine ready"
 and get a JSON answer instead of a guess.

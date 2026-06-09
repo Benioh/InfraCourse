@@ -1,8 +1,9 @@
-"""L05.8 · Run save/load/mismatch drill against the student's checkpoint patch."""
+"""L16 · Run save/load/mismatch drill against the student's checkpoint patch."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -30,10 +31,14 @@ MISSION_ID = "l15_megatron_parallel_checkpoint"
 
 
 def _impl():
+    selected = os.environ.get("IMPL") or "starter"
     try:
-        from starter import checkpointing  # type: ignore[import-not-found]
+        if selected == "reference":
+            from reference import checkpointing  # type: ignore[import-not-found]
+        else:
+            from starter import checkpointing  # type: ignore[import-not-found]
 
-        return checkpointing, "starter"
+        return checkpointing, selected
     except (ImportError, NotImplementedError):
         from reference import checkpointing  # type: ignore[import-not-found]
 

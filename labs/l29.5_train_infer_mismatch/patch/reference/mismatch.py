@@ -1,4 +1,4 @@
-"""Reference solution for L29.5 Patch · Train-Infer Mismatch."""
+"""Reference solution for L32 Patch · Train-Infer Mismatch."""
 
 from __future__ import annotations
 

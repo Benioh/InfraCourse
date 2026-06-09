@@ -1,0 +1,412 @@
+id: l07_dataset_megatron_bin
+title: L08 · Megatron `.bin/.idx` 数据预处理
+level: L08
+act: 第 2 章：训练系统、并行与数据
+role: Megatron 数据管线学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+frameworks:
+  - Megatron-LM
+  - MiniInfra
+  - NumPy
+
+patch:
+  description: |
+    实现 JSONL -> token ids -> `.bin/.idx` 的最小 IndexedDataset 合同，
+    并用 mmap reader 验证样本可以按 offset/length 随机读回。
+  task_md: labs/l07_dataset_megatron_bin/patch/task.md
+  starter_file: labs/l07_dataset_megatron_bin/patch/starter/megatron_bin.py
+  reference_file: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+  test_command: make patch-test M=l07_dataset_megatron_bin
+  status_file: labs/l07_dataset_megatron_bin/patch/.last_run.json
+  test_count: 6
+  test_kind: 数据格式与 roundtrip 验证
+
+lesson:
+  opening: |
+    L08 讲 Megatron 预训练的数据入口。训练 loop 不应在每个 step 里解析 JSONL 和实时 tokenizer；更稳的做法是离线把文本变成 token id，并写成可 mmap 随机访问的 IndexedDataset。
+
+    本关 patch 实现一个教学版 `.bin/.idx`：`.bin` 保存连续 token id，`.idx` 保存 dtype、样本数、token 总量、offsets 和 lengths。完成后，`IndexedDataset[i]` 应能按样本下标读回原 token 序列。
+  sections:
+    - title: 数据入口问题
+      plain_explanation: |
+        原始 JSONL 适合存储和清洗，不适合训练热路径。预训练需要稳定的 token id 序列、可复查的数据 artifact、可随机访问的样本边界，以及多 worker 低开销共享数据文件。
+
+        IndexedDataset 把 tokenizer 成本前移到 preprocess 阶段。训练时只需要根据 prefix 找到 `.bin/.idx`，再按索引读取 token。
+      mental_model: |
+        preprocess 是把文本仓库整理成训练时可直接取货的货架。
+      why_it_matters: |
+        数据格式错误会变成 loss 异常、tokens/s 异常、resume 样本错位或 Megatron 启动失败。先把数据 artifact 讲清，后续训练排查才有入口。
+      common_confusions:
+        - 把 `.bin` 当成原始文本文件。
+        - 在训练 step 中实时 tokenize，忽略 CPU 和复现成本。
+        - 只检查文件存在，不验证 sample roundtrip。
+      checkpoint_questions:
+        - 原始 JSONL 为什么不适合直接作为训练热路径？
+        - IndexedDataset 需要保存哪两类信息？
+        - data-path 为什么应指向 prefix？
+
+    - title: bin/idx 文件合同
+      plain_explanation: |
+        `.bin` 保存所有 token id 的连续二进制拼接；`.idx` 保存如何切回每条样本。本关 idx header 包含 magic、version、dtype code、样本数、token 总数、offsets 和 lengths。
+
+        offsets 是字节偏移，lengths 是 token 个数。读取样本时，要用 `offset // dtype_bytes` 转成 token 下标，再切出 length 个 token。
+      mental_model: |
+        `.bin` 是长卷轴，`.idx` 是目录。目录告诉你第 i 段从哪里开始、读多长。
+      why_it_matters: |
+        offset 单位和 length 单位一旦混淆，读回 token 会错位，训练可能不报格式错但学到错误序列。
+      source_refs:
+        - title: Starter write contract
+          repo_path: labs/l07_dataset_megatron_bin/patch/starter/megatron_bin.py
+          lines: [17, 23]
+          note: |
+            L17-L23: 写入函数接收 JSONL、tokenizer、输出 prefix 和 dtype。
+        - title: Starter write TODO
+          repo_path: labs/l07_dataset_megatron_bin/patch/starter/megatron_bin.py
+          lines: [24, 31]
+          note: |
+            L24-L31: TODO 顺序覆盖 dtype 校验、bin 写入、offset/length 记录、idx 写入和 summary。
+        - title: Reference idx write
+          repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+          lines: [63, 72]
+          note: |
+            L63-L72: reference 写 magic、version、dtype code、样本数、token 总数、offsets 和 lengths。
+      common_confusions:
+        - offsets 写 token 下标，读取时又除以 dtype bytes。
+        - lengths 写字节数，导致读取长度放大。
+        - 只看 `.bin` 文件大小，不检查 `.idx` header。
+      checkpoint_questions:
+        - 本关 idx header 有哪些字段？
+        - offsets 和 lengths 的单位分别是什么？
+        - bin 字节数应怎样手算？
+
+    - title: 写入路径和 dtype 边界
+      plain_explanation: |
+        写入函数先校验 dtype，再逐行读取 JSONL。空行、缺失 `text`、空文本和空 token 序列都跳过。有效文本经 tokenizer 变成 token ids 后，要检查 token id 是否非负、是否超过 dtype 上限。
+
+        dtype 同时影响文件大小和可表示 token id 范围。`uint16` 文件小，但 70000 这类 token id 必须报错；`int32` 是本关默认选择。
+      mental_model: |
+        dtype 是装 token id 的箱子大小。箱子太小会溢出，箱子太大会增加文件体积。
+      why_it_matters: |
+        tokenizer、vocab 和 special token 一变，dtype 边界就可能变化。silent wrap 会让训练读取到错误 token。
+      source_refs:
+        - title: Reference setup
+          repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+          lines: [27, 35]
+          note: |
+            L27-L35: reference 校验 dtype，准备输出路径、dtype bytes、NumPy dtype 和 token 上限。
+        - title: Reference skip rules
+          repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+          lines: [37, 48]
+          note: |
+            L37-L48: JSONL 空行、缺失 text 和空 text 都不会写入样本。
+        - title: Reference token write
+          repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+          lines: [49, 61]
+          note: |
+            L49-L61: tokenizer 输出经过空序列过滤和 range check 后写入 bin，并更新 cursor。
+        - title: Overflow test
+          repo_path: labs/l07_dataset_megatron_bin/patch/tests/test_patch.py
+          lines: [93, 100]
+          note: |
+            L93-L100: `uint16` 下 token id 70000 必须触发 ValueError。
+      common_confusions:
+        - tokenizer 返回空 list 时仍写一条长度为 0 的样本。
+        - uint16 越界时让 NumPy 自动截断。
+        - 只记录样本数，不记录 token 总数。
+      checkpoint_questions:
+        - 哪些输入行会被跳过？
+        - dtype 上限在哪里检查？
+        - 为什么 `int32` 是更稳的默认选择？
+
+    - title: mmap reader 和 roundtrip
+      plain_explanation: |
+        Reader 构造函数读取 idx，恢复 dtype、样本数、token 总数、offsets 和 lengths，然后用 `np.memmap` 打开 `.bin`。`__getitem__` 根据 offset 和 length 只切出目标样本。
+
+        Roundtrip 是本关最直接的正确性证据：写入前 tokenizer 得到什么，`IndexedDataset[i]` 就应该读回什么。
+      mental_model: |
+        mmap reader 像按目录翻书页，不需要把整本书复印到内存。
+      why_it_matters: |
+        真实 DataLoader 会多 worker 读取数据。每次 `__getitem__` 全量加载 `.bin` 会让内存和 I/O 都失控。
+      source_refs:
+        - title: Reader header
+          repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+          lines: [83, 95]
+          note: |
+            L83-L95: reader 读取 idx header，并校验 magic 和 version。
+        - title: Reader arrays and mmap
+          repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+          lines: [96, 105]
+          note: |
+            L96-L105: reader 恢复 dtype、offsets、lengths，并用 `np.memmap` 打开 bin。
+        - title: Reader getitem
+          repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+          lines: [118, 123]
+          note: |
+            L118-L123: `__getitem__` 做边界检查，并用 offset 和 length 切出 token ids。
+        - title: Roundtrip test
+          repo_path: labs/l07_dataset_megatron_bin/patch/tests/test_patch.py
+          lines: [57, 66]
+          note: |
+            L57-L66: 测试写入样本后逐条读回，并和 tokenizer 输出比较。
+      common_confusions:
+        - 在 reader 中重新 tokenize 原文。
+        - 读取时把 byte offset 直接当 token 下标。
+        - 忽略 idx header 校验，导致错文件也被读。
+      checkpoint_questions:
+        - Reader 初始化要恢复哪些状态？
+        - getitem 的 start 下标怎样计算？
+        - roundtrip 能证明什么？
+
+    - title: 真实 Megatron 主路径
+      plain_explanation: |
+        真实 Megatron 的 `preprocess_data.py` 用 worker pool 调 tokenizer，把每个 json key 的 token ids 写进 `IndexedDatasetBuilder`。builder 写 `.bin`，并在 finalize 时写 `.idx`。
+
+        真实 idx 比本关多：sequence lengths、sequence pointers、document indices 和可选 sequence modes。它们服务于文档边界、sequence 采样和多模态扩展。
+      mental_model: |
+        本关 patch 是 IndexedDataset 的小剖面；真实 Megatron 把同一合同扩展到多 worker、多 key 和文档级采样。
+      why_it_matters: |
+        进入 L09 后，`--data-path` 指向的就是 preprocess 产物。读懂这里，才能解释训练数据、采样和 resume 的边界。
+      source_refs:
+        - title: Megatron encoder
+          repo_path: github_repo/Megatron-LM/tools/preprocess_data.py
+          lines: [86, 98]
+          note: |
+            L86-L98: `Encoder.encode` 从 JSON key 读取文本，并准备要送入 tokenizer 的句子列表。
+        - title: Megatron builders
+          repo_path: github_repo/Megatron-LM/tools/preprocess_data.py
+          lines: [166, 178]
+          note: |
+            L166-L178: 每个 json key 创建对应的 bin/idx 路径和 `IndexedDatasetBuilder`。
+        - title: Megatron add docs
+          repo_path: github_repo/Megatron-LM/tools/preprocess_data.py
+          lines: [184, 194]
+          note: |
+            L184-L194: encoded docs 被写入 builder，结束时 finalize idx。
+        - title: Megatron index writer
+          repo_path: github_repo/Megatron-LM/megatron/core/datasets/indexed_dataset.py
+          lines: [195, 207]
+          note: |
+            L195-L207: 真实 writer 写 document count、sequence lengths、sequence pointers 和 document indices。
+        - title: Megatron builder
+          repo_path: github_repo/Megatron-LM/megatron/core/datasets/indexed_dataset.py
+          lines: [992, 995]
+          note: |
+            L992-L995: `add_document` 写 document tokens，并扩展 sequence lengths 和 document boundary。
+      common_confusions:
+        - 把本关简化 idx 当成真实 Megatron 全字段。
+        - 忽略 document index 对采样和 resume 的影响。
+        - 认为 preprocess 和 train loop 可以用不同 tokenizer 配置。
+      checkpoint_questions:
+        - Megatron tokenizer worker 和 builder 的交界在哪里？
+        - 真实 idx 比本关多哪些字段？
+        - 后续训练为什么要保存 preprocess 配置？
+
+mini_infra_targets:
+  - mini_infra/data/indexed_dataset.py
+notebooks: []
+prereq: l06_torchtitan_training
+next_lab: l08_megatron_text_pretrain
+gpu_modes:
+  local: CPU OK
+  cluster: 真实数据集预处理可在 CPU 节点或登录节点验证 artifact
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l07_dataset_megatron_bin/system_map.md
+    description: L08 在训练数据和 Megatron 预训练路线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l07_dataset_megatron_bin/lecture.md
+    description: 从 JSONL、tokenizer、`.bin/.idx`、mmap 讲到真实 Megatron preprocess 和排查边界。
+  - title: 源码带读讲义
+    path: labs/l07_dataset_megatron_bin/source_walkthrough.md
+    description: 按 patch、drill、MiniInfra 和 Megatron 源码组织的阅读路线。
+
+source_reading:
+  - title: Patch starter
+    repo_path: labs/l07_dataset_megatron_bin/patch/starter/megatron_bin.py
+    focus: 学生需要补齐的写入和读取接口。
+    highlights:
+      - title: write API
+        lines: [17, 23]
+        note: |
+          L17-L23: 写入函数接收 JSONL、tokenizer、output prefix 和 dtype。
+      - title: write TODO
+        lines: [24, 31]
+        note: |
+          L24-L31: TODO 列出 dtype 校验、token 写入、offset/length 记录、idx 写入和 summary。
+      - title: reader init TODO
+        lines: [35, 43]
+        note: |
+          L35-L43: reader 初始化需要读 idx 元数据，并 mmap bin。
+      - title: reader getitem TODO
+        lines: [45, 52]
+        note: |
+          L45-L52: `__getitem__` 要用 offset 和 dtype bytes 定位目标样本。
+
+  - title: Patch reference
+    repo_path: labs/l07_dataset_megatron_bin/patch/reference/megatron_bin.py
+    focus: 简化 IndexedDataset 的完整状态推进。
+    highlights:
+      - title: dtype and paths
+        lines: [27, 35]
+        note: |
+          L27-L35: reference 校验 dtype，准备输出路径、dtype bytes、NumPy dtype 和 token 上限。
+      - title: json skip rules
+        lines: [37, 48]
+        note: |
+          L37-L48: JSONL 空行、缺失 text 和空 text 都被跳过。
+      - title: token write
+        lines: [49, 61]
+        note: |
+          L49-L61: tokens 经过空序列过滤和 range check 后写入 bin，并更新 offsets/lengths。
+      - title: idx write
+        lines: [63, 72]
+        note: |
+          L63-L72: idx 写入 header、样本数、token 总数、offsets 和 lengths。
+      - title: reader mmap
+        lines: [96, 105]
+        note: |
+          L96-L105: reader 恢复 offsets/lengths，并用 `np.memmap` 打开 bin。
+      - title: getitem
+        lines: [118, 123]
+        note: |
+          L118-L123: `__getitem__` 按 offset 和 length 切出目标 token ids。
+
+  - title: Patch tests
+    repo_path: labs/l07_dataset_megatron_bin/patch/tests/test_patch.py
+    focus: 文件格式、roundtrip、skip 和 dtype 越界。
+    highlights:
+      - title: output pair
+        lines: [32, 40]
+        note: |
+          L32-L40: 测试 `.bin/.idx` 文件存在，并检查 summary 样本数和 dtype。
+      - title: idx header
+        lines: [43, 54]
+        note: |
+          L43-L54: 测试直接读取 idx header，校验 magic、version 和 dtype code。
+      - title: roundtrip
+        lines: [57, 66]
+        note: |
+          L57-L66: 测试 `IndexedDataset[i]` 与 tokenizer 输出完全一致。
+      - title: total tokens
+        lines: [69, 77]
+        note: |
+          L69-L77: `.bin` 文件大小必须等于 token 总数乘 int32 字节数。
+      - title: skip empty
+        lines: [80, 90]
+        note: |
+          L80-L90: 空 text、缺失 text 和空行都不计入样本数。
+      - title: uint16 overflow
+        lines: [93, 100]
+        note: |
+          L93-L100: `uint16` 下 token id 70000 必须抛 ValueError。
+
+  - title: Drill preprocess script
+    repo_path: labs/l07_dataset_megatron_bin/scripts/run_preprocess.py
+    focus: demo 输入、artifact、sample dump 和 Megatron 命令模板。
+    highlights:
+      - title: implementation fallback
+        lines: [33, 44]
+        note: |
+          L33-L44: drill 支持通过 IMPL 选择实现；未指定时优先尝试 starter，再回退 reference import。
+      - title: demo jsonl
+        lines: [56, 60]
+        note: |
+          L56-L60: demo 创建输入目录，并逐行写入带 `text` 字段的 JSONL。
+      - title: tokenizer
+        lines: [63, 72]
+        note: |
+          L63-L72: 默认 tokenizer 是 char_mod_30k，也可配置 HuggingFace tokenizer。
+      - title: run setup
+        lines: [81, 89]
+        note: |
+          L81-L89: 脚本读取配置、创建 run 目录，并写 resolved config。
+      - title: preprocess call
+        lines: [103, 110]
+        note: |
+          L103-L110: 调用 `text_to_megatron_bin`，把 JSONL 写成 prefix 对应的 bin/idx。
+      - title: sample dump
+        lines: [112, 118]
+        note: |
+          L112-L118: 用 `IndexedDataset` 抽样读回样本，并保存 token 头部。
+      - title: metrics
+        lines: [135, 143]
+        note: |
+          L135-L143: preprocess summary、accepted 状态和时间戳写入 metrics.jsonl。
+
+  - title: MiniInfra indexed dataset
+    repo_path: mini_infra/data/indexed_dataset.py
+    focus: 更小的 bin/idx 分工示例。
+    highlights:
+      - title: build indexed dataset
+        lines: [13, 25]
+        note: |
+          L13-L25: MiniInfra 把文本 bytes 写入 bin，并把 offset/length 写成 JSON idx。
+      - title: cli entry
+        lines: [34, 40]
+        note: |
+          L34-L40: CLI 接收 input 和 output-prefix，调用 builder 并打印 summary。
+
+  - title: Megatron preprocess_data
+    repo_path: github_repo/Megatron-LM/tools/preprocess_data.py
+    focus: 真实 tokenizer worker 和 builder 写入路径。
+    highlights:
+      - title: encoder tokenizer
+        lines: [47, 59]
+        note: |
+          L47-L59: `Encoder.initializer` 在 worker 中构造 tokenizer，并配置 sentence splitter。
+      - title: encode json
+        lines: [86, 98]
+        note: |
+          L86-L98: `Encoder.encode` 从 JSON key 取文本，并准备句子列表。
+      - title: worker pool
+        lines: [151, 160]
+        note: |
+          L151-L160: `process_json_file` 打开输入，构造 encoder/tokenizer，并用 multiprocessing pool 并发处理。
+      - title: builder creation
+        lines: [166, 178]
+        note: |
+          L166-L178: 每个 json key 创建 bin/idx 输出路径和 `IndexedDatasetBuilder`。
+      - title: add and finalize
+        lines: [184, 194]
+        note: |
+          L184-L194: encoded docs 写入 builder，处理结束后 finalize idx。
+
+  - title: Megatron indexed_dataset
+    repo_path: github_repo/Megatron-LM/megatron/core/datasets/indexed_dataset.py
+    focus: 真实 idx writer、reader 和 builder。
+    highlights:
+      - title: optimal dtype
+        lines: [107, 119]
+        note: |
+          L107-L119: `DType.optimal_dtype` 根据 cardinality 在 uint16 和 int32 间选择。
+      - title: index writer header
+        lines: [141, 151]
+        note: |
+          L141-L151: `_IndexWriter` 写固定 header、version 和 dtype code。
+      - title: index writer body
+        lines: [195, 207]
+        note: |
+          L195-L207: 真实 idx 写 document count、sequence lengths、sequence pointers 和 document indices。
+      - title: pointer calculation
+        lines: [224, 230]
+        note: |
+          L224-L230: sequence pointer 按 length 和 dtype size 累加，和本关 offset 逻辑同构。
+      - title: index reader header
+        lines: [264, 276]
+        note: |
+          L264-L276: reader 校验 header/version，并恢复 dtype、sequence count 和 document count。
+      - title: builder init
+        lines: [948, 960]
+        note: |
+          L948-L960: builder 打开 bin 文件，保存 dtype 和 multimodal 标志。
+      - title: add document
+        lines: [992, 995]
+        note: |
+          L992-L995: `add_document` 写 document tokens，并扩展 sequence lengths 和 document boundary。
+      - title: finalize
+        lines: [1029, 1037]
+        note: |
+          L1029-L1037: builder 关闭 data file，并通过 `_IndexWriter` 写 idx。

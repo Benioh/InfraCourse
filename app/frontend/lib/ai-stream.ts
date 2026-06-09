@@ -19,6 +19,8 @@ export type AiContext = {
   page_kind?: string;
   /** Notebook path when on a notebook page. */
   notebook_path?: string;
+  /** Ticket identifier when on a ticket page. */
+  ticket_id?: string;
   /** Free-form summary registered by the page itself. */
   page_summary?: string;
   /** Trimmed innerText snapshot of the visible main region. */

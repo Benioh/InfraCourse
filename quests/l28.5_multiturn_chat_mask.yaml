@@ -1,45 +1,340 @@
 id: l28.5_multiturn_chat_mask
-title: Multi-turn Chat Template & Loss Mask
-level: L09.5
-act: 第 4 章：RL 与对齐
-role: Tokenization 学徒
+title: L30 · Multi-turn Chat Template 与 Loss Mask
+level: L30
+act: 第 4 章：SFT、偏好优化与 RL
+role: 多轮数据工程学徒
 priority: 核心
-estimated_minutes: 75
+estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
   - HuggingFace Transformers
-  - verl（对照）
+  - verl 对照
 
 patch:
   description: |
-    实现 verl PR #1668（Yanbin Jiang）的 Fixed Base Conversation 算法：
-    给定多轮 messages，返回 (token_ids, loss_mask, attention_mask)，
-    正确处理默认 system 注入、QwQ 风格 think token drop 等 chat template 条件渲染问题。
+    实现 Fixed Base Conversation + Delta：对每条 message 使用稳定 base 渲染，
+    截取 delta token，并按 role 生成 assistant-only loss mask。
   task_md: labs/l28.5_multiturn_chat_mask/patch/task.md
   starter_file: labs/l28.5_multiturn_chat_mask/patch/starter/multiturn_tokenizer.py
   reference_file: labs/l28.5_multiturn_chat_mask/patch/reference/multiturn_tokenizer.py
-  test_command: make patch-test M=l28.5_multiturn_chat_mask
+  test_command: IMPL=reference make patch-test M=l28.5_multiturn_chat_mask
   status_file: labs/l28.5_multiturn_chat_mask/patch/.last_run.json
   test_count: 8
-  test_kind: 行为契约 + chat template 鲁棒性
+  test_kind: fixed base + role mask + template 条件渲染
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l28.5_multiturn_chat_mask/system_map.md
+    description: L30 在 SFT/RL 数据链路中的位置、Fixed Base 系统图、边界和易混点。
+  - title: 主讲义
+    path: labs/l28.5_multiturn_chat_mask/lecture.md
+    description: 从多轮 mask 问题、朴素方案失败讲到 Fixed Base、role mask 和测试闭环。
+  - title: 源码带读讲义
+    path: labs/l28.5_multiturn_chat_mask/source_walkthrough.md
+    description: 按 starter、reference、mock tokenizer 和 tests 阅读。
 
 source_reading:
-  - title: 从 tokenizer 视角看 Agentic 多轮训练（Yanbin Jiang）
-    repo_path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/verl/multi-turn/fast_tokenization/
-  - title: verl multi-turn schemas 实现
-    repo_path: github_repo/verl/
+  - title: Patch starter
+    repo_path: labs/l28.5_multiturn_chat_mask/patch/starter/multiturn_tokenizer.py
+    focus: 学生要补的 Fixed Base、delta 和 role mask
+    highlights:
+      - title: base conversation
+        lines: [17, 23]
+        note: |
+          L17-L19: 注释说明 base 需要 system 和 user。
+          L20-L23: BASE_CONVERSATION 固定系统占位和用户占位。
+      - title: function contract
+        lines: [26, 35]
+        note: |
+          L26-L29: 函数返回 token_ids、loss_mask 和 attention_mask。
+          L30-L35: docstring 描述 Fixed Base Delta 算法。
+      - title: delta TODO
+        lines: [36, 47]
+        note: |
+          L36-L38: TODO 先渲染 base_str。
+          L42-L47: 每条 msg 渲染 BASE + msg，并截取 delta。
+      - title: mask TODO
+        lines: [49, 57]
+        note: |
+          L49-L53: assistant 保留 delta_ids，其它 role 写 -100。
+          L55-L57: attention 全 1，并返回三个列表。
 
-mini_infra_targets:
-  - mini_infra/data/
+  - title: Patch reference
+    repo_path: labs/l28.5_multiturn_chat_mask/patch/reference/multiturn_tokenizer.py
+    focus: 参考实现中的最小 Fixed Base 流程
+    highlights:
+      - title: base
+        lines: [7, 9]
+        note: |
+          L7-L9: base 固定 system 和 user 两条消息。
+      - title: setup
+        lines: [13, 18]
+        note: |
+          L13-L16: 函数入口定义三个返回列表的类型。
+          L17-L18: 先渲染 base_str。
+      - title: delta
+        lines: [19, 28]
+        note: |
+          L19-L21: 初始化 token_ids 和 loss_mask。
+          L22-L28: 对每条 msg 渲染、截 delta 并 encode。
+      - title: role mask
+        lines: [29, 36]
+        note: |
+          L29-L33: assistant 进入 loss，其它 role 写 -100。
+          L35-L36: attention 全 1 后返回。
 
+  - title: Mock tokenizer
+    repo_path: labs/l28.5_multiturn_chat_mask/patch/_mock_tokenizer.py
+    focus: default system injection 和 QwQ think drop 的 CPU 模拟
+    highlights:
+      - title: controls
+        lines: [18, 27]
+        note: |
+          L18-L23: MockTokenizer 保存 default_system_mode 和 qwq_mode。
+          L25-L27: encode 使用字符级确定性 token id。
+      - title: default system
+        lines: [32, 43]
+        note: |
+          L32-L38: apply_chat_template 复制 messages。
+          L40-L43: 缺 system 时注入 DEFAULT_SYS。
+      - title: think drop branch
+        lines: [44, 52]
+        note: |
+          L44-L49: QwQ mode 只处理 assistant。
+          L50-L52: 判断当前 assistant 后面是否还有 assistant。
+      - title: think drop rewrite
+        lines: [53, 57]
+        note: |
+          L53-L57: 非末尾 assistant 删除 think 内容。
+      - title: render
+        lines: [59, 68]
+        note: |
+          L59-L64: 按 role 拼接模板字符串。
+          L66-L68: tokenize=True 时返回 encode 结果。
+
+  - title: Patch tests
+    repo_path: labs/l28.5_multiturn_chat_mask/patch/tests/test_patch.py
+    focus: 8 个行为边界测试
+    highlights:
+      - title: equal length
+        lines: [32, 37]
+        note: |
+          L32-L35: 基础样本调用 patch。
+          L36-L37: 三个列表等长，attention 全 1。
+      - title: loss domain
+        lines: [40, 45]
+        note: |
+          L40-L43: 取出 ids 和 loss。
+          L44-L45: 每个 loss 值只能是 -100 或同位置 token id。
+      - title: no assistant
+        lines: [48, 53]
+        note: |
+          L48-L52: 构造无 assistant 样本。
+          L53: loss 只能包含 -100。
+      - title: assistant content
+        lines: [56, 66]
+        note: |
+          L56-L64: 构造单个 assistant 答案。
+          L65-L66: decoded loss 必须包含 assistant 内容。
+      - title: multi-turn
+        lines: [69, 80]
+        note: |
+          L69-L78: 构造两轮 assistant 样本。
+          L79-L80: decoded loss 来自非 -100 位置。
+      - title: multi-turn assertions
+        lines: [81, 86]
+        note: |
+          L81-L82: 两个 assistant 都应出现。
+          L83-L86: user 内容不能进入 loss。
+      - title: default system input
+        lines: [88, 99]
+        note: |
+          L88-L92: 测试说明 default system 不能泄漏。
+          L93-L99: user 开头样本用于触发 mock 条件。
+      - title: tool role input
+        lines: [131, 139]
+        note: |
+          L131-L133: tool role 测试使用普通 mock tokenizer。
+          L134-L139: 样本包含 assistant、tool 和 final assistant。
+      - title: tool role assertions
+        lines: [141, 145]
+        note: |
+          L141-L143: tool 结果不能进入 decoded loss。
+          L144-L145: final 和 calling tool 两段 assistant 都应保留。
+
+mini_infra_targets: []
 notebooks:
   - notebooks/n23_chat_template_multiturn.ipynb
-
+tickets:
+  - multiturn_default_system_leak
+  - multiturn_think_dropped
+  - multiturn_tool_loss_leak
+  - multiturn_user_loss_leak
+  - multiturn_delta_empty
 prereq: l28_sft_qwen_alpaca
 next_lab: l29_verl_rl_baseline
-
 gpu_modes:
-  local: CPU OK（用 MockTokenizer 模拟 chat template 行为）
-  cluster: 用真实 Qwen2.5-Instruct / QwQ-32B tokenizer 端到端验证（可选）
+  local: CPU OK
+  cluster: Real tokenizer validation optional
+
+lesson:
+  opening: |
+    L30 把 L29 的 SFT loss mask 扩展到多轮 chat 数据。多轮样本里，assistant 可能出现多次，tool observation 也会穿插在中间。训练目标仍然只有 assistant token，但 chat template 的条件渲染会让 token 边界变得不稳定。
+
+    本讲的核心解法是 Fixed Base Conversation + Delta：先固定一个 system/user base，再把每条真实 message 单独放到这个 base 后面渲染，截取 delta，并按 role 生成 loss mask。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        L29 处理单轮 SFT 的 prompt/assistant labels。L30 继续处理多轮 messages，重点是模板条件渲染和 role mask。它位于 SFT 数据处理和后续 RL rollout 之间，决定训练、rollout、serving 是否使用一致的 chat 格式。
+      mental_model: |
+        单轮 SFT 只需要知道 prompt 和 answer；多轮数据还要知道每条 message 在模板里的稳定 token 边界。
+      why_it_matters: |
+        mask 错位会让模型学习 user 或 tool 内容，也可能漏掉 assistant think 内容。后续 RL 指标会被这个数据错误污染。
+      source_refs:
+        - title: starter contract
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/starter/multiturn_tokenizer.py
+          lines: [26, 35]
+          note: |
+            L26-L29: 函数返回三个列表。
+            L30-L35: docstring 写明 Fixed Base Delta。
+      common_confusions:
+        - 把多轮 mask 当成普通字符串拼接。
+        - 认为 tool 消息也应作为 assistant 目标。
+        - 只验证 token_ids，不检查 decoded loss。
+      checkpoint_questions:
+        - L30 相比 L29 新增了哪类复杂度？
+        - 三个返回列表分别是什么？
+        - 为什么多轮数据会影响后续 RL？
+
+    - title: Fixed Base
+      plain_explanation: |
+        Fixed Base 先渲染固定的 system/user 对话，得到 `base_str`。每条真实 message 都渲染为 `BASE + [msg]`，再截掉 base 前缀。system 用来阻止默认 system 注入，user 用来让模板进入稳定普通对话路径。
+      mental_model: |
+        base 是固定尺子；每条 message 都用同一把尺子量新增字符串。
+      why_it_matters: |
+        没有固定前缀时，模板可能偷偷改前文，delta 边界就会漂移。
+      source_refs:
+        - title: reference base
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/reference/multiturn_tokenizer.py
+          lines: [7, 9]
+          note: |
+            L7-L9: base 固定 system 和 user。
+        - title: reference delta
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/reference/multiturn_tokenizer.py
+          lines: [19, 28]
+          note: |
+            L19-L21: 初始化输出列表。
+            L22-L28: 每条 msg 单独渲染并截 delta。
+      common_confusions:
+        - 使用真实历史 messages 作为 base。
+        - 对 delta encode 时加入 special tokens。
+        - 不检查 full_str 是否有稳定 base 前缀。
+      checkpoint_questions:
+        - BASE 为什么包含 system 和 user？
+        - "`delta_str` 如何得到？"
+        - 每条 msg 为什么要单独渲染？
+
+    - title: Role Mask
+      plain_explanation: |
+        Role mask 规则很简单：assistant delta 进入 loss，其它 role 写 `-100`。tool 和 function 属于环境消息，可以进入上下文，但不能作为模型目标。本关不做 padding，因此 attention mask 全部为 1。
+      mental_model: |
+        role 是学习开关。assistant 打开，system/user/tool 关闭。
+      why_it_matters: |
+        agentic 数据里 tool observation 很多。若 tool 进入 loss，模型会学习环境返回，而不是学习调用工具和组织回答。
+      source_refs:
+        - title: role mask implementation
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/reference/multiturn_tokenizer.py
+          lines: [29, 36]
+          note: |
+            L29-L33: assistant 保留，其它 role 写 -100。
+            L35-L36: attention 全 1 后返回。
+        - title: loss domain test
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/tests/test_patch.py
+          lines: [40, 45]
+          note: |
+            L40-L43: 测试读取 ids 和 loss。
+            L44-L45: 每个 loss 值只能是 -100 或 token id。
+        - title: tool assertions
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/tests/test_patch.py
+          lines: [141, 145]
+          note: |
+            L141-L143: tool 结果必须被 mask。
+            L144-L145: assistant 内容仍要保留。
+      common_confusions:
+        - 把 loss mask 写成 0/1。
+        - tool observation 进入 loss。
+        - 无 padding 场景里提前引入 pad 逻辑。
+      checkpoint_questions:
+        - assistant role 的 loss_mask 写什么？
+        - tool role 的 loss_mask 写什么？
+        - 本关 attention_mask 为什么全 1？
+
+    - title: 条件渲染
+      plain_explanation: |
+        Mock tokenizer 模拟两类真实模板行为。default_system_mode 会在消息缺 system 时注入默认 system；qwq_mode 会从非末尾 assistant 删除 think 内容。Fixed Base 通过固定 system/user 前缀和局部最后一条 assistant，避开这两类条件变化。
+      mental_model: |
+        default system 是模板额外加的前缀，think drop 是模板额外删的内容；Fixed Base 把二者都导向稳定路径。
+      why_it_matters: |
+        条件渲染不会总是报错，它会悄悄改变训练目标。decoded loss 检查能把这种变化暴露出来。
+      source_refs:
+        - title: default system mock
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/_mock_tokenizer.py
+          lines: [32, 43]
+          note: |
+            L32-L38: mock 复制输入 messages。
+            L40-L43: 缺 system 时注入 DEFAULT_SYS。
+        - title: think drop mock
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/_mock_tokenizer.py
+          lines: [44, 52]
+          note: |
+            L44-L49: QwQ mode 只处理 assistant。
+            L50-L52: 判断当前 assistant 后面是否还有 assistant。
+        - title: think drop rewrite
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/_mock_tokenizer.py
+          lines: [53, 57]
+          note: |
+            L53-L57: 非末尾 assistant 删除 think 内容。
+        - title: default system input
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/tests/test_patch.py
+          lines: [88, 99]
+          note: |
+            L88-L92: 测试说明默认 system 不应泄漏。
+            L93-L99: user 开头样本触发 mock 条件。
+      common_confusions:
+        - 手动拼 role 标签替代模型模板。
+        - 忽略 think 内容在训练中的目标属性。
+        - 只测普通模板，不测条件渲染分支。
+      checkpoint_questions:
+        - default_system_mode 会在什么条件下注入系统消息？
+        - QwQ mode 会在什么条件下删除 think？
+        - Fixed Base 为什么能保留当前 assistant 的 think？
+
+    - title: 测试和复盘
+      plain_explanation: |
+        Patch-test 覆盖等长、loss 值域、无 assistant、assistant 内容、多轮对齐、default system、think 和 tool。真实 tokenizer 验证还要记录 tokenizer 名称、版本、chat template、messages 和 decoded loss 片段。
+      mental_model: |
+        每个测试对应一个实现分支；每个真实 tokenizer 验证都要留下可复查样本。
+      why_it_matters: |
+        多轮 mask 错误常在训练后期表现为模型格式漂移。小测试和复盘模板能把问题提前定位。
+      source_refs:
+        - title: equal length test
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/tests/test_patch.py
+          lines: [32, 37]
+          note: |
+            L32-L35: 基础样本跑 patch。
+            L36-L37: 三个列表等长，attention 全 1。
+        - title: multi-turn assertions
+          repo_path: labs/l28.5_multiturn_chat_mask/patch/tests/test_patch.py
+          lines: [81, 86]
+          note: |
+            L81-L82: 两段 assistant 都出现。
+            L83-L86: user 内容不进入 loss。
+      common_confusions:
+        - patch-test 通过后跳过真实 tokenizer 记录。
+        - 只看 token_ids，不看 decoded loss。
+        - 缺少失败样本，导致后续无法复现。
+      checkpoint_questions:
+        - patch-test 覆盖哪几类边界？
+        - 真实 tokenizer 复盘至少记录哪些字段？
+        - decoded loss 片段能帮助判断什么？

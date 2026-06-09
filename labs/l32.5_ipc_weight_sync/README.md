@@ -1,21 +1,30 @@
-# L32.5 · CUDA IPC Weight Sync（真正的机制）
+# L37 · CUDA IPC Weight Sync：handle tuple 与共享 storage
 
-> L32 教的是"weight sync 的语义"——dict 怎么按 shape/dtype 校验后写入。
-> L32.5 教的是"weight sync 的真正机制"——**handle tuple 共享**：序列化的不是数据，是指针；
-> 只要 IPC handle 传到对端，对端就能用同一块 GPU 显存里的 tensor 完成更新。
->
-> 这是 verl `update_weights_from_tensor` 与 slime `_update_converted_params_from_tensor`
-> 的核心实现。CPU 上我们用一个共享 `StoragePool` 模拟，但 API 形状与真实代码一致。
+<!-- LECTURE_FIRST_START -->
 
-## 真实场景
+L37 讲 RL co-locate weight sync 的真实传输对象。L36 已经练过本地 `state_dict` 同步合同；这一讲继续看训练侧怎样把 tensor 变成 CUDA IPC-shaped handle tuple，让 rollout 进程按 TP rank 重建指向同一块 storage 的 tensor。
 
-参考 [RL 系统深思：深入理解权重更新机制](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/sys-design/readme-1.md)。
-verl 的 co-locate 路径下，FSDP TP=4、SGLang TP=2 时，每个 FSDP rank 把本 rank 的分片
-聚合成 `[1024, 1024]` 完整 tensor，序列化得到 **handle tuple**（CUDA IPC handle + 元信息），
-gather 到 TP=0 后跨进程传递给 SGLang Engine。SGLang 每个 TP rank 反序列化重建 tensor，
-**和 FSDP 共享同一块 GPU 显存**，没有数据搬运。
+## 学习路线
 
-## 闭环
+1. 读 [system_map.md](system_map.md)：确认 L37 在 RL 与对齐主线中的位置。
+2. 读 [lecture.md](lecture.md)：从 handle tuple、rank gather、LocalSerializedTensor、flush 时序讲到 SLiME/SGLang 对照。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 patch、SGLang update、SLiME bucket 和 serializer 主路径阅读。
+4. 可选跑 notebook：[n22_weight_sync_handle_tuple.ipynb](../../notebooks/n22_weight_sync_handle_tuple.ipynb)。
+5. 做 quiz：确认 handle 不含 tensor data、rank 0 gather、共享 storage、bucket 和 smoke 边界。
+6. 做 patch：实现 CPU 版 IPC-shaped weight sync 并通过 7 个测试。
+7. 填写 [outputs/rl_rollout_template.md](outputs/rl_rollout_template.md)，记录 handle/data 比例、rank gather 和 flush 时序。
+
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 所属主线 | RLHF and rollout systems |
+| 核心风险 | co-locate 同步退化成数据复制、rank gather 错位、LocalSerializedTensor 按错 rank、旧 KV cache 与新权重混用 |
+| 关键机制 | CUDA IPC handle tuple、shared storage、ForkingPickler、LocalSerializedTensor、FlattenedTensorBucket、flush_cache |
+| 源码落点 | patch controller、SGLang `ModelRunner.update_weights_from_tensor`、SLiME tensor updater、SGLang serializer |
+| lab 检验 | handle 大小、data_ptr、rank gather、LST get、state 替换和最后 flush |
+
+## Patch 闭环
 
 ```bash
 cat labs/l32.5_ipc_weight_sync/patch/task.md
@@ -23,35 +32,24 @@ $EDITOR labs/l32.5_ipc_weight_sync/patch/starter/ipc_weight_sync.py
 make patch-test M=l32.5_ipc_weight_sync
 ```
 
-## 测试覆盖
+参考实现验收：
 
-| 测试 | 验证 |
+```bash
+IMPL=reference make patch-test M=l32.5_ipc_weight_sync
+```
+
+本讲目录没有 dedicated smoke target。CPU 侧验证以 patch-test 为准；真实 CUDA IPC 需要同机 GPU、multiprocessing spawn、SGLang endpoint 和生命周期日志。
+
+## 课后产物
+
+| 产物 | 用途 |
 |---|---|
-| `test_serialize_returns_handle_not_data` | 序列化 bytes < tensor data 字节数（不能藏数据） |
-| `test_deserialize_shares_storage` | 反序列化后 `data_ptr()` 与原 tensor 相同 |
-| `test_handle_round_trip_preserves_values` | 数值层面完全一致 |
-| `test_gather_only_rank_0_has_full_list` | 非 rank-0 返回 None |
-| `test_local_serialized_tensor_get_by_rank` | 多 rank LST 按 rank 取 |
-| `test_update_weights_replaces_inference_state` | 集成：调一次 update，inference state 完整替换 |
-| `test_flush_cache_only_on_last_tensor` | 最后一个 tensor 才 free pool |
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 排查 handle/data 比例、rank gather、storage 共享、flush 时序和 IPC 生命周期 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 复习 patch、SGLang update、SLiME bucket 和 serializer 主路径 |
+| [outputs/rl_rollout_template.md](outputs/rl_rollout_template.md) | 记录一次 co-locate weight sync 复盘 |
 
-## 卡住怎么办
+<!-- LECTURE_FIRST_END -->
 
-1. 先看 `notebooks/n22_weight_sync_handle_tuple.ipynb` 把 handle 共享的图画一遍。
-2. `make patch-hint M=l32.5_ipc_weight_sync` 看 TODO 与提示。
-3. `make patch-show-solution M=l32.5_ipc_weight_sync` 看参考解。
+## 进入下一讲
 
-## 写完之后你能做什么
-
-- 解释 verl `_preprocess_tensor_for_update_weights` → `MultiprocessingSerializer.serialize`
-  → `dist.gather_object` → `update_weights_from_tensor` 整条链路每一步在做什么。
-- 区分 `update_weights_from_disk` / `update_weights_from_distributed` /
-  `update_weights_from_tensor` 三种接口的取舍（co-locate vs disaggregate、动态扩缩容代价）。
-- 看懂 SGLang `LocalSerializedTensor`、`MultiprocessingSerializer`、`monkey_patch_torch_reductions` 的实现。
-- 给 SGLang RL 调试日志加上 handle 大小 / pool 占用监控。
-
-## 配套源码研读（可选）
-
-- `github_repo/verl/verl/workers/sharding_manager/fsdp_sglang.py` — co-locate update_weights
-- `github_repo/sglang/python/sglang/srt/model_executor/model_runner.py::update_weights_from_tensor`
-- `github_repo/Awesome-ML-SYS-Tutorial/rlhf/sys-design/readme-1.md` — 整篇必读
+通过 L37 后进入 L38 Rollout Freshness。下一讲会把本讲的 `weight_version` 和同步边界扩展成 policy version、staleness 和可接受旧样本判断。

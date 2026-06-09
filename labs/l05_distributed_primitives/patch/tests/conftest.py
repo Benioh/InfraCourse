@@ -1,5 +1,5 @@
 """
-Pytest harness for the L02 patch.
+Pytest harness for the L06 patch.
 
 Key trick: we do NOT require torchrun / multi-process to test correctness.
 Each test spawns N child processes via torch.multiprocessing.spawn,

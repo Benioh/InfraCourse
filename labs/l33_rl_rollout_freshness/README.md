@@ -1,44 +1,69 @@
-# L11.5 · SLiME / verl Rollout Freshness：版本化 RolloutManager
+# L38 · SLiME Rollout Freshness：Versioned RolloutManager
 
-> 本关补上 SLiME / verl 的框架主线：实现带 `weight_version` 的 RolloutManager，
-> 然后用 `scripts/run_rl_drill.py` 演练 actor 与多个 rollout server 之间的权重同步
-> 节奏，看到 stale rollout 和 weight sync stall 的 trade-off。
+<!-- LECTURE_FIRST_START -->
 
-## 闭环
+本讲把 L36/L37 的权重同步结果接回 rollout 生成路径：每个 rollout server 都要暴露自己的 `weight_version`，manager 只允许足够新的 server 继续产训练样本。
+
+## 学习路线
+
+建议按下面顺序走，先理解系统问题，再写 patch。
+
+1. 读 [system_map.md](system_map.md)：确认 L38 在 RL rollout 主线里的位置。
+2. 读 [lecture.md](lecture.md)：从 stale rollout 问题、freshness 合同、SLiME 源码到排障指标。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 MiniInfra、patch、SLiME rollout manager、SGLang engine 和 drill 读源码。
+4. 跑 notebook：[n10_rl_kl_reward.ipynb](../../notebooks/n10_rl_kl_reward.ipynb)
+5. 做 quiz：确认版本字段、staleness、局部更新和排障边界。
+6. 做 patch：实现最小 versioned manager 行为合同。
+7. 跑 drill：观察 update 频率、subset size 和 max_staleness 如何改变 failure 与 staleness 分布。
+8. 使用 [outputs/rl_rollout_template.md](outputs/rl_rollout_template.md) 记录一次复盘。
+
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 所属主线 | 第 4 章：RL 与对齐 / RL rollout systems |
+| 解决什么问题 | actor 已经训练到新版本时，rollout engine 还能不能继续用旧权重生成样本 |
+| 连接哪些源码 | `mini_infra/slime/ray/rollout.py`, `github_repo/slime/train.py`, `github_repo/slime/slime/ray/rollout.py`, `github_repo/slime/slime/utils/types.py`, `github_repo/slime/slime/backends/sglang_utils/sglang_engine.py` |
+| lab 检验什么 | `RolloutManager.generate` 跳过 stale server，`update_weights` 支持全量/局部更新，`freshness` 返回 actor 与 server 的版本差 |
+
+## 你会学到什么
+
+- 解释 `actor_version - weight_version` 为什么是 rollout freshness 的最小证据。
+- 判断 stale rollout 对 PPO/GRPO 的 ratio、KL、reward 和 advantage 解释有什么影响。
+- 读懂 MiniInfra 和 SLiME 中 rollout manager、sample meta_info、SGLang weight version 的源码落点。
+- 完成 versioned `RolloutManager` patch，并说明测试覆盖的行为边界。
+- 用 drill 产物复盘 update 频率、局部更新范围、max_staleness 和失败率之间的关系。
+
+## Patch 闭环
 
 ```bash
 cat labs/l33_rl_rollout_freshness/patch/task.md
 $EDITOR labs/l33_rl_rollout_freshness/patch/starter/rollout_manager.py
 make patch-test M=l33_rl_rollout_freshness
-
-bash labs/l33_rl_rollout_freshness/scripts/run_rl_drill.sh
 ```
 
-## Drill 演练
+drill：
 
-`scripts/run_rl_drill.py` 模拟一段 RL：
+```bash
+python labs/l33_rl_rollout_freshness/scripts/run_rl_drill.py --run-id l38_local
+```
 
-1. 初始化 `N_servers` 个 RolloutServer
-2. actor 每个 step++，按概率 `update_rate` 推一次新权重到子集 server
-3. 每个 step 调用 `manager.generate(prompts, actor_version)` 收 rollout
-4. 收集：rollout 成功率、stale fraction、p50/p99 staleness、no-fresh-server 失败次数
+参考实现验收：
 
-acceptance：
-- 同步充分时（每 step 都更新所有 server）— 不能有 RuntimeError
-- `max_staleness=1` + `update_rate=0.5` 时大多数 step 仍能找到 fresh server
-- `update_rate=0` 且 actor 持续推进时必须最终抛 RuntimeError（不能用 stale）
+```bash
+IMPL=reference make patch-test M=l33_rl_rollout_freshness
+```
 
-## Configs
+## 课后产物
 
-| 配置 | 用途 |
+| 产物 | 用途 |
 |---|---|
-| `configs/cpu_smoke.yaml` | 默认 drill：4 server，50 step |
-| `configs/h200_slime.yaml` | 真实 SLiME train+rollout 启动模板 |
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 排查 stale rollout、局部更新和版本字段缺失 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 复习源码主路径和关键结论 |
+| [outputs/rl_rollout_template.md](outputs/rl_rollout_template.md) | 记录 drill 或真实 SLiME 运行的版本、指标和结论 |
 
-## 调试工单
+<!-- LECTURE_FIRST_END -->
 
-见 `tickets/INDEX.md`。建议至少做 `slime_stale_rollout_silent` 和 `slime_weight_sync_stall`。
+## 进入下一讲
 
-## 进入下一关
-
-通过后进入 [L12 多模态 Capstone](../l35_multimodal_capstone/README.md)。
+通过 L38 后进入 [L39 · GRPO](../l34_grpo/README.md)。

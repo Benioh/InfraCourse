@@ -1,23 +1,35 @@
 mission: l04_gpu_kernel
-title: L01.7 Quiz · GPU kernel + Triton 基础
+title: L05 Quiz · GPU kernel + Triton 基础
 pass_threshold: 1.0
 description: |
   这 5 题打中"为什么 GPU kernel 需要这样写"——数值稳定、内存带宽、SRAM 大小、
   warp/block 设计——最容易模糊的点。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L05 在 GPU kernel 主线中的位置
+    kind: doc
+    path: labs/l04_gpu_kernel/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从数值稳定和访存讲到 Triton softmax
+    kind: doc
+    path: labs/l04_gpu_kernel/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 starter、reference 和测试阅读
+    kind: doc
+    path: labs/l04_gpu_kernel/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l04_gpu_kernel/patch/task.md
-  - title: 跑 notebook n12 · Triton softmax walkthrough
-    kind: notebook
-    path: notebooks/n12_triton_softmax_walkthrough.ipynb
-  - title: 跑 notebook n11 · GPU memory hierarchy
-    kind: notebook
-    path: notebooks/n11_gpu_memory_hierarchy.ipynb
-  - title: 读 Triton 官方 02-fused-softmax 教程
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 Triton softmax reference
     kind: source
-    path: docs/术语表.md
+    path: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+    estimate_min: 10
 
 questions:
   - id: q1_subtract_max
@@ -169,5 +181,5 @@ questions:
       面试 trick：被问"长序列 attention 怎么写"，能说出 online softmax + tiling
       （而不是只说 FlashAttention 名字）就是真懂的。
 
-      课程主线：L04.5 长上下文 CP 这一关你会写一个简化版 ring attention，
+      课程主线：后续长上下文 CP 课程会写一个简化版 ring attention，
       其中就有 online softmax 的精髓。

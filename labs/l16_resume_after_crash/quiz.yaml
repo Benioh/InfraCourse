@@ -1,80 +1,103 @@
 mission: l16_resume_after_crash
-title: L05.8.5 Quiz · Crash-safe checkpoint
+title: L17 Quiz · Crash Resume
 pass_threshold: 0.8
 description: |
-  这 5 题确认你能讲清原子写、RNG state、resume 不变量。
+  这 5 题检查 L17 的关键边界：原子写、dangling tmp 清理、latest marker、
+  optimizer/RNG 恢复，以及 crash+resume 后的 loss 连续性。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图
+    kind: doc
+    path: labs/l16_resume_after_crash/system_map.md
+    href: "#lesson"
+  - title: 读主讲义
+    kind: doc
+    path: labs/l16_resume_after_crash/lecture.md
+    href: "#lesson"
+  - title: 读源码带读
+    kind: doc
+    path: labs/l16_resume_after_crash/source_walkthrough.md
+    href: "#lesson"
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l16_resume_after_crash/patch/task.md
-  - title: 读 PyTorch torch.save 文档与 fsync
+    href: "#patch"
+  - title: 对照 Megatron checkpointing
     kind: source
-    path: github_repo/pytorch/torch/serialization.py
+    path: github_repo/Megatron-LM/megatron/training/checkpointing.py
 
 questions:
-  - id: q1_atomic
-    prompt: 为什么 save 必须先写 `.tmp` 再 rename？
+  - id: q1_atomic_save
+    prompt: checkpoint 写入为什么要先落到临时文件，再用同目录 rename/replace 提交？
     options:
       - id: a
-        text: 同名 rename 是 POSIX 原子操作，避免 reader 看到半写文件
+        text: 同一文件系统内的 replace 是提交边界，reader 不会看到半写 checkpoint
         correct: true
       - id: b
-        text: 加快磁盘速度
+        text: 这样可以减少模型参数数量
       - id: c
-        text: 兼容 Windows
+        text: 这样可以跳过 optimizer state
       - id: d
-        text: 必须 fp16
-    explanation: "原子 rename 是 crash-safe 写入的标准 idiom。"
-  - id: q2_rng
-    prompt: 不保存 RNG state 的后果是？
+        text: 这样会自动修复损坏的训练数据
+    explanation: |
+      crash-safe save 的核心是把写入阶段和提交阶段分开。临时文件完成 flush/fsync 后，rename/replace 才把它变成 committed checkpoint。
+
+  - id: q2_dangling_tmp
+    prompt: 启动恢复时发现目录里只有 `iter_0000003.pt.tmp`，正确处理是什么？
     options:
       - id: a
-        text: resume 后 dropout / batch shuffle 不再与原 run 一致，loss 曲线偏离
+        text: 删除 dangling tmp，并回退到最近一个已提交 checkpoint
         correct: true
       - id: b
-        text: 不影响
+        text: 把 tmp 文件直接当作最新 checkpoint 加载
       - id: c
-        text: 模型必须重新初始化
+        text: 把 tmp 文件改名为正式 checkpoint
       - id: d
-        text: tokenizer 失效
-    explanation: "RNG 是 reproducible run 的一部分；包括 numpy / torch / cuda RNG。"
-  - id: q3_optimizer
-    prompt: optimizer state 也属于 checkpoint 的原因？
+        text: 忽略所有旧 checkpoint 并从头训练
+    explanation: |
+      `.tmp` 表示上一次写入没有完成提交。恢复路径只能信任已提交文件和 marker，不能加载半成品。
+
+  - id: q3_resume_state
+    prompt: crash 后要继续同一条训练轨迹，checkpoint 至少需要恢复哪些状态？
     options:
       - id: a
-        text: AdamW 的 m/v 是历史的指数移动平均，不恢复就会"重启"动量
+        text: model state、optimizer state、step/iteration、RNG state，生产里还要考虑数据进度
         correct: true
       - id: b
-        text: 它和 model 等价
+        text: 只恢复模型权重
       - id: c
-        text: 仅为日志
+        text: 只恢复 tokenizer 文件
       - id: d
-        text: 不必恢复
-    explanation: "丢 optimizer state 等于 warm-up 重新开始。"
-  - id: q4_partial
-    prompt: 启动时检测到只有 `.tmp` 文件应该怎么做？
+        text: 只恢复日志目录
+    explanation: |
+      下一步训练由参数、优化器历史、随机流和数据游标共同决定。只恢复模型权重不能证明 resume 连续性。
+
+  - id: q4_latest_marker
+    prompt: "`latest_checkpointed_iteration.txt` 应该在什么时候更新？"
     options:
       - id: a
-        text: 删掉 tmp，回退到上一个 committed checkpoint
+        text: checkpoint 文件原子提交成功之后，再更新 latest marker
         correct: true
       - id: b
-        text: 把它当作正常 checkpoint 加载
+        text: 写临时文件之前
       - id: c
-        text: 报错退出
+        text: 每个 batch 开始之前
       - id: d
-        text: 改名为正式 checkpoint
-    explanation: ".tmp 表示上次 save 没完成；必须丢弃。"
-  - id: q5_idempotent
-    prompt: 同 step 反复 save 应当？
+        text: 只要目录存在就立即更新
+    explanation: |
+      marker 是恢复入口。若它先指向尚未提交的 iteration，下一次 resume 可能读到不存在或半写的文件。
+
+  - id: q5_loss_continuity
+    prompt: drill 中 baseline 跑完整 100 步，crash run 跑 50 步后保存再恢复继续。通过条件主要证明什么？
     options:
       - id: a
-        text: 幂等：要么覆盖，要么 no-op；不能创建重复文件
+        text: 恢复后的状态足够完整，最终 loss 与不中断 baseline 对齐
         correct: true
       - id: b
-        text: 抛异常
+        text: checkpoint 文件越大越好
       - id: c
-        text: 文件越攒越多
+        text: resume 后一定比 baseline 更快收敛
       - id: d
-        text: 改 step 编号
-    explanation: "save_checkpoint(step) 必须 idempotent，否则崩溃恢复期间会爆炸。"
+        text: 可以不保存 optimizer state
+    explanation: |
+      loss 对齐是端到端证据：保存、加载、优化器状态和后续 step 都在同一条轨迹上。

@@ -1,46 +1,52 @@
-# L09 Patch · Prometheus Metrics Exporter
+# L27 Patch · Prometheus Metrics Exporter
 
 ## 你要交付什么
 
-实现一个简化的 **Prometheus exposition 格式 metrics exporter**——LLM serving 系统监控的标准接口：
+实现一个简化的 Prometheus exposition 文本 exporter。它用于训练 LLM serving 可观测性的最小合同：把运行时状态稳定地导出为可测试、可对比的 metrics 文本。
 
 ```python
 class MetricsExporter:
     def set_gauge(self, name: str, value: float, labels: dict | None = None): ...
     def inc_counter(self, name: str, by: float = 1, labels: dict | None = None): ...
-    def record_event(self, name: str, hit: bool): ...  # 用于 ratio metric
-    def export(self) -> str:  # 返回 Prometheus exposition 文本
+    def record_event(self, name: str, hit: bool): ...
+    def export(self) -> str: ...
 ```
 
-3 类核心 metric:
-- **gauge** (instantaneous value, e.g. `prefill_queue_depth`)
-- **counter** (monotonically increasing, e.g. `requests_total`)
-- **ratio** (rolling hit/miss, e.g. `prefix_cache_hit_rate`)
+三类核心 metric：
 
-**禁止** 用 `prometheus_client` 库。
-**允许** stdlib `dict` / `time` / 字符串拼接。
+- `gauge`：当前值，例如 `prefill_queue_depth`、`num_running_reqs`、`token_usage`。
+- `counter`：累计事件，例如 `requests_total`、`tokens_total`、`transfer_failed_total`。
+- `hit-rate`：由 hits/misses 派生，例如 `prefix_cache_hit_rate`。
 
-补丁规模目标：60–100 行。
+限制：
+
+- 禁止使用 `prometheus_client`。
+- 可以使用 Python 标准库的 `dict`、`tuple`、`collections` 和字符串处理。
+- 补丁规模目标为 60 到 100 行。
 
 ## Prometheus 文本格式
 
-```
-# HELP <metric_name> <description>
+本补丁只要求最小文本格式：
+
+```text
 # TYPE <metric_name> <type>
 <metric_name>[{label="value",...}] <number>
 ```
 
-例：
-```
+示例：
+
+```text
 # TYPE prefill_queue_depth gauge
-prefill_queue_depth 12
+prefill_queue_depth 12.0
 # TYPE requests_total counter
-requests_total{model="qwen2"} 8421
+requests_total{model="qwen2"} 8421.0
 # TYPE prefix_cache_hit_rate gauge
-prefix_cache_hit_rate 0.6234
+prefix_cache_hit_rate 0.5
 ```
 
-## 接口契约
+真实 Prometheus exposition 还可能包含 HELP、timestamp、histogram bucket 和 HTTP scrape endpoint。本补丁暂不实现这些内容。
+
+## 接口合同
 
 ```python
 m = MetricsExporter()
@@ -49,16 +55,25 @@ m.inc_counter("requests_total", labels={"model": "qwen2"})
 m.record_event("prefix_cache", hit=True)
 m.record_event("prefix_cache", hit=False)
 print(m.export())
-# 应包含 prefill_queue_depth, requests_total{model="qwen2"}, prefix_cache_hit_rate (0.5)
 ```
+
+输出应包含：
+
+- `# TYPE prefill_queue_depth gauge`
+- `prefill_queue_depth 12`
+- `# TYPE requests_total counter`
+- `requests_total{model="qwen2"} 1`
+- `# TYPE prefix_cache_hit_rate gauge`
+- `prefix_cache_hit_rate 0.5`
 
 ## 不变量
 
-1. `set_gauge` 后 `export()` 出现该 metric 名 + 当前值。
-2. `inc_counter` 累加；不同 labels 算不同 series。
-3. `record_event` 后 hit_rate = hits / (hits + misses)；零事件返回 0.0（不要 NaN）。
-4. labels 序列化必须**字母序**稳定输出（防 export 顺序抖动）。
-5. export 字符串必须包含 `# TYPE ` 行。
+1. `set_gauge` 对同一个 `(name, labels)` 覆盖当前值。
+2. `inc_counter` 对同一个 `(name, labels)` 累加；不同 labels 是不同 series。
+3. `record_event` 维护 hits/misses，导出时计算 `hits / (hits + misses)`。
+4. 没有 hit 或只有 miss 时，hit-rate 导出为 `0.0`，不能出现 NaN。
+5. labels 必须按 key 字母序输出，避免文本顺序抖动。
+6. `export()` 必须包含 `# TYPE` 行，并以换行结尾。
 
 ## 怎么验证
 
@@ -70,14 +85,14 @@ make patch-test M=l26_sglang_pd_observability
 
 | 测试 | 验证 |
 |---|---|
-| `test_gauge_set_and_export` | 设置后 export 包含值 |
-| `test_counter_increment` | 多次 inc 后值正确 |
-| `test_hit_rate_calculation` | 3 hit / 1 miss → 0.75 |
-| `test_zero_events_returns_zero` | 没事件 → 0.0 |
+| `test_gauge_set_and_export` | gauge 设置后 export 包含 TYPE 和当前值 |
+| `test_counter_increment` | 多次 counter inc 后值正确 |
+| `test_hit_rate_calculation` | 3 hit / 1 miss 导出 0.75 |
+| `test_zero_events_returns_zero` | 只有 miss 时导出 0.0 |
 | `test_labels_sorted` | 多 label 按字母序输出 |
 
 ## 写完之后你能做什么
 
-- 看懂 vLLM / SGLang 的 prometheus metrics 命名约定。
-- 给 Capstone Stage B 多模态服务加 prometheus 端点 + Grafana 面板。
-- 调试"P99 latency 突然变高"——用 metric history 定位是 prefill queue 堵了还是 decode 抢不到 GPU。
+- 读懂 SGLang 和 vLLM 中常见 serving metrics 的类型边界。
+- 判断 queue、token usage、cache hit-rate、failed counter 和 latency histogram 应该如何查询。
+- 排查 p99 抬高时，把现象拆到 prefill queue、decode queue、KV transfer、cache 或 scrape 配置。

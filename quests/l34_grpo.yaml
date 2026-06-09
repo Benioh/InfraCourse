@@ -1,0 +1,437 @@
+id: l34_grpo
+title: L39 · GRPO / RLOO：Critic-free Advantage 与 Clipped KL Loss
+level: L39
+act: 第 4 章：RL 与对齐
+role: RL 算法系统学徒
+priority: 核心
+estimated_minutes: 100
+no_gpu_friendly: true
+frameworks:
+  - PyTorch
+  - MiniInfra
+  - SLiME 对照
+
+patch:
+  description: |
+    实现 GRPO / RLOO 的最小数值合同：组内 advantage、leave-one-out baseline、
+    ratio clip、reference KL、completion mask 和指标返回。
+  task_md: labs/l34_grpo/patch/task.md
+  starter_file: labs/l34_grpo/patch/starter/grpo.py
+  reference_file: labs/l34_grpo/patch/reference/grpo.py
+  test_command: IMPL=reference make patch-test M=l34_grpo
+  status_file: labs/l34_grpo/patch/.last_run.json
+  test_count: 9
+  test_kind: advantage + loss 数值合同验证
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l34_grpo/system_map.md
+    description: L39 在 RL 与对齐主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l34_grpo/lecture.md
+    description: 从 critic-free advantage、RLOO、ratio clip、reference KL 讲到 smoke 和排障。
+  - title: 源码带读讲义
+    path: labs/l34_grpo/source_walkthrough.md
+    description: 按 patch、测试、reward parser、SLiME PPO utils 和 smoke 脚本阅读。
+
+source_reading:
+  - title: Patch starter
+    repo_path: labs/l34_grpo/patch/starter/grpo.py
+    focus: 学生要补的 GRPO/RLOO advantage 和 loss 函数
+    highlights:
+      - title: GRPO advantage TODO
+        lines: [8, 14]
+        note: |
+          L8-L9: grpo_advantage 接收同组 rewards，并返回组内 advantage。
+          L14: 未实现时抛出 L39 TODO。
+      - title: RLOO advantage TODO
+        lines: [17, 23]
+        note: |
+          L17-L23: rloo_advantage 的 TODO 写出 leave-one-out baseline。
+      - title: loss signature
+        lines: [26, 34]
+        note: |
+          L26-L34: grpo_loss 接收 current、old、reference log-probs、advantages 和 mask。
+      - title: loss TODO
+        lines: [35, 44]
+        note: |
+          L35-L44: TODO 覆盖 advantage broadcast、ratio、clip、KL、mask 和指标。
+
+  - title: Patch reference
+    repo_path: labs/l34_grpo/patch/reference/grpo.py
+    focus: 参考实现中的 advantage、RLOO、ratio clip、KL 和 mask 归一化
+    highlights:
+      - title: GRPO advantage
+        lines: [8, 15]
+        note: |
+          L8-L9: 函数入口处理一组 rewards。
+          L13-L15: std 太小时返回去均值结果，否则做标准化。
+      - title: RLOO advantage
+        lines: [18, 24]
+        note: |
+          L18-L20: G 小于等于 1 时返回 0。
+          L21-L24: baseline 排除当前 response 的 reward。
+      - title: loss setup
+        lines: [27, 37]
+        note: |
+          L27-L35: grpo_loss 的输入和超参。
+          L36-L37: mask 转 dtype，advantage 扩展到 token 维。
+      - title: ratio clip and KL
+        lines: [38, 47]
+        note: |
+          L38-L43: ratio、clipped surrogate 和 mask-normalized policy loss。
+          L44-L47: k3 形式 KL 和总 loss 的 KL 部分。
+      - title: metrics return
+        lines: [48, 57]
+        note: |
+          L48-L50: 计算 clipped fraction 和 ratio_mean。
+          L51-L57: 返回 loss、policy_loss、kl_loss 和 ratio 指标。
+
+  - title: Patch tests
+    repo_path: labs/l34_grpo/patch/tests/test_patch.py
+    focus: 9 个数值边界测试
+    highlights:
+      - title: GRPO normalization
+        lines: [21, 32]
+        note: |
+          L21-L25: GRPO advantage 的均值应接近 0。
+          L28-L32: GRPO advantage 的标准差应接近 1。
+      - title: GRPO zero guards
+        lines: [35, 46]
+        note: |
+          L35-L39: G=1 时 advantage 返回 0。
+          L42-L46: 常数 reward 时 advantage 返回 0。
+      - title: RLOO tests
+        lines: [49, 56]
+        note: |
+          L49-L56: RLOO 的首尾样本使用其他 responses 的均值。
+      - title: RLOO equal rewards
+        lines: [59, 63]
+        note: |
+          L59-L63: 全相等 reward 时 RLOO 返回 0。
+      - title: KL test
+        lines: [66, 78]
+        note: |
+          L66-L74: 构造 current、old、reference log-probs 和 advantages。
+          L75-L78: kl_beta 改变总 loss，且 kl_loss 大于 0。
+      - title: ratio clip test
+        lines: [81, 91]
+        note: |
+          L81-L89: 构造 ratio 超出 clip 区间的样本。
+          L90-L91: clipped fraction 必须大于 0。
+      - title: mask test setup
+        lines: [94, 99]
+        note: |
+          L94-L99: mask 测试准备不同 log-prob 输入。
+
+  - title: MiniInfra reward
+    repo_path: mini_infra/rl/reward.py
+    focus: rule-based reward 输出如何影响 group advantage
+    highlights:
+      - title: score
+        lines: [21, 33]
+        note: |
+          L21-L28: score 解析 prediction 和 target 的最终数字并比较。
+          L29-L33: 返回 prediction、target 和 reward。
+
+  - title: SLiME PPO utils
+    repo_path: github_repo/slime/slime/utils/ppo_utils.py
+    focus: KL estimator、OPSM 和 policy loss 的生产对照
+    highlights:
+      - title: KL estimator choice
+        lines: [28, 34]
+        note: |
+          L28-L34: compute_approx_kl 根据 kl_loss_type 选择 k1、k2 或 k3。
+      - title: k3 KL
+        lines: [38, 41]
+        note: |
+          L38-L41: k3 分支使用 exp(log_ratio) - 1 - log_ratio。
+      - title: KL stability branches
+        lines: [43, 51]
+        note: |
+          L43-L45: 可选 importance ratio 修正 KL。
+          L47-L51: low_var_kl 分支做 clamp 后返回。
+      - title: OPSM inputs
+        lines: [54, 60]
+        note: |
+          L54-L60: OPSM 输入 current/old log_probs、advantages 和 loss_masks。
+      - title: OPSM mask
+        lines: [79, 86]
+        note: |
+          L79-L83: 对每个样本计算 sequence-level KL。
+          L85-L86: negative advantage 且 KL 超阈值时标记 mask。
+      - title: OPSM return
+        lines: [87, 92]
+        note: |
+          L87-L92: 汇总 mask 和 clip fraction。
+      - title: policy loss clip
+        lines: [132, 138]
+        note: |
+          L132-L138: policy loss 根据 ratio 和 clip 区间构造两条分支。
+      - title: dual clip return
+        lines: [139, 148]
+        note: |
+          L139-L148: 可选 dual-clip 分支返回 pg_losses 和 clipfrac。
+
+  - title: L39 GRPO smoke
+    repo_path: labs/l34_grpo/scripts/run_grpo_smoke.py
+    focus: 合成 reward + log-prob 的 smoke 和产物写出
+    highlights:
+      - title: impl selector
+        lines: [32, 41]
+        note: |
+          L32-L41: 根据 IMPL 显式选择 reference 或 starter。
+      - title: impl fallback
+        lines: [42, 49]
+        note: |
+          L42-L49: 默认优先 starter，导入失败再退到 reference。
+      - title: run setup
+        lines: [52, 60]
+        note: |
+          L52-L60: 读取参数、配置和 run 目录。
+      - title: resolved config
+        lines: [61, 66]
+        note: |
+          L61-L66: 写 command、prediction 和 resolved config。
+      - title: synthetic policy
+        lines: [85, 93]
+        note: |
+          L85-L88: 从配置读取 group size、prompt 数和 seq length。
+          L90-L93: 构造可训练 policy 参数、optimizer 和固定 rewards。
+      - title: smoke loop start
+        lines: [95, 99]
+        note: |
+          L95-L99: 初始化 losses，进入 smoke 循环，并准备 old/ref log-probs。
+      - title: smoke artifact
+        lines: [132, 141]
+        note: |
+          L132-L137: 计算 loss drop 并写 grpo_smoke artifact。
+          L138-L141: report 写出 head、tail、drop 和 accept。
+
+mini_infra_targets:
+  - mini_infra/rl/reward.py
+notebooks: []
+tickets:
+  - grpo_constant_reward_nan
+  - grpo_clip_skipped_silently
+  - grpo_kl_explodes_under_shift
+  - grpo_advantage_shape_misuse
+  - grpo_mask_average_off
+prereq: l33_rl_rollout_freshness
+next_lab: l34.5_gae_chunked_parallel
+gpu_modes:
+  local: CPU OK
+  cluster: H200 + verl/Qwen 模板（可选）
+
+lesson:
+  opening: |
+    L39 讲 GRPO / RLOO 的最小数值合同。L38 已经处理 rollout 样本的新鲜度；这一讲继续看同一 prompt 的多条 response 拿到 reward 后，怎样在没有 value critic 的情况下构造 advantage，并用 ratio clip 与 reference KL 约束 actor 更新。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        L39 位于 rollout 样本进入 actor 更新的算法层。它不启动 rollout engine，也不训练真实 Qwen；它把 critic-free RL 的核心公式压缩成三个函数：GRPO advantage、RLOO advantage 和 GRPO loss。
+      mental_model: |
+        同一 prompt 下采样 G 条 response，reward 给出相对好坏，advantage 把相对好坏变成 actor 更新方向。
+      why_it_matters: |
+        没有 value critic 可以省掉一套模型和训练链路，但训练质量更依赖 group reward、mask、ratio clip 和 KL 约束。
+      source_refs:
+        - title: reward score
+          repo_path: mini_infra/rl/reward.py
+          lines: [21, 33]
+          note: |
+            L21-L28: rule-based reward 解析最终数字并比较。
+            L29-L33: reward 输出进入后续 advantage。
+        - title: smoke synthetic policy
+          repo_path: labs/l34_grpo/scripts/run_grpo_smoke.py
+          lines: [85, 93]
+          note: |
+            L85-L88: smoke 从配置读取 group 和序列规模。
+            L90-L93: 构造合成 policy、optimizer 和 rewards。
+      common_confusions:
+        - 把 group 当成全局 batch。
+        - 认为不用 critic 就不需要 baseline。
+        - 用 smoke loss 下降判断真实长训稳定。
+      checkpoint_questions:
+        - L39 的 group 边界是什么？
+        - GRPO 省掉了哪一类模型？
+        - smoke 能证明什么，不能证明什么？
+
+    - title: GRPO 和 RLOO Advantage
+      plain_explanation: |
+        GRPO 对同一 prompt 的 rewards 做组内标准化：减组均值，再除以组标准差。RLOO 对第 i 条 response 使用排除 r_i 的组内均值作为 baseline。两者都返回 `[G]` per-response advantage，G=1 或 reward 全相等时必须返回 0，避免 NaN。
+      mental_model: |
+        GRPO 看每条 response 相对全组的表现；RLOO 看每条 response 相对其他 responses 的表现。
+      why_it_matters: |
+        advantage 是 actor 更新方向。group 边界或 std guard 错了，后面的 loss 即使公式正确也会训练错误信号。
+      source_refs:
+        - title: reference GRPO
+          repo_path: labs/l34_grpo/patch/reference/grpo.py
+          lines: [8, 15]
+          note: |
+            L8-L9: grpo_advantage 接收 rewards。
+            L13-L15: std 太小时返回去均值结果，否则标准化。
+        - title: reference RLOO
+          repo_path: labs/l34_grpo/patch/reference/grpo.py
+          lines: [18, 24]
+          note: |
+            L18-L20: G 小于等于 1 时返回 0。
+            L21-L24: baseline 排除当前 response。
+        - title: advantage tests
+          repo_path: labs/l34_grpo/patch/tests/test_patch.py
+          lines: [21, 32]
+          note: |
+            L21-L25: 检查 GRPO advantage 均值。
+            L28-L32: 检查 GRPO advantage 标准差。
+      common_confusions:
+        - 把不同 prompt 的 reward 混在一个 group。
+        - G=1 时仍做标准化。
+        - RLOO baseline 包含当前 response。
+      checkpoint_questions:
+        - GRPO advantage 的公式是什么？
+        - RLOO baseline 为什么排除当前 response？
+        - 常数 reward 应该返回什么？
+
+    - title: Loss 合同
+      plain_explanation: |
+        `grpo_loss` 把 `[G]` advantage 扩展到 `[G,T]`，计算 `ratio = exp(log_probs - log_probs_old)`，再取 unclipped 和 clipped surrogate 的较小值。reference KL 使用 `exp(log_probs_ref - log_probs) - (log_probs_ref - log_probs) - 1`。所有 token 级平均都要乘 mask 并除以 mask.sum。
+      mental_model: |
+        advantage 给方向，ratio clip 限制单步走多远，reference KL 把 policy 拉回基座模型附近，mask 决定哪些 token 参与训练。
+      why_it_matters: |
+        GRPO 训练异常常来自 mask 或 ratio，而不是 reward 本身。指标必须保留 policy_loss、kl_loss、ratio_mean 和 clipped fraction。
+      source_refs:
+        - title: loss setup
+          repo_path: labs/l34_grpo/patch/reference/grpo.py
+          lines: [27, 37]
+          note: |
+            L27-L35: loss 输入 current、old、reference log-probs、advantages 和 mask。
+            L36-L37: mask 转 dtype，并扩展 advantage。
+        - title: ratio and KL
+          repo_path: labs/l34_grpo/patch/reference/grpo.py
+          lines: [38, 47]
+          note: |
+            L38-L43: ratio、clip 和 mask-normalized policy loss。
+            L44-L47: k3 形式 KL 和总 loss 的 KL 部分。
+        - title: metrics return
+          repo_path: labs/l34_grpo/patch/reference/grpo.py
+          lines: [48, 57]
+          note: |
+            L48-L50: 计算 clipped fraction 和 ratio_mean。
+            L51-L57: 返回 loss、policy_loss、kl_loss 和 ratio 指标。
+      common_confusions:
+        - advantage 不扩展到 token 维。
+        - prompt token 也参与 loss。
+        - ratio_mean 忽略 mask。
+      checkpoint_questions:
+        - ratio 的公式是什么？
+        - mask 影响哪些输出？
+        - KL 项为什么需要 reference log-probs？
+
+    - title: SLiME 对照
+      plain_explanation: |
+        SLiME 的 PPO utils 展示了真实训练里围绕 KL、ratio、advantage 和 mask 的更多保护。`compute_approx_kl` 支持 k1/k2/k3 等 estimator；OPSM 会根据 sequence-level KL 和 negative advantage 生成 mask；policy loss 还支持 dual-clip 分支。
+      mental_model: |
+        patch 是最小公式，SLiME 是生产训练工具箱。
+      why_it_matters: |
+        读真实框架时要知道哪些是核心公式，哪些是稳定性和分布式训练的保护分支。
+      source_refs:
+        - title: k3 KL
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [28, 34]
+          note: |
+            L28-L34: 根据 kl_loss_type 选择 KL estimator。
+        - title: k3 formula
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [38, 41]
+          note: |
+            L38-L41: k3 分支使用 exp(log_ratio) - 1 - log_ratio。
+        - title: OPSM mask
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [79, 86]
+          note: |
+            L79-L83: 计算 sequence-level KL。
+            L85-L86: negative advantage 且 KL 超阈值时标记 mask。
+        - title: OPSM return
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [87, 92]
+          note: |
+            L87-L92: 汇总 mask 和 clip fraction。
+        - title: policy loss
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [132, 138]
+          note: |
+            L132-L138: policy loss 使用 ratio、advantage 和 clip 分支。
+      common_confusions:
+        - 把 OPSM 当成 GRPO 必需部分。
+        - 认为所有 KL estimator 数值相同。
+        - 忽略 dual-clip 对负 advantage 的影响。
+      checkpoint_questions:
+        - patch 的 KL 和 SLiME k3 KL 有什么对应关系？
+        - OPSM 主要保护什么场景？
+        - production policy loss 比 patch 多哪些分支？
+
+    - title: 测试和 Smoke
+      plain_explanation: |
+        patch tests 覆盖 GRPO 均值/标准差、G=1、常数 reward、RLOO、KL beta、ratio clip 和 mask。smoke 用合成 policy 跑 50 step，写出 loss、policy_loss、kl_loss、ratio_mean 和 ratio_clipped_frac，用来检查数值闭环和 artifact 格式。
+      mental_model: |
+        tests 固定公式，smoke 检查公式能否在一个小优化循环里留下可读证据。
+      why_it_matters: |
+        没有指标产物时，loss 下降无法解释。KL 和 ratio 指标能帮助判断更新幅度是否受控。
+      source_refs:
+        - title: KL test
+          repo_path: labs/l34_grpo/patch/tests/test_patch.py
+          lines: [66, 78]
+          note: |
+            L66-L74: 构造 log-probs、advantages 和 mask。
+            L75-L78: kl_beta 改变总 loss。
+        - title: ratio clip test
+          repo_path: labs/l34_grpo/patch/tests/test_patch.py
+          lines: [81, 91]
+          note: |
+            L81-L89: 构造 ratio 超出 clip 区间的样本。
+            L90-L91: clipped fraction 必须大于 0。
+        - title: smoke artifact
+          repo_path: labs/l34_grpo/scripts/run_grpo_smoke.py
+          lines: [132, 141]
+          note: |
+            L132-L137: 写 grpo_smoke artifact。
+            L138-L141: report 写 head、tail、drop 和 accept。
+      common_confusions:
+        - patch-test 通过就等于真实 RL 稳定。
+        - smoke loss 下降就说明 reward 没问题。
+        - 只看 loss，不看 KL 和 ratio。
+      checkpoint_questions:
+        - 哪些测试覆盖 std=0 和 G=1？
+        - smoke 里必须保存哪些指标？
+        - H200 配置还需要真实验证什么？
+
+    - title: 排障顺序
+      plain_explanation: |
+        GRPO/RLOO 出问题时先看数值边界。确认 rewards 是否按 prompt 分组，advantage 是否有 NaN，mask.sum 是否合理，ratio_mean 和 clipped fraction 是否异常，KL 是否突然变大。再回到 rollout freshness、old log-probs、reference log-probs 和学习率。
+      mental_model: |
+        先确认训练信号是否正确，再讨论模型效果。
+      why_it_matters: |
+        reward、advantage、mask、KL 和 ratio 任意一个出错，都可能表现为 loss 或 reward 曲线异常。
+      source_refs:
+        - title: mask test setup
+          repo_path: labs/l34_grpo/patch/tests/test_patch.py
+          lines: [94, 99]
+          note: |
+            L94-L99: mask 测试准备不同 log-prob 输入。
+        - title: smoke setup
+          repo_path: labs/l34_grpo/scripts/run_grpo_smoke.py
+          lines: [52, 60]
+          note: |
+            L52-L60: 读取配置并准备 run 目录。
+        - title: smoke config snapshot
+          repo_path: labs/l34_grpo/scripts/run_grpo_smoke.py
+          lines: [61, 66]
+          note: |
+            L61-L66: 写 command、prediction 和 resolved config。
+      common_confusions:
+        - reward 全 0 时只调学习率。
+        - ratio clip 异常时只调 KL beta。
+        - report 里不记录 group size 和 mask。
+      checkpoint_questions:
+        - advantage NaN 时先查什么？
+        - mask.sum 为 0 时 loss 应该怎样处理？
+        - 真实训练复盘需要哪些字段？

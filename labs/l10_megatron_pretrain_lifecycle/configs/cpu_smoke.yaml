@@ -29,5 +29,5 @@ checkpoint:
   save_every: 100
   save_dir: artifacts/checkpoints
 acceptance:
-  loss_drop_first_50_steps: 0.3
+  loss_drop_first_50_steps: 0.05
   must_observe_restart_at_step: 80

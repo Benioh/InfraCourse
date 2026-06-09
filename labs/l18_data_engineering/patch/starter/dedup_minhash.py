@@ -1,5 +1,5 @@
 """
-L06.3 Patch · MinHash 文本去重
+L19 Patch · MinHash 文本去重
 
 填空规则：
 - TODO(student) 必须自己写
@@ -59,7 +59,7 @@ def minhash_signature(text: str, num_perm: int = 64, n_gram: int = 3) -> List[in
     #       min_h = min((a * h + b) % _PRIME for h in base_hashes)
     #       sig.append(min_h)
     #   return sig
-    raise NotImplementedError("L06.3: implement minhash_signature")
+    raise NotImplementedError("L19: implement minhash_signature")
 
 
 def jaccard_estimate(sig1: List[int], sig2: List[int]) -> float:
@@ -69,7 +69,7 @@ def jaccard_estimate(sig1: List[int], sig2: List[int]) -> float:
     #   if not sig1: return 0.0
     #   matches = sum(1 for a, b in zip(sig1, sig2) if a == b)
     #   return matches / len(sig1)
-    raise NotImplementedError("L06.3: implement jaccard_estimate")
+    raise NotImplementedError("L19: implement jaccard_estimate")
 
 
 def dedup(
@@ -92,4 +92,4 @@ def dedup(
     #           keep_indices.append(i)
     #           keep_sigs.append(sig)
     #   return keep_indices
-    raise NotImplementedError("L06.3: implement dedup")
+    raise NotImplementedError("L19: implement dedup")

@@ -1,4 +1,4 @@
-"""L05.8.5 Patch tests · CPU only."""
+"""L17 Patch tests · CPU only."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    return importlib.import_module(f"{os.environ.get('IMPL', 'starter')}.crash_safe")
+    return importlib.import_module(f"{os.environ.get('IMPL') or 'starter'}.crash_safe")
 
 
 def test_atomic_save_writes_tmp_then_rename(tmp_path: Path):

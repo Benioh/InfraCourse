@@ -1,5 +1,5 @@
 """
-L08.5 Patch · AWQ-lite per-channel quantization
+    L24 Patch · AWQ-lite per-channel quantization
 
 填空规则：
 - TODO(student) 必须自己写
@@ -31,7 +31,7 @@ def compute_awq_scale(
     #   scale = (act_amax.clamp(min=eps).pow(alpha) / w_amax_in.clamp(min=eps).pow(alpha))
     #   scale = scale.clamp(min=1.0)  # 不允许缩小（保持数值稳定）
     #   return scale
-    raise NotImplementedError("L08.5: implement compute_awq_scale")
+    raise NotImplementedError("L24: implement compute_awq_scale")
 
 
 def quantize_w8_per_channel(
@@ -55,7 +55,7 @@ def quantize_w8_per_channel(
     #   per_out_scale = per_out_scale.clamp(min=1e-8)
     #   int_w = (w_scaled / per_out_scale.unsqueeze(1)).round().clamp(-127, 127).to(torch.int8)
     #   return int_w, per_out_scale
-    raise NotImplementedError("L08.5: implement quantize_w8_per_channel")
+    raise NotImplementedError("L24: implement quantize_w8_per_channel")
 
 
 def dequantize_w8_per_channel(
@@ -69,4 +69,4 @@ def dequantize_w8_per_channel(
     #   if awq_scale is not None:
     #       w = w / awq_scale.unsqueeze(0)                   # 还原 W
     #   return w
-    raise NotImplementedError("L08.5: implement dequantize_w8_per_channel")
+    raise NotImplementedError("L24: implement dequantize_w8_per_channel")

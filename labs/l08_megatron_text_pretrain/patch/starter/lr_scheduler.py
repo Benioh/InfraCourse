@@ -1,5 +1,5 @@
 """
-L04 Patch · Cosine With Restarts LR Scheduler
+L09 Patch · Cosine With Restarts LR Scheduler
 
 填空规则：
 - TODO(student) 必须自己写
@@ -48,14 +48,14 @@ class CosineWithRestartsLR:
         # 把每段的边界算出来：[0, r1, r2, ..., total_steps]
         # TODO(student): 计算 self.boundaries 列表，长度 = len(restart_steps) + 2
         #   例：restart_steps=[1000, 3000], total_steps=5000 → boundaries = [0, 1000, 3000, 5000]
-        raise NotImplementedError("L04 Patch: implement boundaries init")
+        raise NotImplementedError("L09 Patch: implement boundaries init")
 
         # 初始 lr
         self._set_lr(self.max_lr)
 
     def _set_lr(self, lr: float) -> None:
         # TODO(student): 把 lr 写入 self.optimizer.param_groups 中所有 group 的 'lr'。
-        raise NotImplementedError("L04 Patch: implement _set_lr")
+        raise NotImplementedError("L09 Patch: implement _set_lr")
 
     def _compute_lr(self, step: int) -> float:
         if step >= self.total_steps:
@@ -72,7 +72,7 @@ class CosineWithRestartsLR:
         #   4. ratio = t / segment_len
         #   5. cos_factor = 0.5 * (1 + math.cos(math.pi * ratio))
         #   6. return self.min_lr + (self.max_lr - self.min_lr) * cos_factor
-        raise NotImplementedError("L04 Patch: implement _compute_lr")
+        raise NotImplementedError("L09 Patch: implement _compute_lr")
 
     def step(self) -> None:
         """每个 optimizer.step() 之后调用一次。"""

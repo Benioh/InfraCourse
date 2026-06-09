@@ -1,33 +1,58 @@
-# L06.3 · 数据工程：MinHash 文本去重
+# L19 · Data Engineering: MinHash, WebDataset, Shard Resume
 
-> 本关只做一件事：**实现 MinHash + Jaccard 估计 + first-occurrence dedup**。
+L19 讲训练数据进入大规模训练前的三件事：用 MinHash 找近重复文本，用 WebDataset-style shard 提升顺序读取效率，用 deterministic shuffle 和 resume cursor 处理坏 shard 与重启。
 
-写完这关你能在 Capstone 给图像 caption 数据集做去重，避免训练集污染 eval。
+## 学习路线
 
-## 闭环
+1. 读 [system_map.md](system_map.md)：确认 L19 在数据主线中的位置。
+2. 读 [lecture.md](lecture.md)：从近重复问题、MinHash 数学、LSH banding 讲到 shard 与 resume。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 patch、MiniInfra 和 smoke 脚本读源码。
+4. 跑 notebook：[n16_minhash_dedup.ipynb](../../notebooks/n16_minhash_dedup.ipynb)。
+5. 做 quiz：检查 shingle、Jaccard、num_perm、LSH 和数据泄漏。
+6. 做 patch：实现 `minhash_signature`、`jaccard_estimate` 和 `dedup`。
+7. 跑 smoke：生成 dedup、WDS throughput 和 shard recovery artifact。
+8. 填写 [outputs/data_pipeline_template.md](outputs/data_pipeline_template.md)。
+
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 所属主线 | Data pipeline |
+| 解决的问题 | 文本近重复、数据供给吞吐、坏 shard 与重启恢复 |
+| 上游 | raw text、caption、manifest、shard list |
+| 下游 | tokenizer、DataLoader、训练 loop、eval leakage audit |
+| patch 验收 | MinHash 签名、Jaccard 估计、first-occurrence dedup |
+
+## 你会学到什么
+
+- 把文本变成 shingle 集合，并解释 Jaccard 相似度。
+- 用多组稳定哈希生成固定长度 MinHash signature。
+- 用 signature hit ratio 估计 Jaccard，并说明 `num_perm` 的成本和误差。
+- 用 first-occurrence 策略返回保留索引，维护 manifest 行号可追踪。
+- 解释 WebDataset shard、detshuffle、prefetch、corrupt shard recovery 和 dedup 之间的边界。
+
+## Patch 闭环
 
 ```bash
 cat labs/l18_data_engineering/patch/task.md
 $EDITOR labs/l18_data_engineering/patch/starter/dedup_minhash.py
-make patch-test M=l18_data_engineering
+IMPL=reference make patch-test M=l18_data_engineering
 ```
 
-## 测试覆盖
+smoke：
 
-| 测试 | 验证 |
+```bash
+python labs/l18_data_engineering/scripts/run_smoke.py --run-id l19_smoke
+```
+
+## 课后产物
+
+| 产物 | 用途 |
 |---|---|
-| `test_signature_size` | 签名长度 = num_perm |
-| `test_identical_text_same_signature` | 相同文本签名相等，jaccard=1 |
-| `test_jaccard_estimate_high_for_near_duplicates` | 改 1 词 jaccard > 0.7，无关文本 < 0.2 |
-| `test_dedup_removes_exact_duplicates` | 完全重复样本被去掉 |
-| `test_dedup_preserves_distinct` | 完全不同的文本不被错杀 |
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 定位 dedup、shard、worker、resume cursor 问题 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 复习 patch 和 MiniInfra 数据工程源码 |
+| [outputs/data_pipeline_template.md](outputs/data_pipeline_template.md) | 记录一次数据工程 smoke 或训练排查 |
 
-## 卡住怎么办
+## 下一讲
 
-1. 看 `notebooks/n16_minhash_dedup.ipynb`。
-2. `make patch-hint M=l18_data_engineering`。
-3. `make patch-show-solution M=l18_data_engineering`。
-
-## 进入下一关
-
-`make patch-test` 全绿后，继续做源码理解口试。下一关 [L07 vLLM baseline](../l19_vllm_serving_baseline/README.md) 让你给 vLLM-shape engine 加 typical_p 采样。
+L20 是样板课：vLLM Scheduler 与 KV Block Manager。

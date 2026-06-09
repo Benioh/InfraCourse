@@ -1,46 +1,635 @@
 id: l32_slime_rl_core
-title: SLiME Weight Sync Coordinator
-level: L11
+title: L36 · SLiME RL Core：Weight Sync Coordinator
+level: L36
 act: 第 4 章：RL 与对齐
-role: SLiME 学徒
+role: SLiME 系统学徒
 priority: 核心
 estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - SLiME / OpenRLHF (对照)
+  - SLiME
+  - SGLang 对照
 
 patch:
   description: |
-    实现 WeightSyncCoordinator：从 train state_dict 读取 weights，按 shape+dtype
-    匹配后写入 inference state_dict。不匹配的 key 进 mismatched_keys，不抛错。
-    返回 sync 字节数 + tensor 数 + mismatched 列表。
+    实现 WeightSyncCoordinator：从 train state_dict 读取 weights，按 key、shape、dtype
+    匹配后写入 inference state_dict。不匹配的 key 进入 mismatched_keys，不抛错。
+    返回同步字节数、tensor 数和 mismatch 列表。
   task_md: labs/l32_slime_rl_core/patch/task.md
   starter_file: labs/l32_slime_rl_core/patch/starter/weight_sync.py
   reference_file: labs/l32_slime_rl_core/patch/reference/weight_sync.py
-  test_command: make patch-test M=l32_slime_rl_core
+  test_command: IMPL=reference make patch-test M=l32_slime_rl_core
   status_file: labs/l32_slime_rl_core/patch/.last_run.json
   test_count: 5
   test_kind: 行为契约 + 数值校验
 
+lesson_docs:
+  - title: 系统地图
+    path: labs/l32_slime_rl_core/system_map.md
+    description: 本讲在 RL rollout 主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l32_slime_rl_core/lecture.md
+    description: 从本地 state_dict 同步合同讲到 SLiME 生产链路和同步排障。
+  - title: 源码带读讲义
+    path: labs/l32_slime_rl_core/source_walkthrough.md
+    description: 按 patch、MiniInfra、SLiME train、Megatron updater 和 SGLang engine 主路径阅读。
+
 source_reading:
-  - title: SLiME / OpenRLHF weight sync 真实实现
-    repo_path: github_repo/
+  - title: Patch starter
+    repo_path: labs/l32_slime_rl_core/patch/starter/weight_sync.py
+    focus: 学生需要补齐的 provider、setter、mismatch 和 stats 合同
+    highlights:
+      - title: 初始化接口
+        lines: [20, 28]
+        note: |
+          L20-L28: `WeightSyncCoordinator` 接收 train provider、inference setter 和可选 inference provider。
+      - title: TODO fields
+        lines: [29, 33]
+        note: |
+          L29-L33: TODO 要保存三个回调。
+      - title: sync 合同
+        lines: [35, 45]
+        note: |
+          L35-L45: docstring 写出返回字段和 shape/dtype 筛选规则。
+      - title: provider 和 accepted
+        lines: [46, 58]
+        note: |
+          L46-L58: 伪代码展示读取 train/inference state、accepted dict 和 mismatch 列表。
+      - title: mismatch 和 stats
+        lines: [59, 66]
+        note: |
+          L59-L66: 遍历 train state，跳过 missing、shape mismatch 和 dtype mismatch。
+      - title: accepted setter
+        lines: [68, 74]
+        note: |
+          L68-L74: setter 只接收 accepted tensors，并返回同步统计。
+
+  - title: Patch reference
+    repo_path: labs/l32_slime_rl_core/patch/reference/weight_sync.py
+    focus: 参考实现中的 clone、shape/dtype gate 和 stats 返回
+    highlights:
+      - title: 简化全量模式
+        lines: [21, 33]
+        note: |
+          L21-L33: 没有 inference provider 时，全量 clone train state 并返回 stats。
+      - title: shape/dtype gate
+        lines: [35, 38]
+        note: |
+          L35-L38: 初始化 accepted、mismatched 和 bytes counter。
+      - title: clone and count
+        lines: [40, 49]
+        note: |
+          L40-L49: key、shape、dtype 都匹配后才 clone 并计入 bytes。
+      - title: stats 返回
+        lines: [51, 56]
+        note: |
+          L51-L56: setter 写入 accepted tensors，并返回 bytes、tensor 数和 mismatch。
+
+  - title: Patch tests
+    repo_path: labs/l32_slime_rl_core/patch/tests/test_patch.py
+    focus: 基本同步、shape mismatch、dtype mismatch、extra key 和 bytes 统计
+    highlights:
+      - title: 基本同步准备
+        lines: [32, 44]
+        note: |
+          L32-L44: 构造 train/inference state，执行 coordinator sync。
+      - title: 基本同步断言
+        lines: [45, 49]
+        note: |
+          L45-L49: inference 数值等于 train，并且同步 tensor 数为 2。
+      - title: shape mismatch
+        lines: [51, 60]
+        note: |
+          L51-L60: 构造 shape mismatch 的 `b` tensor。
+      - title: shape mismatch assert
+        lines: [61, 66]
+        note: |
+          L61-L66: `b` 进入 mismatch，inference 旧值保持不变。
+      - title: dtype mismatch
+        lines: [69, 80]
+        note: |
+          L69-L80: fp32 train 和 fp16 inference 不自动转换，num_tensors 为 0。
+      - title: extra train key
+        lines: [83, 95]
+        note: |
+          L83-L95: train 多出的 `extra` 不创建到 inference，并进入 mismatch。
+      - title: stats 数值
+        lines: [98, 99]
+        note: |
+          L98-L99: stats 用例准备 train 和 inference tensors。
+
+  - title: MiniInfra SLiME train loop
+    repo_path: mini_infra/slime/train.py
+    focus: generate、train、update_weights 的最小顺序
+    highlights:
+      - title: loop setup
+        lines: [12, 19]
+        note: |
+          L12-L19: 创建 rollout manager 和 actor，每步按 generate、train、update_weights 推进。
+      - title: history fields
+        lines: [20, 29]
+        note: |
+          L20-L29: history 记录 rollout id、reward、weight version 和 meta_info。
+
+  - title: MiniInfra TrainRayActor
+    repo_path: mini_infra/slime/ray/train_actor.py
+    focus: actor train 后递增 weight_version，并写回 rollout manager
+    highlights:
+      - title: actor train
+        lines: [44, 53]
+        note: |
+          L44-L53: train 根据 rollout response 产生 reward，并递增 `weight_version`。
+      - title: update weights
+        lines: [55, 58]
+        note: |
+          L55-L58: update_weights 把 actor 的 version 写回 rollout manager。
+
+  - title: MiniInfra RolloutManager
+    repo_path: mini_infra/slime/ray/rollout.py
+    focus: rollout server version、staleness 和 manager 更新
+    highlights:
+      - title: rollout generate
+        lines: [27, 39]
+        note: |
+          L27-L39: rollout server 根据当前 weight version 构造 response 和 rollout id。
+      - title: rollout meta_info
+        lines: [40, 49]
+        note: |
+          L40-L49: meta_info 保存 server id、weight version、actor version 和 staleness。
+      - title: freshness check
+        lines: [67, 75]
+        note: |
+          L67-L75: 计算 server 是否 fresh enough。
+      - title: freshness dispatch
+        lines: [76, 82]
+        note: |
+          L76-L82: 找到可用 server 后生成，否则抛出 freshness 错误。
+      - title: version update
+        lines: [84, 93]
+        note: |
+          L84-L93: update_weights 更新指定 server 或全部 server 的 weight version。
+
+  - title: SLiME train loop
+    repo_path: github_repo/slime/train.py
+    focus: rollout manager、actor train、offload 和 update_weights 位置
+    highlights:
+      - title: rollout manager setup
+        lines: [15, 24]
+        note: |
+          L15-L24: 创建 rollout manager，并把它传给 actor/critic 模型。
+      - title: initial sync
+        lines: [26, 36]
+        note: |
+          L26-L30: 需要时 onload rollout，随后初次推送 actor 权重。
+          L32-L36: 可选检查权重一致，并恢复 KV。
+      - title: generate and train
+        lines: [66, 72]
+        note: |
+          L66-L72: train loop 先生成 rollout data。
+      - title: actor critic train
+        lines: [73, 85]
+        note: |
+          L73-L85: offload rollout 后训练 actor/critic。
+      - title: offload and sync
+        lines: [90, 99]
+        note: |
+          L90-L93: offload train 后 onload rollout，并触发 actor_model.update_weights。
+          L95-L99: 恢复 KV 后按 interval eval。
+
+  - title: SLiME Ray actor group
+    repo_path: github_repo/slime/slime/ray/actor_group.py
+    focus: Ray actor 训练和 update_weights remote 调用
+    highlights:
+      - title: async train refs
+        lines: [120, 129]
+        note: |
+          L120-L129: RayTrainGroup 把 train 请求发给每个 actor。
+      - title: update weights refs
+        lines: [135, 138]
+        note: |
+          L135-L138: 对每个 train actor 调用 `update_weights.remote()` 并等待结果。
+
+  - title: SLiME Megatron actor
+    repo_path: github_repo/slime/slime/backends/megatron_utils/actor.py
+    focus: updater 选择、engine 获取和 weight_updater 调用
+    highlights:
+      - title: updater choice
+        lines: [127, 134]
+        note: |
+          L127-L134: 根据 colocate 选择 tensor updater 或 distributed updater。
+      - title: update entry
+        lines: [538, 550]
+        note: |
+          L538-L550: `update_weights` 入口获取 rollout engines 和 engine lock。
+      - title: connect engines
+        lines: [555, 562]
+        note: |
+          L555-L562: 新 engine 出现时连接 updater 和 rollout engines。
+      - title: updater call
+        lines: [563, 569]
+        note: |
+          L563-L569: 清理 new engine 计数，并调用 `weight_updater.update_weights()`。
+      - title: version check
+        lines: [571, 577]
+        note: |
+          L571-L577: CI 模式检查 engine version 与 updater version 是否一致。
+
+  - title: SLiME distributed updater
+    repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py
+    focus: NCCL group、bucket、Ray metadata 和 broadcast
+    highlights:
+      - title: class contract
+        lines: [20, 24]
+        note: |
+          L20-L24: distributed updater 用 NCCL 更新 rollout engines。
+      - title: init contract
+        lines: [26, 34]
+        note: |
+          L26-L34: 初始化参数包括 args、model、weights_getter 和 model metadata。
+      - title: connect engines
+        lines: [45, 53]
+        note: |
+          L45-L53: 连接 rollout engines，并说明 group 名称和 engine lock。
+      - title: pause and flush
+        lines: [81, 87]
+        note: |
+          L81-L87: update_weights 先递增 weight_version。
+      - title: flush and barrier
+        lines: [88, 99]
+        note: |
+          L88-L99: rank 0 暂停 generation、flush cache，并处理量化前置步骤。
+      - title: non-expert gather
+        lines: [142, 154]
+        note: |
+          L142-L154: 非 expert 参数先 all_gather，非源 rank 直接返回。
+      - title: non-expert bucket
+        lines: [155, 164]
+        note: |
+          L155-L164: 源 rank 按 buffer size 分桶，并转换为 HF 命名布局。
+      - title: expert gather names
+        lines: [190, 202]
+        note: |
+          L190-L202: expert path 先收集各 EP rank 的参数名并检查长度一致。
+      - title: expert gather tensors
+        lines: [203, 215]
+        note: |
+          L203-L215: 对每个 expert 参数执行 EP all_gather。
+      - title: expert bucket update
+        lines: [221, 228]
+        note: |
+          L221-L228: source rank 做 HF 转换并调用 bucket update。
+      - title: engine lock
+        lines: [228, 239]
+        note: |
+          L228-L239: bucket update 前拿 rollout engine lock，防止 broadcast 冲突。
+      - title: release lock
+        lines: [240, 249]
+        note: |
+          L240-L249: 等待远端 refs，清空 bucket，并释放 lock。
+      - title: metadata refs
+        lines: [310, 319]
+        note: |
+          L310-L319: distributed update 用 Ray 发 metadata、NCCL 发 tensor。
+      - title: metadata payload
+        lines: [320, 328]
+        note: |
+          L320-L328: metadata 包含 names、dtypes、shapes、group_name 和 version。
+      - title: tensor broadcast
+        lines: [331, 337]
+        note: |
+          L331-L337: 对每个 tensor 执行 `dist.broadcast`，等待异步 handle 完成。
+
+  - title: SLiME tensor updater
+    repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+    focus: co-locate 与 distributed 的传输差异
+    highlights:
+      - title: tensor updater overview
+        lines: [24, 30]
+        note: |
+          L24-L30: docstring 对比 colocated IPC 和 distributed GPU broadcast 路径。
+      - title: connect rollout engines
+        lines: [61, 70]
+        note: |
+          L61-L70: 连接 rollout engines，并把 colocated/distributed engines 分开处理。
+
+  - title: SGLang engine update
+    repo_path: github_repo/slime/slime/backends/sglang_utils/sglang_engine.py
+    focus: 在线更新入口和 weight version 读取
+    highlights:
+      - title: tensor update entry
+        lines: [266, 278]
+        note: |
+          L266-L278: `update_weights_from_tensor` 通过 metadata 触发 GPU tensor 更新。
+      - title: tensor update payload
+        lines: [279, 289]
+        note: |
+          L279-L289: payload 包含 serialized tensors、flush_cache 和可选 weight_version。
+      - title: get weight version
+        lines: [349, 355]
+        note: |
+          L349-L355: engine 通过 endpoint 读取当前 weight_version。
+      - title: disk update entry
+        lines: [373, 380]
+        note: |
+          L373-L380: disk update 是在线 reload 的冷路径入口。
+
+  - title: L36 smoke script
+    repo_path: labs/l32_slime_rl_core/scripts/run_slime_lab.py
+    focus: 配置验证、toy 数据、同步指标和报告边界
+    highlights:
+      - title: args and config
+        lines: [28, 35]
+        note: |
+          L28-L35: 读取 run 参数、配置和 run 目录。
+      - title: run manifest
+        lines: [36, 41]
+        note: |
+          L36-L41: 写入 command、prediction 和 resolved config。
+      - title: data and validation
+        lines: [42, 45]
+        note: |
+          L42-L45: 准备 toy GSM8K prompts。
+      - title: validation artifact
+        lines: [46, 58]
+        note: |
+          L46-L58: 检查 slime/sglang 可导入性，并写 validation artifact。
+      - title: metrics row
+        lines: [59, 64]
+        note: |
+          L59-L64: 写 step、metric_type、reward 和 KL。
+      - title: sync metrics
+        lines: [65, 72]
+        note: |
+          L65-L72: 写 rollout、actor update、weight sync 时间和 GPU allocation。
+      - title: report boundary
+        lines: [77, 89]
+        note: |
+          L77-L89: 报告记录目标、环境和 actor/rollout 配置。
+      - title: report result
+        lines: [96, 99]
+        note: |
+          L96-L99: 报告记录三类时间，并声明本地模式边界。
 
 mini_infra_targets:
   - mini_infra/slime/
-
 notebooks: []
-
 tickets:
   - slime_weight_sync_003
-  - slime_megatron_checkpoint_005
+  - slime_rollout_bottleneck_001
+  - slime_reward_collapse_002
   - slime_sglang_arg_004
-
+  - slime_megatron_checkpoint_005
 prereq: l31_rollout_only_smoke
-next_lab: l33_rl_rollout_freshness
-
+next_lab: l32.5_ipc_weight_sync
 gpu_modes:
   local: CPU OK
-  cluster: 真 NCCL P2P 跨集群验证（可选）
+  cluster: H200/NCCL + SGLang 在线更新验证（可选）
+
+lesson:
+  opening: |
+    L36 讲 actor 训练侧和 rollout 推理侧之间的权重交接。L35 已经把 rollout 请求并发和样本保序讲清；这一讲继续看 actor train 之后，新权重如何到达 rollout engine，以及 shape、dtype、bytes、mismatch 和 weight_version 如何成为排障证据。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        weight sync 位于 actor train 之后、下一轮 rollout 之前。训练侧 actor 完成参数更新后，rollout engine 必须拿到新权重，否则后续样本仍来自旧 policy。短期 stale 可以被 PPO 的 ratio 和 clip 吸收一部分；stale 太大时，KL、reward 和 advantage 都会变得难解释。
+      mental_model: |
+        rollout 产样本，actor 用样本训练，sync 把新 actor 交给下一轮 rollout。少了 sync，两条流水线就会逐渐分叉。
+      why_it_matters: |
+        很多 RL 训练异常表面上是 reward 不涨或 KL 异常，根因可能是 rollout policy 没更新。先定位 sync 在 loop 中的位置，才能判断曲线是否可信。
+      source_refs:
+        - title: MiniInfra loop
+          repo_path: mini_infra/slime/train.py
+          lines: [12, 19]
+          note: |
+            L12-L19: MiniInfra 按 generate、train、update_weights 推进。
+        - title: SLiME train loop
+          repo_path: github_repo/slime/train.py
+          lines: [66, 72]
+          note: |
+            L66-L72: 真实 SLiME 先生成 rollout data。
+      common_confusions:
+        - 认为 rollout policy 和 actor 参数天然一致。
+        - 把 sync 只看成吞吐开销。
+        - 没有 version 证据就判断 rollout 新鲜。
+      checkpoint_questions:
+        - generate、train、update_weights 的顺序是什么？
+        - rollout policy 过旧会影响哪些训练量？
+        - 为什么 weight_version 是最小证据？
+
+    - title: 本地同步合同
+      plain_explanation: |
+        本地 `WeightSyncCoordinator` 从 train state 读取 tensor，只把 key 存在、shape 一致、dtype 一致的 tensor clone 后写入 inference。missing key、shape mismatch 和 dtype mismatch 都进入 `mismatched_keys`。`bytes_synced` 和 `num_tensors` 只统计 accepted tensors。
+      mental_model: |
+        这是一张收货检查表：名字、尺寸、类型三项都对上才入库。
+      why_it_matters: |
+        shape/dtype gate 能抓住 checkpoint 转换、TP/PP/EP 切片、fp32 master 和 bf16/fp16 inference 的常见错误。clone 能避免 inference 继续引用 train tensor。
+      source_refs:
+        - title: starter 合同
+          repo_path: labs/l32_slime_rl_core/patch/starter/weight_sync.py
+          lines: [35, 45]
+          note: |
+            L35-L45: sync docstring 写出返回字段和筛选规则。
+        - title: reference gate
+          repo_path: labs/l32_slime_rl_core/patch/reference/weight_sync.py
+          lines: [35, 38]
+          note: |
+            L35-L38: 初始化 accepted、mismatch 和 bytes。
+        - title: reference clone
+          repo_path: labs/l32_slime_rl_core/patch/reference/weight_sync.py
+          lines: [40, 49]
+          note: |
+            L40-L49: key、shape、dtype 都匹配后 clone 并计入 bytes。
+        - title: reference stats
+          repo_path: labs/l32_slime_rl_core/patch/reference/weight_sync.py
+          lines: [51, 56]
+          note: |
+            L51-L56: setter 写入 accepted tensors，并返回同步统计。
+      common_confusions:
+        - key 名相同就直接同步。
+        - dtype 不同也在 coordinator 里自动转换。
+        - 用浅拷贝字典替代 tensor clone。
+      checkpoint_questions:
+        - accepted tensor 需要满足哪三个条件？
+        - 为什么 dtype mismatch 不自动 cast？
+        - "`bytes_synced` 应该统计哪些 tensor？"
+
+    - title: 测试闭环
+      plain_explanation: |
+        patch tests 把同步合同拆成五个断言：正常同步、shape mismatch、dtype mismatch、train extra key 和 stats 数值。测试不覆盖 Ray、NCCL、SGLang endpoint 或 Megatron/HF 转换。
+      mental_model: |
+        测试先把本地收货合同固定下来，生产路径再把这份合同放进分布式传输链路。
+      why_it_matters: |
+        weight sync 错误可能在下一次 forward 才暴露。小测试先把错误压缩到可复现断言里。
+      source_refs:
+        - title: shape mismatch test
+          repo_path: labs/l32_slime_rl_core/patch/tests/test_patch.py
+          lines: [51, 60]
+          note: |
+            L51-L60: 构造 shape mismatch。
+        - title: shape mismatch assert
+          repo_path: labs/l32_slime_rl_core/patch/tests/test_patch.py
+          lines: [61, 66]
+          note: |
+            L61-L66: mismatch 不覆盖 inference 旧值。
+        - title: dtype mismatch test
+          repo_path: labs/l32_slime_rl_core/patch/tests/test_patch.py
+          lines: [69, 80]
+          note: |
+            L69-L80: dtype mismatch 被跳过，num_tensors 为 0。
+        - title: stats test
+          repo_path: labs/l32_slime_rl_core/patch/tests/test_patch.py
+          lines: [98, 99]
+          note: |
+            L98-L99: stats 用例先准备两个 fp32 tensors。
+      common_confusions:
+        - patch-test 通过就等于多机同步正确。
+        - shape mismatch 可以覆盖后再修。
+        - stats 错误不影响训练。
+      checkpoint_questions:
+        - 哪个测试证明 mismatch 不覆盖 inference？
+        - 为什么 stats 也属于行为合同？
+        - patch-test 没覆盖哪些生产分支？
+
+    - title: MiniInfra 版本链路
+      plain_explanation: |
+        MiniInfra 的 `TrainRayActor.train` 会递增 `weight_version`，`update_weights` 把版本写回 rollout manager。`RolloutServer.generate` 在 meta_info 里记录 server weight version、actor version 和 staleness。
+      mental_model: |
+        version 是权重交接的收据。没有收据，就无法证明 rollout 用的是哪一版 policy。
+      why_it_matters: |
+        后续 freshness 课程会继续扩展这个概念。L36 先让学生看到版本从 actor 到 rollout 的最小路径。
+      source_refs:
+        - title: TrainRayActor train
+          repo_path: mini_infra/slime/ray/train_actor.py
+          lines: [44, 53]
+          note: |
+            L44-L53: actor train 后递增 weight_version。
+        - title: Rollout meta_info
+          repo_path: mini_infra/slime/ray/rollout.py
+          lines: [40, 49]
+          note: |
+            L40-L49: rollout meta_info 记录 weight_version、actor_version 和 staleness。
+        - title: Rollout update
+          repo_path: mini_infra/slime/ray/rollout.py
+          lines: [84, 93]
+          note: |
+            L84-L93: rollout manager 把新 version 写到指定 server 或所有 server。
+      common_confusions:
+        - 版本号只是日志字段。
+        - rollout manager 不需要知道 actor version。
+        - stale 只影响吞吐。
+      checkpoint_questions:
+        - MiniInfra 哪里递增 weight_version？
+        - rollout meta_info 里为什么同时有 actor_version 和 weight_version？
+        - freshness 错误应该在什么地方暴露？
+
+    - title: SLiME 生产链路
+      plain_explanation: |
+        真实 SLiME 通过 Ray 协调 train actors。`RayTrainGroup.update_weights()` 调每个 actor 的 remote 方法；Megatron actor 根据 colocate 选择 tensor updater 或 distributed updater；update 时从 rollout manager 取可更新 engines 和 lock，再调用 weight updater。
+      mental_model: |
+        本地 patch 是收货检查；SLiME 生产路径是多级交接：Ray 触发、Megatron 整理、updater 传输、SGLang 接收。
+      why_it_matters: |
+        源码里的 Ray、NCCL、bucket 和 engine lock 都是在维护同一个目标：把 actor 新权重可靠交给 rollout engine，并留下可检查的 version。
+      source_refs:
+        - title: Ray update call
+          repo_path: github_repo/slime/slime/ray/actor_group.py
+          lines: [135, 138]
+          note: |
+            L135-L138: RayTrainGroup 对每个 actor 调用 update_weights remote。
+        - title: updater choice
+          repo_path: github_repo/slime/slime/backends/megatron_utils/actor.py
+          lines: [127, 134]
+          note: |
+            L127-L134: colocate 选择 tensor updater，否则选择 distributed updater。
+        - title: updater call
+          repo_path: github_repo/slime/slime/backends/megatron_utils/actor.py
+          lines: [555, 562]
+          note: |
+            L555-L562: 连接新 rollout engines。
+        - title: updater execute
+          repo_path: github_repo/slime/slime/backends/megatron_utils/actor.py
+          lines: [563, 569]
+          note: |
+            L563-L569: 调用 weight_updater.update_weights。
+        - title: engine tensor update
+          repo_path: github_repo/slime/slime/backends/sglang_utils/sglang_engine.py
+          lines: [266, 278]
+          note: |
+            L266-L278: SGLang engine 暴露 tensor update 入口。
+      common_confusions:
+        - Ray remote 直接传所有 tensor。
+        - co-locate 和 disaggregate 只影响部署，不影响同步路径。
+        - disk update 可以替代高频在线 sync。
+      checkpoint_questions:
+        - SLiME 在哪里选择 updater？
+        - Ray 在 sync 路径里主要负责什么？
+        - SGLang payload 为什么需要 weight_version？
+
+    - title: Distributed Sync
+      plain_explanation: |
+        distributed updater 会建立 update group，暂停 generation，flush cache，处理 non-expert 和 expert 参数，按 bucket 更新。Ray 先把 names、dtypes、shapes、group_name 和 version 发给 rollout engines，再由 NCCL broadcast 传 tensor。
+      mental_model: |
+        生产同步像分桶发货：先贴 metadata 标签，再把 tensor 通过高速链路广播到收货方。
+      why_it_matters: |
+        同步慢可能来自 gather、HF 转换、bucket、engine lock、NCCL broadcast 或 engine 应用。只看总耗时无法定位瓶颈。
+      source_refs:
+        - title: distributed class
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py
+          lines: [20, 24]
+          note: |
+            L20-L24: distributed updater 用 NCCL 更新 rollout engines。
+        - title: pause and flush
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py
+          lines: [81, 87]
+          note: |
+            L81-L87: 每次 update 递增 weight_version。
+        - title: bucket lock
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py
+          lines: [228, 239]
+          note: |
+            L228-L239: bucket update 前拿 rollout engine lock。
+        - title: metadata and broadcast
+          repo_path: github_repo/slime/slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py
+          lines: [310, 319]
+          note: |
+            L310-L319: Ray 发 metadata，NCCL 传 tensor。
+      common_confusions:
+        - 同步慢只可能是网络慢。
+        - 每个 train shard 都能直接写入 inference 模型。
+        - metadata 不重要。
+      checkpoint_questions:
+        - distributed updater 为什么要先发 metadata？
+        - engine lock 防止什么问题？
+        - 有效带宽怎么估算？
+
+    - title: Smoke 和排障
+      plain_explanation: |
+        L36 smoke 只验证配置、toy 数据和指标格式。它写出 `slime_config_validation.json`、`metrics.jsonl`、`rl.log` 和 report。metrics 里的 `weight_sync_time_sec` 用来练习复盘格式，不代表真实 NCCL 性能。
+      mental_model: |
+        smoke 是证据格式演练；H200/NCCL 才是真实同步能力验证。
+      why_it_matters: |
+        进入真实集群前，先确认 run 目录、配置、数据、metrics 和报告都能支撑排查。真实跑失败时，证据才不会散落在不同位置。
+      source_refs:
+        - title: smoke validation
+          repo_path: labs/l32_slime_rl_core/scripts/run_slime_lab.py
+          lines: [42, 45]
+          note: |
+            L42-L45: 准备 toy GSM8K prompts。
+        - title: smoke metrics
+          repo_path: labs/l32_slime_rl_core/scripts/run_slime_lab.py
+          lines: [59, 64]
+          note: |
+            L59-L64: 写 reward、KL 和 metric type。
+        - title: smoke report
+          repo_path: labs/l32_slime_rl_core/scripts/run_slime_lab.py
+          lines: [96, 99]
+          note: |
+            L96-L99: 报告记录时间结果，并声明本地模式边界。
+      common_confusions:
+        - 本地 smoke 通过就说明 SGLang 在线权重已更新。
+        - "`weight_sync_time_sec` 可以直接代表 NCCL 带宽。"
+        - 缺少 validation artifact 也能复盘配置。
+      checkpoint_questions:
+        - L36 smoke 能证明什么？
+        - 本地 smoke 不能替代哪些验证？
+        - sync 慢时第一步要保存哪些证据？

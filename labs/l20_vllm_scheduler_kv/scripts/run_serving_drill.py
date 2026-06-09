@@ -1,8 +1,10 @@
-"""L07.5 · Drive student's vLLM-shaped scheduler/KV manager through a synthetic workload."""
+"""L21 · Drive student's vLLM-shaped scheduler/KV manager through a synthetic workload."""
 
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
 import random
 import statistics
 import sys
@@ -31,6 +33,9 @@ MISSION_ID = "l20_vllm_scheduler_kv"
 
 
 def _impl():
+    requested = os.environ.get("IMPL")
+    if requested in {"starter", "reference"}:
+        return importlib.import_module(f"{requested}.scheduler"), requested
     try:
         from starter import scheduler as mod  # type: ignore[import-not-found]
 
@@ -252,7 +257,7 @@ def main() -> None:
 `scripts/bench_ttft.py --base-url http://localhost:8000` 做真实 TTFT/ITL 测试。
 
 ## 11. 下一步
-进入 L08 学 SGLang RadixCache + L08.7 spec decode。
+进入 L22 学 SGLang Serving Core，后续 L25 再学 Spec Decode。
 """,
     )
     print(run_dir)

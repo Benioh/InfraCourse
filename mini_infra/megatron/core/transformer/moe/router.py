@@ -1,5 +1,5 @@
 """
-MoE Router 最小同构（L05.5 教学）。
+MoE Router 最小同构（L14 教学）。
 
 教学目的：
     把 "router 决定 token 去哪个 expert" 从概念变成可断言的数学。

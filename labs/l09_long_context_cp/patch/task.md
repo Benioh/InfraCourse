@@ -1,50 +1,65 @@
-# L04.5 Patch · Ring Attention Forward（Online Softmax）
+# L10 Patch · Ring Attention Forward（Online Softmax）
 
 ## 你要交付什么
 
-实现 **ring attention forward**——FlashAttention 与 Context Parallel 的核心：
-把 K/V 沿 seq 维度切成多 chunk，每读一 chunk 维护"在线 softmax 状态"
-（running max + running denom），最终得到与 full attention 数学等价的输出。
+实现一个教学版 `ring_attention_forward`。它把 K/V 沿序列维切成多个 chunk，并用 online softmax 逐块累加，最终得到与 full attention 等价的输出。
 
 ```python
 def ring_attention_forward(q, k, v, num_chunks=1) -> torch.Tensor:
-    """q: (B, H, Sq, D), k/v: (B, H, Sk, D). 返回 (B, H, Sq, D)。
-
-    把 K/V 沿 seq 维分成 num_chunks 块，逐块累加 softmax；
-    数学上与 F.scaled_dot_product_attention(q, k, v) 等价。"""
+    """q: (B, H, Sq, D), k/v: (B, H, Sk, D). 返回 (B, H, Sq, D)."""
 ```
 
-**禁止** 调 `F.scaled_dot_product_attention` 或 `nn.MultiheadAttention`。
-**允许** `torch.einsum` / `torch.exp` / `torch.maximum` 等基本算子。
+禁止调用 `torch.nn.functional.scaled_dot_product_attention` 或 `nn.MultiheadAttention`。允许使用 `torch.einsum`、`torch.exp`、`torch.maximum`、`torch.chunk` 等基础算子。
 
-补丁规模目标：30–60 行。
+补丁规模目标：30 到 60 行。
 
 ## 在线 softmax 数学
 
-完整 softmax: `out = softmax(QK^T / √d) @ V`
+完整 attention：
 
-分块在线版本：维护 `m`（running max）和 `l`（running denom），每读一 chunk i：
-
-```
-S_i = Q @ K_i^T / √d                     # (B, H, Sq, chunk)
-m_new = max(m_old, max(S_i, dim=-1))
-l_new = l_old * exp(m_old - m_new) + sum(exp(S_i - m_new), dim=-1)
-out_new = out_old * exp(m_old - m_new) + exp(S_i - m_new) @ V_i
-m_old, l_old = m_new, l_new
+```text
+scores = Q @ K^T / sqrt(D)
+out = softmax(scores) @ V
 ```
 
-最后 `out = out / l`。
+分块版本每次处理一个 K/V chunk：
 
-为什么这样数学等价？因为 `softmax(s)_j = exp(s_j - max) / Σ exp(s_k - max)` 在
-分块累加时，只要每次 max 上升就把旧的 `out_old` 和 `l_old` 用 `exp(m_old - m_new)`
-重新缩放，效果与一次性算完一致。
+```text
+scores_i = Q @ K_i^T / sqrt(D)
+chunk_max = max(scores_i, dim=-1, keepdim=True)
+new_max = max(running_max, chunk_max)
+exp_old = exp(running_max - new_max)
+exp_chunk = exp(scores_i - new_max)
+running_denom = running_denom * exp_old + sum(exp_chunk)
+running_out = running_out * exp_old + exp_chunk @ V_i
+running_max = new_max
+```
+
+最后返回：
+
+```text
+running_out / running_denom
+```
+
+第一次循环时 `running_max = -inf`，旧状态贡献应为 0。可以用 `torch.where(torch.isfinite(running_max), torch.exp(running_max - new_max), torch.zeros_like(new_max))` 处理这个边界。
 
 ## 不变量
 
-1. `num_chunks=1` 时与 `F.scaled_dot_product_attention(q,k,v)` 数值等价（atol=1e-4）。
-2. `num_chunks=4` 时与 num_chunks=1 数值等价（验证 online softmax 正确性）。
-3. 显存峰值随 num_chunks 增大而降低（O(Sk/num_chunks) 而不是 O(Sk)）。
-4. 不实现 causal mask（本关只要 full attention，causal 留 L08.7）。
+1. `num_chunks=1` 时输出与 PyTorch SDPA 对齐。
+2. `num_chunks=4` 时输出仍与 PyTorch SDPA 对齐。
+3. `Sk` 不能被 `num_chunks` 整除时仍正确。
+4. 长 K/V 场景下误差在测试容差内。
+5. 输出支持 autograd backward，并产生有限梯度。
+
+## 不要求实现
+
+- causal mask
+- dropout
+- 自定义 backward
+- 多 GPU ring 通信
+- Transformer Engine 或 FlashAttention kernel
+
+这些生产复杂度在讲义和源码带读里解释，本关 patch 只验收 forward 数学合同。
 
 ## 怎么验证
 
@@ -52,18 +67,20 @@ m_old, l_old = m_new, l_new
 make patch-test M=l09_long_context_cp
 ```
 
-5 个测试，CPU 友好：
+5 个测试，CPU 可运行：
 
 | 测试 | 验证 |
 |---|---|
-| `test_matches_full_attention_one_chunk` | num_chunks=1 与 F.SDPA `allclose(atol=1e-4)` |
-| `test_matches_full_attention_four_chunks` | num_chunks=4 同上 |
-| `test_handles_uneven_chunks` | Sk=7, num_chunks=2（最后一块更小） |
-| `test_long_seq` | Sk=1024, num_chunks=8 |
-| `test_grads_are_continuous` | backward 不报错（autograd 自动算） |
+| `test_matches_full_attention_one_chunk` | `num_chunks=1` 与 SDPA 对齐 |
+| `test_matches_full_attention_four_chunks` | `num_chunks=4` 与 SDPA 对齐 |
+| `test_handles_uneven_chunks` | `Sk=7, num_chunks=2` |
+| `test_long_seq` | `Sq=256, Sk=1024, num_chunks=8` |
+| `test_grads_are_continuous` | backward 产生有限梯度 |
 
-## 写完之后你能做什么
+## 写完之后你要能解释
 
-- 解释 FlashAttention 论文的 forward 算法每一行（你刚写过）。
-- 看懂 Megatron 的 context parallel 实现，知道哪一步对应"chunk i"。
-- 在 Capstone 的多模态 attention 里支持 4K+ 序列（图像 + 文本拼接超长）。
+- 为什么每个 chunk 独立 softmax 后相加会错。
+- `running_max`、`running_denom` 和 `running_out` 的 shape。
+- 为什么旧分母和旧输出要同时缩放。
+- 为什么本地 `num_chunks` 和真实 CP world size 有联系，但不是同一个概念。
+- 为什么通过 patch 只能证明 forward 数学，不能证明真实多 GPU CP 性能。

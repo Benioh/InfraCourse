@@ -1,4 +1,4 @@
-"""L04.5 Patch tests · CPU OK."""
+"""L10 Patch tests · CPU OK."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    name = os.environ.get("IMPL", "starter")
+    name = os.environ.get("IMPL") or "starter"
     return importlib.import_module(f"{name}.ring_attention")
 
 

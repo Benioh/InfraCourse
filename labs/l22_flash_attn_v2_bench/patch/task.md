@@ -1,4 +1,4 @@
-# L08.3 Patch · FlashAttention v2 benchmark
+# L23 Patch · PyTorch SDPA / FlashAttention benchmark
 
 ## 你要交付什么
 
@@ -23,7 +23,7 @@ def bench_attention(
 ## 不变量
 
 1. `eager_attention` 必须显式实例化 N×N attention matrix（这是 baseline）
-2. `flash_attention` 必须调 `torch.nn.functional.scaled_dot_product_attention`
+2. `flash_attention` 必须调用 `torch.nn.functional.scaled_dot_product_attention`
 3. CPU / fp32 时两者输出 `max_abs_diff < 1e-5`
 4. `bench_attention` 必须 `torch.cuda.synchronize()` 包裹计时
 5. `peak_mem_*_mb` 用 `torch.cuda.max_memory_allocated()` 测；CPU 时填 0
@@ -33,10 +33,11 @@ def bench_attention(
 ```bash
 make patch-test M=l22_flash_attn_v2_bench
 RUN_GPU_TESTS=1 make patch-test M=l22_flash_attn_v2_bench   # GPU 真实 speedup
+IMPL=reference python labs/l22_flash_attn_v2_bench/scripts/run_bench.py --config configs/cpu_smoke.yaml --run-id l23_smoke
 ```
 
 ## 写完之后你能做什么
 
-- 在自己的 transformer 里替换 eager attention 为 SDPA / FA
-- 解释 vLLM PagedAttention 为什么会受 FA dispatch 影响
-- 知道 `torch.backends.cuda.sdp_kernel` 怎么强制选 backend
+- 在自己的 Transformer 里把 eager attention 的基线替换成 SDPA 调用。
+- 解释为什么 FlashAttention/SDPA 减少的是中间矩阵和 HBM 流量，不是注意力公式本身。
+- 看懂 dtype、device、head_dim、mask 和 causal 设置如何影响 SDPA backend。

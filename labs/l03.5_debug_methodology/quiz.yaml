@@ -1,0 +1,170 @@
+mission: l03.5_debug_methodology
+title: L03.5 Quiz · Debug 方法论
+pass_threshold: 1.0
+description: |
+  这 5 题验证你对系统 debug 方法论的理解。答不对说明你遇到复杂问题时会浪费大量时间在错误方向上。
+
+prereq_checklist:
+  - title: 读主讲义：四步 debug 方法论
+    kind: doc
+    path: labs/l03.5_debug_methodology/lecture.md
+    href: "#lesson"
+    estimate_min: 40
+  - title: 读 patch/task.md
+    kind: task
+    path: labs/l03.5_debug_methodology/patch/task.md
+    href: "#patch"
+    estimate_min: 5
+
+questions:
+  - id: q1_first_step
+    prompt: |
+      训练循环在 64 卡上跑到第 500 步时 loss 突然变成 NaN。
+      下面哪个是**正确的第一步**？
+    options:
+      - id: a
+        text: 直接调小学习率重新跑 64 卡
+      - id: b
+        text: 缩小到 1-2 卡、小 batch、固定 seed，看 NaN 是否能在几步内复现
+        correct: true
+      - id: c
+        text: 加 torch.autograd.detect_anomaly() 然后在 64 卡上重跑
+      - id: d
+        text: 升级 PyTorch 版本
+    explanation: |
+      第一步永远是最小复现：
+      1. 把实验从 64 卡缩到 1-2 卡
+      2. 固定 seed
+      3. 用小 batch 跑几步
+
+      如果 NaN 在最小复现中也出现 → 问题在模型/数据/超参，和分布式无关。
+      如果最小复现中不出现 → 问题可能和分布式（gradient averaging、loss scaling）有关。
+
+      在 64 卡上跑 detect_anomaly 会极慢（detect_anomaly 有 10-100x 开销），
+      而且 500 步才出的问题可能要跑几个小时才能复现。先缩小规模。
+
+  - id: q2_baseline_choice
+    prompt: |
+      你把 HuggingFace 模型接入了自己的训练框架（加了 TP + packed sequence），
+      发现 loss 比 HF Trainer 高 0.3。应该选哪个 baseline 开始对比？
+    options:
+      - id: a
+        text: 直接对比自己框架（TP + packed）和 HF Trainer
+      - id: b
+        text: 先单卡 + 未 packed + eager attention 跑自己框架，和 HF Trainer 单卡对比
+        correct: true
+      - id: c
+        text: 不需要 baseline，直接查代码
+      - id: d
+        text: 把 HF Trainer 也加上 TP + packed 来对比
+    explanation: |
+      单变量原则：你同时改了两个东西（TP + packed），必须分步验证。
+
+      正确路径：
+      1. 自己框架（单卡 + 未 packed + eager）vs HF Trainer 单卡
+         → 如果 loss 一致，说明基础接入没问题
+      2. 加 packed → 看 loss 是否偏移
+         → 如果偏移，问题在 packed 的 attention mask / position_ids
+      3. 加 TP → 看 loss 是否偏移
+         → 如果偏移，问题在 TP 通信
+
+      直接对比两个都有多个变化的版本，出了问题你不知道归因。
+
+  - id: q3_tensor_align
+    prompt: |
+      逐层 tensor 对齐时，你发现 embedding 输出完全一致，
+      layer 0 attention 输出的 cosine similarity 降到 0.85。最可能的原因是？
+    options:
+      - id: a
+        text: Embedding 层有 bug，只是恰好结果对上了
+      - id: b
+        text: Attention 层的实现有差异（如 mask、position_ids、scale factor）
+        correct: true
+      - id: c
+        text: 数值精度问题，FP16 的正常误差
+      - id: d
+        text: 随机种子没固定好
+    explanation: |
+      Cosine similarity 0.85 说明实质性偏差（不是数值精度问题，那通常 >0.999）。
+
+      因为 embedding 完全一致 → 输入没问题。
+      Layer 0 attention 偏差大 → 问题出在 attention 计算本身。
+
+      常见原因：
+      - attention_mask 不一致（一个有 causal mask，一个没有）
+      - position_ids 不一致（RoPE 用的 position 不同）
+      - attention scale factor 不同（有的除 sqrt(d)，有的不除）
+      - packed 场景下 mask 没隔离不同样本
+
+      FP16 精度误差的 cosine similarity 通常 > 0.9999，0.85 绝对不是精度问题。
+
+  - id: q4_multi_gpu_hang
+    prompt: |
+      4 卡 DDP 训练，跑到第 10 步整个程序 hang 住（不报错、不退出）。
+      你设了 `NCCL_DEBUG=INFO`，发现只有 rank 0,1,2 打了 "AllReduce" 日志，
+      rank 3 停在 "Backward" 之前。最可能的原因？
+    options:
+      - id: a
+        text: Rank 3 的网卡坏了
+      - id: b
+        text: Rank 3 的 forward 路径和其他 rank 不同，导致某些参数没有 gradient，DDP 等不到 rank 3 的 allreduce
+        correct: true
+      - id: c
+        text: NCCL 版本不兼容
+      - id: d
+        text: Rank 3 的数据有 NaN
+    explanation: |
+      DDP 的 allreduce 是 collective 操作——所有 rank 必须到达同一个点。
+      如果 rank 3 没到达 allreduce，其他 3 个 rank 会永远等下去 → hang。
+
+      Rank 3 停在 backward 之前，说明它在 forward 中卡住了或者走了不同分支。
+
+      常见原因：
+      1. 某些条件判断依赖数据内容（如 `if batch has images`），rank 3 的 batch
+         恰好没有图片，走了不同路径，某些参数没参与计算 → 没有 gradient。
+      2. DDP 的 `find_unused_parameters=False` 时，如果某些参数没 gradient，
+         allreduce 会死锁。
+
+      修复：`find_unused_parameters=True`，或确保所有 rank 走相同的计算路径。
+
+  - id: q5_time_measurement
+    prompt: |
+      你测到一个 GPU kernel 只需要 0.01ms，但整个 training step 却需要 50ms。
+      你在每个 major op 后都加了 `elapsed = time.time() - start` 来测时间。
+      最可能的问题是？
+    options:
+      - id: a
+        text: 某个 op 有 bug 导致性能极差
+      - id: b
+        text: 你没有在 time.time() 前后加 torch.cuda.synchronize()，测的是 CPU dispatch 时间而不是 GPU 时间
+        correct: true
+      - id: c
+        text: time.time() 精度不够
+      - id: d
+        text: GPU 型号太老
+    explanation: |
+      这是 L01.5 教过的核心概念：GPU 异步执行。
+
+      `time.time()` 只能测 CPU 端时间。对于 GPU op：
+      - 不加 sync：测到的是 dispatch + launch 时间（通常 < 0.1ms）
+      - 加 sync：测到的才是 GPU 真实执行时间
+
+      正确测法：
+      ```python
+      torch.cuda.synchronize()
+      start = time.time()
+      output = op(input)
+      torch.cuda.synchronize()
+      elapsed = time.time() - start
+      ```
+
+      或者用 CUDA Event（更精确且不阻塞 pipeline）：
+      ```python
+      start_event = torch.cuda.Event(enable_timing=True)
+      end_event = torch.cuda.Event(enable_timing=True)
+      start_event.record()
+      output = op(input)
+      end_event.record()
+      torch.cuda.synchronize()
+      elapsed = start_event.elapsed_time(end_event)
+      ```

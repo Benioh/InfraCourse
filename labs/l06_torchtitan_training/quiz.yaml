@@ -1,23 +1,39 @@
 mission: l06_torchtitan_training
-title: L03 Quiz · Activation Checkpoint 设计权衡
+title: L07 Quiz · Activation Checkpoint 设计权衡
 pass_threshold: 1.0
 description: |
   这 5 题打中 activation checkpoint（recompute）的核心权衡——
   时间 vs 显存、何时 ckpt 何时不 ckpt、与 DDP/TP 的交互。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L07 在训练内存主线中的位置
+    kind: doc
+    path: labs/l06_torchtitan_training/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 activation memory 讲到 selective checkpoint
+    kind: doc
+    path: labs/l06_torchtitan_training/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch 和 TorchTitan 路径阅读
+    kind: doc
+    path: labs/l06_torchtitan_training/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l06_torchtitan_training/patch/task.md
-  - title: 跑 notebook n06 · activation recompute
-    kind: notebook
-    path: notebooks/n06_activation_recompute.ipynb
-  - title: 读 TorchTitan apply_ac 源码
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 TorchTitan parallel dims
     kind: source
     path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
-  - title: 读 PyTorch torch.utils.checkpoint 源码
+    estimate_min: 10
+  - title: 对照 selective checkpoint reference
     kind: source
-    path: docs/术语表.md
+    path: labs/l06_torchtitan_training/patch/reference/selective_ckpt.py
+    estimate_min: 10
 
 questions:
   - id: q1_what_ckpt_saves
@@ -175,6 +191,6 @@ questions:
         - 如果你有多机 + InfiniBand：直接 ZeRO-3 把 activation 切到不同 rank
 
       实际生产：DeepSpeed ZeRO-3 + offload + selective ckpt 三件套组合。
-      本关只学 ckpt 这一项；L05 Megatron scale 那关会接触 ZeRO 的实现。
+      本关只学 ckpt 这一项；后续 Megatron scale 那关会接触 ZeRO 的实现。
 
       面试金句："如果只用一个工具：ckpt 最简单最稳。如果有钱：上 ZeRO-3 + offload。"

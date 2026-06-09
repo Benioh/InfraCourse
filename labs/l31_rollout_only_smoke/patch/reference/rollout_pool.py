@@ -1,4 +1,4 @@
-"""Reference solution for L10.5 Patch · RolloutPool."""
+"""Reference solution for L35 Patch · RolloutPool."""
 
 from __future__ import annotations
 

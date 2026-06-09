@@ -1,35 +1,57 @@
-# L06 · 多模态 Collator（图像 + 语音 + 文本）★ 核心
+# L18 · Multimodal Data Collator
 
-> 本关只做一件事：**实现一个能把变长 image + audio + text 打包成 batch tensor 的 collator**——直接是 LLaVA / Qwen2-VL / Qwen-Audio 的数据管道核心。
+L18 讲多模态训练数据进入模型前的 batch 合同：文本 token、图像 tensor 和音频 mel 帧怎样被整理成同一个 `input_ids`、`attention_mask`、`modal_type_ids` 和 side tensors。
 
-写完这关，Capstone Stage A 你能直接复用这个 collator 拼装 COCO 图 + LibriSpeech 语音 + Qwen tokenizer 的 batch。
+## 学习路线
 
-## 闭环
+1. 读 [system_map.md](system_map.md)：先确认 L18 在数据与多模态主线中的位置。
+2. 读 [lecture.md](lecture.md)：从 batch 合同、占位 token、mask 和 side channel 讲到真实 dataloader。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 patch、MiniInfra、Megatron Energon 的主路径带读源码。
+4. 做 quiz：检查 placeholder、mask、audio padding、image indices 和 dataloader 边界。
+5. 做 patch：实现 `multimodal_collate` 的最小行为合同。
+6. 跑 smoke：构建 toy manifest、tar shard，并检查 loader artifact。
+7. 填写 [outputs/data_pipeline_template.md](outputs/data_pipeline_template.md)，保留复盘证据。
+
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 所属主线 | Data pipeline / Multimodal training input |
+| 解决的问题 | 变长 image + audio + text 样本如何进入同一个 Transformer batch |
+| 上游 | manifest、dataset、processor、WebDataset shard |
+| 下游 | image/audio encoder、embedding replacement、LLM forward |
+| patch 验收 | `input_ids`、mask、side tensors 和 batch indices 的最小合同 |
+
+## 你会学到什么
+
+- 解释 `input_ids`、`attention_mask`、`modal_type_ids` 的不同职责。
+- 按 `[image tokens][audio tokens][text tokens]` 拼接变长样本，并 pad 到 batch 内统一长度。
+- 用 `pixel_values/image_batch_indices` 和 `audio_features/audio_mask/audio_batch_indices` 传递真实模态内容。
+- 读懂 Megatron multimodal task encoder 如何把图片、tokens、labels 和 tiles 组织成 batch。
+- 区分 collator、processor、dataloader worker、GPU encoder 的工程边界。
+
+## Patch 闭环
 
 ```bash
 cat labs/l17_megatron_multimodal_data/patch/task.md
 $EDITOR labs/l17_megatron_multimodal_data/patch/starter/multimodal_collate.py
-make patch-test M=l17_megatron_multimodal_data   # 7 个测试，CPU OK
+IMPL=reference make patch-test M=l17_megatron_multimodal_data
 ```
 
-## 测试覆盖
+smoke：
 
-| 测试 | 验证 |
+```bash
+python labs/l17_megatron_multimodal_data/scripts/run_multimodal_data_lab.py --run-id l18_smoke
+```
+
+## 课后产物
+
+| 产物 | 用途 |
 |---|---|
-| `test_text_only_batch` | 没图没音时形状/值正确，pixel_values=None |
-| `test_with_image_batch` | 前 N 个 token 是 IMAGE_TOKEN_ID，modal=1 |
-| `test_with_audio_batch` | audio_mask 正确标记真实位置 |
-| `test_mixed_modality_batch` | 4 种组合（纯文本 / +图 / +音 / 三模态）混合 |
-| `test_padding_blocks_attention` | padding 位置 attention_mask=False |
-| `test_audio_truncation` | 超长音频被截断到 max_audio_frames |
-| `test_image_batch_indices_correct` | pixel_values 顺序与 batch_indices 一致 |
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 定位 manifest、collator、shard 和 dataloader 问题 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 复习 patch、MiniInfra 和 Megatron 源码主路径 |
+| [outputs/data_pipeline_template.md](outputs/data_pipeline_template.md) | 记录一次数据管线 smoke 或训练排查 |
 
-## 卡住怎么办
+## 下一讲
 
-1. 重读 task.md 的"序列拼接约定"那段。
-2. `make patch-hint M=l17_megatron_multimodal_data`。
-3. `make patch-show-solution M=l17_megatron_multimodal_data`。
-
-## 进入下一关
-
-`make patch-test` 全绿后，继续做源码理解口试。下一关 [L06.3 数据工程](../l18_data_engineering/README.md) 让你写 minhash 去重。
+L19 会继续进入数据工程：MinHash 去重、WebDataset pipeline、detshuffle 和 shard resume。

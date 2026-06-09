@@ -1,5 +1,5 @@
 """
-Acceptance rate 滑动窗口跟踪（L08.7 教学）。
+Acceptance rate 滑动窗口跟踪（L25 教学）。
 
 教学目的：
     投机解码的核心指标是 acceptance rate（draft 候选被 target 接受的比例）。

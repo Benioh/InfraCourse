@@ -1,4 +1,4 @@
-"""Reference solution for L08.5 Patch · AWQ-lite quantization."""
+"""Reference solution for L24 Patch · AWQ-lite quantization."""
 
 from __future__ import annotations
 

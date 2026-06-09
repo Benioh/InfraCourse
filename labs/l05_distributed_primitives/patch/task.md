@@ -1,11 +1,11 @@
-# L02 Patch · 手写 Tensor Parallel Linear
+# L06 Patch · 手写 Tensor Parallel Linear
 
 ## 你要交付什么
 
 在 `starter/tp_linear.py` 里把两个类填完整：
 
-- `ColumnParallelLinear`：把权重沿 **输出维度** 切到 N 张卡上，forward 是 broadcast input + 各卡算各自分片，backward 是 all-reduce grad-input。
-- `RowParallelLinear`：把权重沿 **输入维度** 切，forward 各卡算分片输出再 all-reduce 求和，backward 把 grad-output 直接广播给每张卡。
+- `ColumnParallelLinear`：把权重沿 **输出维度** 切到 N 个 rank 上，forward 各 rank 算自己的输出片段，backward 对 grad-input 做 all-reduce。
+- `RowParallelLinear`：把权重沿 **输入维度** 切，forward 各 rank 算 partial output 再 all-reduce 求和，backward 沿本地输入分片回传梯度。
 
 **禁止使用 `megatron.core.tensor_parallel`** 或 `torch.nn.parallel.DistributedDataParallel`，因为本关的目的就是让你自己用 `autograd.Function` 写一遍切分 + 通信。允许使用 `torch.distributed` 提供的 `all_reduce` / `all_gather`。
 
@@ -40,13 +40,13 @@ class ColumnParallelLinear(nn.Module):
 ## 不变量（写代码时心里要装着）
 
 1. **数学正确性**：TP=N 的 forward 必须与 TP=1 在同一输入上 `torch.allclose(atol=1e-5)`。
-2. **梯度正确性**：`torch.autograd.gradcheck` 在 `(in=8, out=16, world=2)` 的最小配置下必须通过（用 fp64）。
+2. **梯度正确性**：2-rank fp64 测试里的 `grad_x` 和本地 `grad_W` 切片必须与单卡 `nn.Linear` 对齐。
 3. **通信位置**：
    - Column forward：无 collective（输入全卡相同，输出可选 all-gather）
    - Column backward：grad-input 必须 all-reduce
    - Row forward：output 必须 all-reduce
    - Row backward：grad-output 直接广播（无 collective）
-4. **bias 处理**：Column 的 bias 和权重一起切；Row 的 bias 只在 rank 0 加（防止重复加 N 次）。
+4. **bias 处理**：Column 的 bias 和权重一起切；Row 的 bias 是 replicated 完整向量，必须在 all-reduce 之后加一次。
 
 ## 怎么验证（这就是评分）
 
@@ -75,12 +75,12 @@ torchrun --standalone --nproc_per_node=2 -m pytest patch/tests/test_patch.py -v
 ## 卡住怎么办
 
 1. 先在 `notebooks/n04_tensor_parallel_linear.ipynb` 用矩阵切分图把 forward / backward 通信路径画一遍。
-2. 30 分钟解不出，运行 `make patch-hint M=l05_distributed_primitives` 查看 `reference/tp_linear.py` 的关键骨架（不是完整答案，是关键的 5 个函数签名 + 注释）。
+2. 30 分钟解不出，运行 `make patch-hint M=l05_distributed_primitives` 查看 `reference/tp_linear.py` 的关键骨架。
 3. 仍然卡住，运行 `make patch-show-solution M=l05_distributed_primitives` 看完整答案——但你应该尝试**先关掉答案，自己照着写一遍**，否则等于没学。
 
 ## 写完之后你能做什么
 
 - 解释 Megatron `ColumnParallelLinear` 源码每一行（你已经写过同样的东西）。
 - 在面试里讲清"TP forward 哪里需要 collective、backward 哪里需要 collective"。
-- 在 L05.5 的 MoE 里复用这两个 primitive 当 expert FFN。
+- 在后续 MoE 课程里复用这两个 primitive 当 expert FFN。
 - 在 Capstone Stage A 里直接用它们搭 image / audio projector 的 TP 版本。

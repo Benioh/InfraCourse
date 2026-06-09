@@ -1,47 +1,457 @@
 id: l18_data_engineering
-title: MinHash 文本去重（含 LSH 数学）
-level: L06.3
-act: 第 2 章：数据与多模态
+title: 'L19 · Data Engineering: MinHash, WebDataset, Shard Resume'
+level: L19
+act: 第 2 章：训练系统、并行与数据
 role: 数据工程师
 priority: 核心
-estimated_minutes: 90
+estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
-  - Python stdlib (hashlib / random)
-
+- Python stdlib
+- MiniInfra
 patch:
   description: |
-    实现 minhash_signature(text, num_perm) + jaccard_estimate + dedup。
-    用 char-level n-gram shingle + universal hashing 算签名；用签名 hit ratio
-    估计 Jaccard；用 first-occurrence 策略去重。
+    实现 `minhash_signature`、`jaccard_estimate` 和 `dedup`：
+    用 char-level shingle 和多组稳定哈希生成签名，用签名相同位置比例估计 Jaccard，
+    再按 first-occurrence 策略返回保留索引。
   task_md: labs/l18_data_engineering/patch/task.md
   starter_file: labs/l18_data_engineering/patch/starter/dedup_minhash.py
   reference_file: labs/l18_data_engineering/patch/reference/dedup_minhash.py
   test_command: make patch-test M=l18_data_engineering
   status_file: labs/l18_data_engineering/patch/.last_run.json
   test_count: 5
-  test_kind: 结果对比
-
+  test_kind: MinHash 去重行为合同验证
 source_reading:
-  - title: datasketch / RedPajama dedup pipeline
-    repo_path: docs/术语表.md
-    focus: 真生产用 LSH banding 加速；本关只做朴素 O(N²)，先掌握签名数学
-
+- title: Patch starter
+  repo_path: labs/l18_data_engineering/patch/starter/dedup_minhash.py
+  focus: 学生需要补齐的 MinHash 最小合同
+  highlights:
+  - title: 读 shingles
+    lines:
+    - 20
+    - 24
+    note: |
+      L20-L24: char-level shingle 处理短文本和普通文本两种边界。
+  - title: 读 seeded hash
+    lines:
+    - 27
+    - 30
+    note: |
+      L27-L30: 每个 seed 生成一组 `(a,b)`，用于不同签名维度。
+  - title: 读 signature 说明
+    lines:
+    - 36
+    - 45
+    note: |
+      L36-L45: docstring 列出 text 到 MinHash signature 的四步。
+  - title: 读 signature TODO 前半
+    lines:
+    - 46
+    - 55
+    note: |
+      L46-L55: TODO 要先生成 shingles，并用 md5 得到稳定基础哈希。
+  - title: 读 signature TODO 后半
+    lines:
+    - 56
+    - 62
+    note: |
+      L56-L62: 每个 permutation 取最小哈希，返回长度为 num_perm 的签名。
+  - title: 读 estimate TODO
+    lines:
+    - 65
+    - 72
+    note: |
+      L65-L72: Jaccard 估计就是相同位置数量除以签名长度。
+  - title: 读 dedup TODO
+    lines:
+    - 75
+    - 84
+    note: |
+      L75-L84: dedup 返回保留索引，生产版本才会用 LSH 加速。
+  - title: 读 dedup 扫描
+    lines:
+    - 85
+    - 95
+    note: |
+      L85-L95: 当前样本和任一已保留签名相似度达阈值时被丢弃。
+- title: Patch reference
+  repo_path: labs/l18_data_engineering/patch/reference/dedup_minhash.py
+  focus: 参考实现中的签名、估计和保留索引
+  highlights:
+  - title: 读 shingles
+    lines:
+    - 13
+    - 16
+    note: |
+      L13-L16: reference 使用 char-level n-gram 集合。
+  - title: 读 seeded hash
+    lines:
+    - 19
+    - 21
+    note: |
+      L19-L21: `random.Random(seed)` 保证同一 seed 可复现。
+  - title: 读 base hashes
+    lines:
+    - 24
+    - 31
+    note: |
+      L24-L31: 文本先变成 shingles，再变成稳定整数哈希。
+  - title: 读 signature loop
+    lines:
+    - 32
+    - 37
+    note: |
+      L32-L37: 每个维度使用一组 `(a,b)`，取 transformed hash 最小值。
+  - title: 读 jaccard estimate
+    lines:
+    - 40
+    - 45
+    note: |
+      L40-L45: 两个签名长度必须一致，估计值是 hit ratio。
+  - title: 读 dedup 初始化
+    lines:
+    - 48
+    - 56
+    note: |
+      L48-L56: 先计算所有签名，再准备 keep indices 和 keep signatures。
+  - title: 读 dedup 逻辑
+    lines:
+    - 57
+    - 62
+    note: |
+      L57-L62: first-occurrence 策略保留第一个未撞上阈值的样本。
+- title: Patch tests
+  repo_path: labs/l18_data_engineering/patch/tests/test_patch.py
+  focus: patch-test 对 MinHash 行为的验收边界
+  highlights:
+  - title: 读 signature size
+    lines:
+    - 21
+    - 24
+    note: |
+      L21-L24: 签名长度必须等于 num_perm。
+  - title: 读 identical text
+    lines:
+    - 27
+    - 33
+    note: |
+      L27-L33: 相同文本签名相等，估计值为 1.0。
+  - title: 读 near duplicate
+    lines:
+    - 36
+    - 43
+    note: |
+      L36-L43: 只改一个词的文本估计值应高于阈值。
+  - title: 读 distinct text
+    lines:
+    - 45
+    - 49
+    note: |
+      L45-L49: 无关文本估计值应低于 0.2。
+  - title: 读 exact dedup
+    lines:
+    - 52
+    - 60
+    note: |
+      L52-L60: 完全重复样本按 first occurrence 保留索引 `[0, 2]`。
+  - title: 读 distinct keep
+    lines:
+    - 63
+    - 72
+    note: |
+      L63-L72: 完全不同文本不应被误删。
+- title: MiniInfra MinHash
+  repo_path: mini_infra/data/minhash_dedup.py
+  focus: MiniInfra 中的近重复检测和 dedup ratio
+  highlights:
+  - title: 读 shingles
+    lines:
+    - 30
+    - 39
+    note: |
+      L30-L39: word-level width-gram shingle，并说明 width 的误差边界。
+  - title: 读 stable hash
+    lines:
+    - 42
+    - 44
+    note: |
+      L42-L44: sha1 加 seed 形成稳定哈希。
+  - title: 读 signature
+    lines:
+    - 47
+    - 51
+    note: |
+      L47-L51: 每个 seed 取所有 shingles 的最小哈希。
+  - title: 读 signature similarity
+    lines:
+    - 54
+    - 59
+    note: |
+      L54-L59: 按相同位置比例计算签名相似度。
+  - title: 读 true jaccard
+    lines:
+    - 62
+    - 67
+    note: |
+      L62-L67: 真实 Jaccard 用 shingle 交并比计算，供报告对照。
+  - title: 读 pair scan 条件
+    lines:
+    - 70
+    - 76
+    note: |
+      L70-L76: 枚举文档对，超过阈值时准备记录 near duplicate。
+  - title: 读 pair scan payload
+    lines:
+    - 77
+    - 83
+    note: |
+      L77-L83: duplicate pair payload 记录左右索引、MinHash 估计和真实 Jaccard。
+  - title: 读 dedup ratio
+    lines:
+    - 84
+    - 89
+    note: |
+      L84-L89: 报告 num_docs、threshold、duplicate_pairs 和 dedup_ratio。
+- title: MiniInfra WDS pipeline
+  repo_path: mini_infra/data/wds_pipeline.py
+  focus: WebDataset-style throughput、detshuffle、dedup 和 recovery smoke
+  highlights:
+  - title: 读 pipeline 输入
+    lines:
+    - 44
+    - 50
+    note: |
+      L44-L50: smoke 接收 shards、workers、prefetch、shuffle 和 corrupt_count。
+  - title: 读 pipeline 状态
+    lines:
+    - 51
+    - 56
+    note: |
+      L51-L56: detshuffle、corrupt shard、recovery 和 dedup 都在同一条路径里计算。
+  - title: 读 pipeline 输出
+    lines:
+    - 57
+    - 67
+    note: |
+      L57-L67: 输出吞吐、p99 latency、dedup_ratio、recovery 和 duplicate pairs。
+  - title: 读 CLI 和 artifact
+    lines:
+    - 70
+    - 82
+    note: |
+      L70-L82: CLI 参数进入 run 目录，并写出 command snapshot 和 throughput artifact。
+  - title: 读 dedup artifact
+    lines:
+    - 83
+    - 87
+    note: |
+      L83-L87: dedup_report 只保留 dedup_ratio 和 duplicate pairs。
+- title: MiniInfra shard resume
+  repo_path: mini_infra/data/shard_resume.py
+  focus: corrupt shard、resume cursor 和 deterministic shuffle
+  highlights:
+  - title: 读 recovery 输入
+    lines:
+    - 28
+    - 40
+    note: |
+      L28-L40: recovery_plan 接收 shard list、corrupt set 和 start_after cursor。
+  - title: 读 recovery 扫描
+    lines:
+    - 41
+    - 51
+    note: |
+      L41-L51: cursor 前 shard 和 corrupt shard 分别进入 skipped 列表。
+  - title: 读 recovery 输出
+    lines:
+    - 52
+    - 59
+    note: |
+      L52-L59: 输出 recovered_shards、lost_samples、recovered 和 skipped。
+  - title: 读 detshuffle
+    lines:
+    - 62
+    - 67
+    note: |
+      L62-L67: detshuffle 用 seed 和 shard 名生成稳定排序 key。
+- title: Smoke entry
+  repo_path: labs/l18_data_engineering/scripts/run_smoke.py
+  focus: 半任务 smoke 入口
+  highlights:
+  - title: 读 run_smoke
+    lines:
+    - 13
+    - 20
+    note: |
+      L13-L20: CLI 将 run id 和 mode 传给 `run_half_mission`。
+- title: WDS bench
+  repo_path: labs/l18_data_engineering/scripts/bench_wds.py
+  focus: workers 和 prefetch 如何进入 WDS 模拟
+  highlights:
+  - title: 读 bench CLI
+    lines:
+    - 12
+    - 22
+    note: |
+      L12-L22: workers 和 prefetch 参数进入 `simulate_pipeline`，结果以 JSON 打印。
+- title: Corrupt drill
+  repo_path: labs/l18_data_engineering/scripts/corrupt_drill.py
+  focus: 坏 shard 恢复最小演示
+  highlights:
+  - title: 读 corrupt drill
+    lines:
+    - 12
+    - 16
+    note: |
+      L12-L16: 构造三个 shard，并把指定 shard 放入 corrupt set。
 mini_infra_targets:
-  - mini_infra/data/
-
+- mini_infra/data/minhash_dedup.py
+- mini_infra/data/wds_pipeline.py
+- mini_infra/data/shard_resume.py
 notebooks:
-  - notebooks/n16_minhash_dedup.ipynb
-
+- notebooks/n16_minhash_dedup.ipynb
 tickets:
-  - dedup_collision_002
-  - shard_corrupt_003
-  - wds_slow_io_001
-
-prereq: l17_megatron_multimodal_data
-next_lab: l19_vllm_serving_baseline
-
+- dedup_collision_002
+- shard_corrupt_003
+- wds_slow_io_001
 gpu_modes:
   local: CPU 即可
-  cluster: 大数据集去重时分布式（可选）
+  cluster: 大数据集去重、shard throughput 和 resume cursor 验证
+lesson:
+  opening: |-
+    # L19：Data Engineering - MinHash, WebDataset, Shard Resume
+
+    本讲把训练前的数据工程拆成三层：内容质量、供给性能和容灾恢复。MinHash 负责找近重复文本，WebDataset-style pipeline 负责把 shard 顺序送到 worker，shard resume 负责坏数据和重启后的顺序。
+  sections:
+  - title: 系统位置：数据质量、供给和容灾
+    plain_explanation: L19 接在 L18 的 collator 后面。collator 处理单个 batch 的字段合同；L19 处理数据集级问题：哪些文本重复，哪些 shard 影响吞吐，坏 shard 出现时是否能记录跳过和恢复位置。
+    mental_model: 质量决定训练什么，供给决定训练能否喂满 GPU，容灾决定重启后是否还在同一条数据轨迹上。
+    why_it_matters: 数据问题经常不抛异常，只会在训练效率、eval 泄漏或样本重复读中出现。
+    source_refs:
+    - title: 读 pipeline 输出
+      repo_path: mini_infra/data/wds_pipeline.py
+      lines:
+      - 57
+      - 67
+      note: |
+        L57-L67: 输出吞吐、p99 latency、dedup_ratio、recovery 和 duplicate pairs。
+    checkpoint_questions:
+    - L19 为什么不能只讲 MinHash 算法？
+    - '`dedup_ratio` 和 `wds_throughput_mbs` 分别回答什么问题？'
+  - title: MinHash：从文本到固定长度签名
+    plain_explanation: MinHash 先把文本切成 shingle 集合，再用多组稳定哈希函数生成固定长度 signature。两个集合 Jaccard 越高，它们在同一维签名上相同的概率越高。`num_perm` 越大，估计越稳，计算和存储成本也越高。
+    mental_model: 每个签名维度是一次稳定抽样，签名相同位置比例近似 Jaccard。
+    why_it_matters: 大规模数据不能保存和比较完整 shingle 集合，固定长度签名让近重复检测可落地。
+    source_refs:
+    - title: 读 base hashes
+      repo_path: labs/l18_data_engineering/patch/reference/dedup_minhash.py
+      lines:
+      - 24
+      - 31
+      note: |
+        L24-L31: 文本先变成 shingles，再变成稳定整数哈希。
+    - title: 读 signature loop
+      repo_path: labs/l18_data_engineering/patch/reference/dedup_minhash.py
+      lines:
+      - 32
+      - 37
+      note: |
+        L32-L37: 每个维度使用一组 `(a,b)`，取 transformed hash 最小值。
+    checkpoint_questions:
+    - 为什么不能用 Python 内置 `hash()` 做基础哈希？
+    - '`num_perm` 增大时成本怎样变化？'
+  - title: Dedup：first-occurrence 和阈值审计
+    plain_explanation: |-
+      本 patch 的 dedup 从前往后扫描，当前样本和任一已保留样本的估计 Jaccard 达到阈值时就丢弃。它返回保留索引，方便上游 manifest、caption 文件和训练日志保持对应关系。
+
+      阈值不能只凭感觉定。真实数据要抽样查看 detected pairs，按语言、长度和来源分桶统计误删和漏删。
+    mental_model: keep list 是已入库样本；新样本只要和已入库样本足够像，就不再进入 keep list。
+    why_it_matters: 去重会改变训练数据分布，误删正常样本会伤害多样性。
+    source_refs:
+    - title: 读 dedup 初始化
+      repo_path: labs/l18_data_engineering/patch/reference/dedup_minhash.py
+      lines:
+      - 48
+      - 56
+      note: |
+        L48-L56: 先计算所有签名，再准备 keep indices 和 keep signatures。
+    - title: 读 dedup 逻辑
+      repo_path: labs/l18_data_engineering/patch/reference/dedup_minhash.py
+      lines:
+      - 57
+      - 62
+      note: |
+        L57-L62: first-occurrence 策略保留第一个未撞上阈值的样本。
+    - title: 读 exact dedup
+      repo_path: labs/l18_data_engineering/patch/tests/test_patch.py
+      lines:
+      - 52
+      - 60
+      note: |
+        L52-L60: 完全重复样本按 first occurrence 保留索引 `[0, 2]`。
+    checkpoint_questions:
+    - 为什么 dedup 返回索引比返回文本更适合数据管线？
+    - dedup ratio 异常偏高时先检查哪些配置？
+  - title: Shard pipeline：吞吐、detshuffle 和恢复
+    plain_explanation: 文本去重结果最终要回到 manifest 或 shard。WDS pipeline 关心 worker、prefetch、shard 顺序和坏 shard 处理。detshuffle 让固定 seed
+      下的 shard 顺序可复现；recovery_plan 记录 corrupt shard、lost samples 和 resume cursor。
+    mental_model: MinHash 管内容相似，WDS 管数据供给，shard resume 管顺序和故障边界。
+    why_it_matters: 数据慢会让 GPU 等待，坏 shard 静默跳过会改变训练样本集合。
+    source_refs:
+    - title: 读 pipeline 状态
+      repo_path: mini_infra/data/wds_pipeline.py
+      lines:
+      - 51
+      - 56
+      note: |
+        L51-L56: detshuffle、corrupt shard、recovery 和 dedup 都在同一条路径里计算。
+    - title: 读 recovery 扫描
+      repo_path: mini_infra/data/shard_resume.py
+      lines:
+      - 41
+      - 51
+      note: |
+        L41-L51: cursor 前 shard 和 corrupt shard 分别进入 skipped 列表。
+    - title: 读 detshuffle
+      repo_path: mini_infra/data/shard_resume.py
+      lines:
+      - 62
+      - 67
+      note: |
+        L62-L67: detshuffle 用 seed 和 shard 名生成稳定排序 key。
+    checkpoint_questions:
+    - 重启后重复读样本时，应该先查 cursor 还是 MinHash threshold？
+    - worker 和 prefetch 变化主要影响哪个指标？
+  - title: 验收：patch-test、notebook 和 smoke artifact
+    plain_explanation: patch-test 只验证函数级合同。notebook 用于观察 `num_perm`、threshold 和 shingle 宽度的影响。smoke 生成 WDS throughput、dedup
+      report 和 shard recovery artifact，用来判断数据链路是否能进入训练。
+    mental_model: patch-test 查算法函数，notebook 查参数直觉，smoke 查系统证据。
+    why_it_matters: 去重错误和数据供给错误都可能静默改变训练结果，必须留下可复查 artifact。
+    source_refs:
+    - title: 读 run_smoke
+      repo_path: labs/l18_data_engineering/scripts/run_smoke.py
+      lines:
+      - 13
+      - 20
+      note: |
+        L13-L20: CLI 将 run id 和 mode 传给 `run_half_mission`。
+    - title: 读 bench CLI
+      repo_path: labs/l18_data_engineering/scripts/bench_wds.py
+      lines:
+      - 12
+      - 22
+      note: |
+        L12-L22: workers 和 prefetch 参数进入 `simulate_pipeline`，结果以 JSON 打印。
+    checkpoint_questions:
+    - patch-test 和 smoke 各自证明什么？
+    - smoke artifact 中哪些字段能说明坏 shard 被记录下来？
+lesson_docs:
+- title: 系统地图
+  path: labs/l18_data_engineering/system_map.md
+  description: L19 在数据主线中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l18_data_engineering/lecture.md
+  description: 从 MinHash 数学、dedup 策略讲到 WebDataset-style pipeline 和 shard resume。
+- title: 源码带读讲义
+  path: labs/l18_data_engineering/source_walkthrough.md
+  description: 按 patch、MiniInfra 和 smoke 脚本组织的源码阅读路线。

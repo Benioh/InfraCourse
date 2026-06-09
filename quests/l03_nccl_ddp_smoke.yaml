@@ -1,15 +1,13 @@
 id: l03_nccl_ddp_smoke
-title: 手写 ManualDDP（grad all-reduce）
-level: L01.5
+title: L04 · 手写 ManualDDP（grad all-reduce）
+level: L04
 act: 第 0 章：分布式系统基础
 role: NCCL/DDP 学徒
 priority: 核心
 estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch Distributed
-
 patch:
   description: |
     不用 torch.nn.parallel.DistributedDataParallel，自己写 ManualDDP：
@@ -22,28 +20,375 @@ patch:
   status_file: labs/l03_nccl_ddp_smoke/patch/.last_run.json
   test_count: 5
   test_kind: 结果对比（与 PyTorch DDP grad 等价）
+lesson:
+  opening: |
+    这节课解决数据并行训练里的第一个硬问题：多个 rank 各自 backward 后，怎样在 optimizer step 前拿到同一份平均梯度。每个 rank 处理不同数据，local grad 通常不同；如果直接各自 step，模型副本会分叉；如果只求和不平均，等效学习率会被 world size 放大。
 
-source_reading:
-  - title: PyTorch DDP reducer 设计
-    repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
-    focus: 看 ParallelDims 如何把 DDP/TP/PP/CP 维度组装在一起
-  - title: MiniInfra collective 实现
-    repo_path: mini_infra/distributed/collectives.py
-    focus: all_reduce 在主线骨架里如何被调用
+    本关先写一个教学版 ManualDDP。它不挂 autograd hook，不做 bucket，也不处理通信计算重叠。它只保留 DDP 的最小合同：forward 走本地模型，backward 后显式调用 synchronize_grads()，对每个有效 p.grad 做 all_reduce(SUM)，再除以 world_size。
+  sections:
+    - title: 问题和边界
+      plain_explanation: |
+        数据并行的输入是多个 rank、同一份初始参数、不同数据 shard。每个 rank 先独立 forward/backward，得到 local grad。DDP 的目标输出是在每个 rank 上得到相同 average grad，然后每个 rank 本地执行 optimizer.step。
 
+        本关只讲 data parallel 的梯度平均语义。它不实现 TP、PP、ZeRO/FSDP，也不覆盖真实 DDP 的 reducer、bucket、overlap、unused parameter 检测和容错。
+      mental_model: |
+        每个 rank 先给出本地修改建议，ManualDDP 把这些建议求平均，再把同一份平均建议交回每个 rank。
+      why_it_matters: |
+        分布式训练里很多数值偏差都会落到这条合同：梯度是否同步、是否平均、所有 rank 是否按同一顺序参加 collective。
+      source_refs:
+        - title: Starter contract
+          repo_path: labs/l03_nccl_ddp_smoke/patch/starter/manual_ddp.py
+          lines: [22, 27]
+          note: |
+            L22-L27: starter 说明这个 ManualDDP 不挂 hook，只在 backward 后同步。
+      common_confusions:
+        - 把 ManualDDP 当作完整生产 DDP；本关只保留平均梯度合同。
+        - 把 CPU/gloo patch-test 写成 GPU/NCCL 性能结论；它只验证语义。
+        - 把 forward 通信当成本关重点；本关的同步发生在 backward 后。
+      checkpoint_questions:
+        - 本关的 ManualDDP 保留了 DDP 的哪条最小合同？
+        - CPU/gloo patch-test 能证明什么，不能证明什么？
+        - 为什么每个 rank 在 optimizer.step 前必须看到同一份平均梯度？
+    - title: Rank 与 Process Group
+      plain_explanation: |
+        rank 是当前进程在通信组里的编号，world_size 是通信组中的进程数。process group 则定义哪些 rank 共同参加 collective。world_size 同时决定要启动几个 worker，以及梯度平均时要除以多少。
+
+        测试 harness 会给每个 worker 设置 MASTER_ADDR、MASTER_PORT、RANK 和 WORLD_SIZE，再初始化 gloo process group。smoke 脚本从环境变量读取 rank、local_rank 和 world_size，并根据设备选择 gloo 或 nccl。
+      mental_model: |
+        process group 是会议范围，rank 是座位号，world_size 是参会人数。每轮 collective 都要求同一范围内的人按同一顺序进入。
+      why_it_matters: |
+        rank 或 world_size 配错时，错误常表现为 hang。理解这些字段能把 launcher、代码分支和通信问题分开。
+      source_refs:
+        - title: Gloo worker init
+          repo_path: labs/l03_nccl_ddp_smoke/patch/tests/conftest.py
+          lines: [33, 44]
+          note: |
+            L33-L44: worker 设置环境变量、初始化 gloo process group，并运行指定 case。
+        - title: Smoke env and backend
+          repo_path: labs/l03_nccl_ddp_smoke/scripts/ddp_hello.py
+          lines: [31, 43]
+          note: |
+            L31-L43: smoke 读取 world_size/rank/local_rank，按设备选择 backend 并初始化 group。
+      common_confusions:
+        - 混用 global rank 和 local rank；前者用于全局通信编号，后者常用于本机设备选择。
+        - 认为 process group 初始化成功就证明梯度正确；还需要看 collective 和数值。
+        - world_size 为 1 时仍强行通信；本关要求 no-op。
+      checkpoint_questions:
+        - process group 决定 collective 的什么边界？
+        - global rank 和 local rank 分别常用于什么？
+        - world_size 为 1 时 synchronize_grads() 应怎样行为？
+    - title: All-Reduce 平均语义
+      plain_explanation: |
+        all-reduce 的输入是每个 rank 的 tensor，中间状态是通信库按指定 op 规约所有输入，输出是每个 rank 都得到同一份规约结果。dist.all_reduce(..., SUM) 的输出是求和结果，不会自动平均。
+
+        DDP 梯度语义需要 average grad。对于 world_size=2，某个参数的 local grad 分别是 g0 和 g1，目标结果是 (g0 + g1) / 2。忘记除以 world_size 会让梯度放大，等效更新幅度也会放大。
+      mental_model: |
+        all-reduce sum 像把所有数字加起来并发回每个人。平均这一步由 DDP 逻辑补上。
+      why_it_matters: |
+        忘记平均是手写 DDP 最常见的数值 bug；collective 顺序不一致则常导致 timeout 或 hang。
+      source_refs:
+        - title: Hello all-reduce
+          repo_path: labs/l03_nccl_ddp_smoke/scripts/ddp_hello.py
+          lines: [45, 48]
+          note: |
+            L45-L48: rank+1 tensor 经过 all_reduce(SUM)，随后进入 barrier。
+        - title: Averaged grad test
+          repo_path: labs/l03_nccl_ddp_smoke/patch/tests/worker_cases.py
+          lines: [69, 81]
+          note: |
+            L69-L81: 相同输入下，平均梯度应与单进程 baseline 对齐。
+      common_confusions:
+        - 以为 SUM 会自动平均；SUM 只返回求和。
+        - 以为通信 API 能跑就不会 hang；调用次数和顺序也必须一致。
+        - 把数值正确性和吞吐提升混在一起；二者需要分别验证。
+      checkpoint_questions:
+        - all_reduce(SUM) 的输出是什么？
+        - 忘记除以 world_size 会改变什么训练语义？
+        - 为什么所有 rank 的 collective 顺序必须一致？
+    - title: ManualDDP 实现
+      plain_explanation: |
+        ManualDDP.__init__ 只保存原模型、process group 和 world_size。它不能复制参数，也不管理 optimizer。forward 阶段仍调用原模型。
+
+        synchronize_grads() 的输入是已经完成 backward 的模型。它先处理 no-op 分支，再遍历参数，跳过 requires_grad=False 或 grad=None 的参数，对剩余 grad 执行 all_reduce(SUM)，最后原地除以 world_size。
+      mental_model: |
+        synchronize_grads() 是一个同步按钮：backward 写出 local grad，按钮把它们改成 average grad。
+      why_it_matters: |
+        手写朴素版本能把 DDP 的数学目标和生产 DDP 的性能工程分开。真实 DDP 多出的 hook 和 bucket主要服务于调度效率。
+      source_refs:
+        - title: Reference init
+          repo_path: labs/l03_nccl_ddp_smoke/patch/reference/manual_ddp.py
+          lines: [11, 15]
+          note: |
+            L11-L15: 构造函数保存 module、process_group 和 world_size。
+        - title: Reference synchronize
+          repo_path: labs/l03_nccl_ddp_smoke/patch/reference/manual_ddp.py
+          lines: [17, 24]
+          note: |
+            L17-L24: no-op、skip、all_reduce 和平均构成完整同步路径。
+        - title: Frozen params
+          repo_path: labs/l03_nccl_ddp_smoke/patch/tests/worker_cases.py
+          lines: [100, 112]
+          note: |
+            L100-L112: 测试 requires_grad=False 参数不会被同步函数错误处理。
+        - title: Partial grads
+          repo_path: labs/l03_nccl_ddp_smoke/patch/tests/worker_cases.py
+          lines: [119, 131]
+          note: |
+            L119-L131: 测试 grad=None 参数不会让 synchronize_grads() 报错。
+      common_confusions:
+        - 在构造函数里复制模型；本关要求保留同一份参数对象。
+        - 在 forward 阶段做 all-reduce；本关同步的是 backward 后的 grad。
+        - 对 frozen 参数或 None grad 强行通信；这会造成错误或 collective 不一致。
+      checkpoint_questions:
+        - ManualDDP.__init__ 需要保存哪三项状态？
+        - synchronize_grads() 的主要步骤是什么？
+        - skip 参数为什么也属于通信合同？
+    - title: Patch Test 与 Smoke
+      plain_explanation: |
+        patch-test 验证 ManualDDP 的梯度同步语义。5 个测试分别对齐 PyTorch DDP、抓 summed grad、检查 world_size=1 no-op、检查 frozen 参数和 partial grad。
+
+        smoke 走另一条证据链：run_smoke.py 用 torch.distributed.run 启动两个进程，ddp_hello.py 构造 rank+1 tensor，执行 all_reduce(SUM) 和 barrier，再写出 ddp_hello.json、metrics.jsonl 和 report.md。
+      mental_model: |
+        patch-test 看 grad 是否对，smoke 看最小 process group 是否活着。两条证据回答不同问题。
+      why_it_matters: |
+        分布式代码不能只靠单进程测试。低成本 2-rank gloo 测试能先暴露平均、no-op 和 skip 问题。
+      source_refs:
+        - title: Test entry
+          repo_path: labs/l03_nccl_ddp_smoke/patch/tests/test_patch.py
+          lines: [12, 24]
+          note: |
+            L12-L24: 前三个 pytest case 覆盖 DDP 对齐、平均和 world_size=1 no-op。
+        - title: Skip tests
+          repo_path: labs/l03_nccl_ddp_smoke/patch/tests/test_patch.py
+          lines: [27, 34]
+          note: |
+            L27-L34: 后两个 pytest case 覆盖 frozen 参数和 partial grad。
+        - title: Smoke launcher
+          repo_path: labs/l03_nccl_ddp_smoke/scripts/run_smoke.py
+          lines: [42, 54]
+          note: |
+            L42-L54: smoke 用 torch.distributed.run 启动两个进程。
+        - title: Smoke fallback
+          repo_path: labs/l03_nccl_ddp_smoke/scripts/run_smoke.py
+          lines: [55, 59]
+          note: |
+            L55-L59: 失败或缺 artifact 时转 fallback。
+        - title: Smoke metrics
+          repo_path: labs/l03_nccl_ddp_smoke/scripts/run_smoke.py
+          lines: [83, 94]
+          note: |
+            L83-L94: metrics 记录 world_size、backend、all_reduce_sum、barrier_ok 和 fallback_used。
+      common_confusions:
+        - 把 patch-test 和 smoke 当成同一个验收；前者测 grad，后者测最小 collective。
+        - 看到 fallback 的 all_reduce_sum=3 就写成真实通信成功；fallback 是模拟结果。
+        - 只看 rank0 日志；分布式失败时要收集每个 rank 的最后状态。
+      checkpoint_questions:
+        - 5 个 patch tests 分别覆盖哪些边界？
+        - fallback_used 为 true 时，报告应怎样写？
+        - 为什么 patch-test 可以使用 CPU/gloo？
+    - title: 生产边界与 Debug
+      plain_explanation: |
+        ManualDDP 把通信放在整个 backward 完成之后。生产 DDP 会用 autograd hook 在梯度 ready 时放入 bucket，并尽早发起 all-reduce，使部分通信和剩余 backward 计算重叠。没有 overlap 时，step 时间更接近 T_compute + T_comm；重叠充分时，更接近 max(T_compute, T_comm)。
+
+        真实排查要分清数值问题和进程问题。梯度大 world size 倍时先查平均；all-reduce 或 barrier 卡住时先查所有 rank 是否进入同一轮 collective，以及 tensor shape、dtype、device 是否一致。fallback 结果只能作为 validation-only。
+      mental_model: |
+        ManualDDP 是白板公式，生产 DDP 是调度系统。公式保证算对，调度系统负责尽量隐藏通信时间。
+      why_it_matters: |
+        把语义测试当作性能测试会误判多卡收益。进入 bucket、NCCL 和 profiler 前，先把 correctness 和 throughput 分开。
+      source_refs:
+        - title: Fallback payload
+          repo_path: labs/l03_nccl_ddp_smoke/scripts/run_smoke.py
+          lines: [28, 39]
+          note: |
+            L28-L39: fallback payload 明确标记 simulated-fallback 和 fallback_used。
+        - title: Report boundary
+          repo_path: labs/l03_nccl_ddp_smoke/scripts/run_smoke.py
+          lines: [112, 124]
+          note: |
+            L112-L124: report 记录指标、debug ticket 和 fallback 迁移判断。
+        - title: MiniInfra snapshot
+          repo_path: mini_infra/distributed/collectives.py
+          lines: [9, 13]
+          note: |
+            L9-L13: snapshot 读取 rank/local_rank/world_size，并计算期望求和。
+        - title: MiniInfra payload
+          repo_path: mini_infra/distributed/collectives.py
+          lines: [14, 23]
+          note: |
+            L14-L23: payload 记录 rank、world_size、backend 边界和 CVD。
+      common_confusions:
+        - 认为 overlap 会减少通信总字节数；它主要改变时间重叠关系。
+        - 每个 gradient accumulation micro-step 都同步；这样会放大通信开销。
+        - 用 ManualDDP 跑生产大模型；它缺少 bucket、overlap、unused parameter 处理和容错。
+      checkpoint_questions:
+        - bucket 和 overlap 分别解决什么问题？
+        - 梯度累积时为什么前几个 micro-step 常跳过同步？
+        - rank hang 时为什么要收集每个 rank 的最后一行日志？
 mini_infra_targets:
   - mini_infra/distributed/collectives.py
-
+  - mini_infra/megatron/training/initialize.py
 notebooks:
   - notebooks/n03_ddp_collectives.ipynb
-
-tickets:
-  - dist_wrong_world_size_001
-  - dist_rank_hang_002
-
-prereq: l02_pytorch_systems
-next_lab: l04_gpu_kernel
-
-gpu_modes:
-  local: CPU gloo 即可
-  cluster: 2×4090 / 8×H200 nccl 对照
+lesson_docs:
+  - title: 系统地图
+    path: labs/l03_nccl_ddp_smoke/system_map.md
+    description: 本讲在章节中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l03_nccl_ddp_smoke/lecture.md
+    description: 从真实问题、核心机制、源码抽象讲到 lab 验收和生产排查。
+  - title: 源码带读讲义
+    path: labs/l03_nccl_ddp_smoke/source_walkthrough.md
+    description: 按主路径组织的源码阅读路线，说明每步要读什么和跳过什么。
+source_reading:
+  - title: ManualDDP starter
+    repo_path: labs/l03_nccl_ddp_smoke/patch/starter/manual_ddp.py
+    focus: 学生需要补齐的接口和 TODO 边界。
+    highlights:
+      - title: 类边界
+        lines: [22, 27]
+        note: |
+          L22-L27: 说明本关实现不挂 hook，只在 synchronize_grads() 时同步。
+      - title: 构造函数 TODO
+        lines: [29, 40]
+        note: |
+          L29-L40: 保存 module、process_group 和 world_size，且不能复制参数。
+      - title: 同步函数 TODO
+        lines: [42, 50]
+        note: |
+          L42-L50: 函数说明同步应把 local grad 原地改成平均梯度。
+      - title: 同步函数 TODO
+        lines: [52, 59]
+        note: |
+          L52-L59: TODO 明确 no-op、参数遍历、all_reduce 和平均。
+  - title: ManualDDP reference
+    repo_path: labs/l03_nccl_ddp_smoke/patch/reference/manual_ddp.py
+    focus: 最小梯度同步合同。
+    highlights:
+      - title: 保存同步状态
+        lines: [11, 15]
+        note: |
+          L11-L15: reference 保存原模型、process group 和 world_size。
+      - title: 梯度同步路径
+        lines: [17, 24]
+        note: |
+          L17-L24: 单 rank no-op；有效 grad 做 all_reduce(SUM) 后除以 world_size。
+  - title: Distributed test harness
+    repo_path: labs/l03_nccl_ddp_smoke/patch/tests/conftest.py
+    focus: 2-rank gloo 测试如何建立 process group。
+    highlights:
+      - title: Worker 初始化
+        lines: [33, 44]
+        note: |
+          L33-L44: worker 设置 rendezvous 环境变量，初始化 gloo group，并运行指定 case。
+      - title: 多进程启动
+        lines: [56, 68]
+        note: |
+          L56-L68: parallel_run 创建 spawn context、队列、端口，并启动 worker。
+      - title: 退出检查
+        lines: [69, 79]
+        note: |
+          L69-L79: harness 处理 timeout、非零退出和 worker 上报状态。
+  - title: ManualDDP worker cases
+    repo_path: labs/l03_nccl_ddp_smoke/patch/tests/worker_cases.py
+    focus: 每个行为合同对应的断言。
+    highlights:
+      - title: 对齐 PyTorch DDP
+        lines: [14, 26]
+        note: |
+          L14-L26: 每个 rank 使用不同输入，制造 local grad 差异。
+      - title: 学生实现比较
+        lines: [35, 45]
+        note: |
+          L35-L45: ManualDDP 同步后逐参数比较 PyTorch DDP 的 grad。
+      - title: 平均而非求和
+        lines: [69, 81]
+        note: |
+          L69-L81: 相同输入下 average grad 应等于单进程 baseline。
+      - title: frozen 参数
+        lines: [100, 112]
+        note: |
+          L100-L112: frozen 参数完成 backward 后进入同步函数。
+      - title: frozen 断言
+        lines: [114, 117]
+        note: |
+          L114-L117: requires_grad=False 的参数应保持 grad 为 None。
+      - title: partial grad
+        lines: [119, 131]
+        note: |
+          L119-L131: 某个参数 grad=None 时 synchronize_grads() 不能报错。
+  - title: Patch test entry
+    repo_path: labs/l03_nccl_ddp_smoke/patch/tests/test_patch.py
+    focus: pytest case 到 worker case 的映射。
+    highlights:
+      - title: 五个测试入口
+        lines: [12, 24]
+        note: |
+          L12-L24: 前三个 pytest case 覆盖 DDP 对齐、平均和 no-op。
+      - title: skip 测试入口
+        lines: [27, 34]
+        note: |
+          L27-L34: 后两个 pytest case 覆盖 frozen 参数和 partial grad。
+  - title: DDP hello smoke
+    repo_path: labs/l03_nccl_ddp_smoke/scripts/ddp_hello.py
+    focus: 最小 process group、all-reduce 和 barrier。
+    highlights:
+      - title: 读取环境与 backend
+        lines: [24, 35]
+        note: |
+          L24-L35: 导入 torch/distributed，读取 world_size、rank、local_rank，并选择 backend。
+      - title: all-reduce 与 barrier
+        lines: [42, 48]
+        note: |
+          L42-L48: 初始化 process group，对 rank+1 tensor 做 all_reduce(SUM)，再进入 barrier。
+      - title: 写出 payload
+        lines: [52, 62]
+        note: |
+          L52-L62: payload 记录 backend、rank、world_size、all_reduce_sum 和 fallback 状态。
+  - title: Smoke launcher
+    repo_path: labs/l03_nccl_ddp_smoke/scripts/run_smoke.py
+    focus: torchrun、fallback、metrics 和 report。
+    highlights:
+      - title: fallback 边界
+        lines: [28, 39]
+        note: |
+          L28-L39: fallback payload 标记 simulated-fallback 和 fallback_used=True。
+      - title: torchrun 启动
+        lines: [42, 54]
+        note: |
+          L42-L54: 使用 torch.distributed.run 启动 2 个进程。
+      - title: torchrun fallback
+        lines: [55, 59]
+        note: |
+          L55-L59: 失败或缺 artifact 时转 fallback。
+      - title: metrics 写入
+        lines: [83, 94]
+        note: |
+          L83-L94: metrics 记录 world_size、backend、all_reduce_sum、barrier_ok 和 fallback_used。
+      - title: report 边界
+        lines: [112, 124]
+        note: |
+          L112-L124: report 明确记录 fallback 和迁移判断。
+  - title: MiniInfra collectives
+    repo_path: mini_infra/distributed/collectives.py
+    focus: 环境变量语义和期望 all-reduce sum。
+    highlights:
+      - title: collective snapshot
+        lines: [9, 13]
+        note: |
+          L9-L13: snapshot 读取 rank/local_rank/world_size，并计算期望求和。
+      - title: collective payload
+        lines: [14, 23]
+        note: |
+          L14-L23: payload 记录 rank、world_size、backend 边界和 CVD。
+  - title: MiniMegatron distributed state
+    repo_path: mini_infra/megatron/training/initialize.py
+    focus: 后续 TP/PP/DP 并行状态入口。
+    highlights:
+      - title: DistributedState
+        lines: [8, 15]
+        note: |
+          L8-L15: 并行状态记录 world_size、TP、PP、DP 和 sequence parallel。
+      - title: initialize_megatron
+        lines: [17, 28]
+        note: |
+          L17-L28: 从 TP/PP 参数推导 world_size 和 data_parallel_size。

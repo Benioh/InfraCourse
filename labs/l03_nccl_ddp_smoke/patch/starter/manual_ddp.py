@@ -1,5 +1,5 @@
 """
-L01.5 Patch · 手写 ManualDDP
+L04 Patch · 手写 ManualDDP
 
 填空规则：
 - 凡是 `# TODO(student): ...` 必须自己写。
@@ -37,7 +37,7 @@ class ManualDDP:
         #   3. self.world_size = dist.get_world_size(process_group) if dist.is_initialized() else 1
         #
         # 注意：不要把 param 复制一份，self.module.parameters() 必须就是 model.parameters() 同一份内存。
-        raise NotImplementedError("L01.5 Patch: implement ManualDDP.__init__")
+        raise NotImplementedError("L04 Patch: implement ManualDDP.__init__")
 
     def synchronize_grads(self) -> None:
         """In-place 把所有 param.grad 从 local 改成 (sum across ranks) / world_size。
@@ -56,4 +56,4 @@ class ManualDDP:
         #     if p.requires_grad and p.grad is not None:
         #       dist.all_reduce(p.grad, op=dist.ReduceOp.SUM, group=self.process_group)
         #       p.grad /= self.world_size
-        raise NotImplementedError("L01.5 Patch: implement ManualDDP.synchronize_grads")
+        raise NotImplementedError("L04 Patch: implement ManualDDP.synchronize_grads")

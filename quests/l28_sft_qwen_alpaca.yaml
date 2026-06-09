@@ -1,0 +1,426 @@
+id: l28_sft_qwen_alpaca
+title: L29 · SFT：Chat Template、Loss Mask 与 Causal LM 监督
+level: L29
+act: 第 4 章：SFT、偏好优化与 RL
+role: SFT 数据工程学徒
+priority: 核心
+estimated_minutes: 110
+no_gpu_friendly: true
+frameworks:
+  - PyTorch
+  - HuggingFace Transformers
+  - SGLang 对照
+
+patch:
+  description: |
+    实现 SFT 的最小数据合同：chat messages 编码为 input_ids，prompt labels 写 -100，
+    assistant labels 保留 token id，pad 和 EOS 边界可测，loss 对齐 PyTorch cross entropy。
+  task_md: labs/l28_sft_qwen_alpaca/patch/task.md
+  starter_file: labs/l28_sft_qwen_alpaca/patch/starter/sft_pipeline.py
+  reference_file: labs/l28_sft_qwen_alpaca/patch/reference/sft_pipeline.py
+  test_command: IMPL=reference make patch-test M=l28_sft_qwen_alpaca
+  status_file: labs/l28_sft_qwen_alpaca/patch/.last_run.json
+  test_count: 8
+  test_kind: tokenization + loss mask + CE 数值合同
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l28_sft_qwen_alpaca/system_map.md
+    description: L29 在 SFT 到 RL 主线中的位置、局部系统图、lab 边界和易混点。
+  - title: 主讲义
+    path: labs/l28_sft_qwen_alpaca/lecture.md
+    description: 从 SFT 数据合同、chat template、labels、EOS、pad 讲到 smoke 和排障。
+  - title: 源码带读讲义
+    path: labs/l28_sft_qwen_alpaca/source_walkthrough.md
+    description: 按 patch、测试、run_sft、SGLang chat template 和 tokenizer loader 阅读。
+
+source_reading:
+  - title: Patch starter
+    repo_path: labs/l28_sft_qwen_alpaca/patch/starter/sft_pipeline.py
+    focus: 学生要补的 role 校验、tokenization 和 SFT loss
+    highlights:
+      - title: message validation
+        lines: [13, 25]
+        note: |
+          L13-L16: 空 messages 直接报错。
+          L17-L25: 校验 role、连续 user 和结尾 assistant。
+      - title: tokenization signature
+        lines: [28, 34]
+        note: |
+          L28-L33: 函数接收 messages、tokenizer、max_length 和可选 pad。
+          L34: tokenization 前先校验 messages。
+      - title: tokenization TODO
+        lines: [35, 42]
+        note: |
+          L35-L41: TODO 覆盖 pad/eos、segment encode、labels、截断和 pad。
+          L42: 未实现时抛出 L29 TODO。
+      - title: loss TODO
+        lines: [45, 50]
+        note: |
+          L45-L46: sft_loss 接收 logits、labels 和 ignore_index。
+          L47-L50: TODO 要对齐 PyTorch CE。
+
+  - title: Patch reference
+    repo_path: labs/l28_sft_qwen_alpaca/patch/reference/sft_pipeline.py
+    focus: 参考实现里的 pad/eos 兜底、assistant labels 和 ignore-index CE
+    highlights:
+      - title: validation
+        lines: [13, 25]
+        note: |
+          L13-L16: 空输入报错，避免无监督样本进入训练。
+          L17-L25: role order 和结尾 assistant 是最小数据合同。
+      - title: pad fallback
+        lines: [28, 37]
+        note: |
+          L28-L30: 显式 pad 参数优先。
+          L31-L37: tokenizer pad、eos 和 0 依次兜底。
+      - title: tokenization setup
+        lines: [40, 50]
+        note: |
+          L40-L46: 主函数签名和输入校验。
+          L47-L50: 解析 pad 和 eos。
+      - title: assistant labels
+        lines: [52, 63]
+        note: |
+          L52-L57: 初始化输出并编码 role/content segment。
+          L58-L63: assistant segment 和 EOS 都写入 labels。
+      - title: prompt labels
+        lines: [64, 70]
+        note: |
+          L64-L65: prompt segment labels 全部写 -100。
+          L67-L70: 超长时 input_ids 和 labels 同步截断。
+      - title: padding
+        lines: [71, 78]
+        note: |
+          L71-L72: attention mask 先覆盖真实 token。
+          L73-L78: pad 位置 input、labels 和 attention mask 同步补齐。
+      - title: CE loss
+        lines: [81, 90]
+        note: |
+          L81-L84: 取 vocab 维并准备展平。
+          L85-L90: 调用 cross_entropy，ignore_index 由参数控制。
+
+  - title: Patch tests
+    repo_path: labs/l28_sft_qwen_alpaca/patch/tests/test_patch.py
+    focus: 8 个测试覆盖 mask、EOS、pad、loss 和输入非法边界
+    highlights:
+      - title: char tokenizer
+        lines: [22, 29]
+        note: |
+          L22-L26: 测试 tokenizer 固定 pad 和 eos。
+          L28-L29: 字符级 encode 让 token 边界可预测。
+      - title: concat order
+        lines: [32, 44]
+        note: |
+          L32-L42: 构造 system、user、assistant 三段样本。
+          L43-L44: 输出长度和开头非 pad 是基本合同。
+      - title: prompt mask
+        lines: [47, 57]
+        note: |
+          L47-L54: 构造 user + assistant 样本。
+          L55-L57: user segment 的 labels 必须都是 -100。
+      - title: assistant mask
+        lines: [60, 72]
+        note: |
+          L60-L68: 构造 assistant segment 期望 token。
+          L69-L72: assistant token 和 EOS 都保留为 labels。
+      - title: pad mask
+        lines: [75, 83]
+        note: |
+          L75-L81: 短样本补到 max_length。
+          L82-L83: pad 位置 attention mask 为 0，label 为 -100。
+      - title: finite loss
+        lines: [86, 94]
+        note: |
+          L86-L91: 构造含 -100 的 labels。
+          L92-L94: loss 必须有限。
+
+  - title: SFT smoke
+    repo_path: labs/l28_sft_qwen_alpaca/scripts/run_sft.py
+    focus: CPU tokenize-only smoke 与 Trainer 路径
+    highlights:
+      - title: impl selector
+        lines: [36, 45]
+        note: |
+          L36-L38: _impl 读取 IMPL 环境变量。
+          L39-L45: 显式选择 reference 或 starter。
+      - title: impl fallback
+        lines: [46, 53]
+        note: |
+          L46-L50: 默认先导入 starter。
+          L51-L53: starter 不可用时回退 reference。
+      - title: synthetic data
+        lines: [56, 66]
+        note: |
+          L56-L58: synthetic messages 接收样本数。
+          L59-L66: 每条样本包含 system、user 和 assistant。
+      - title: run setup
+        lines: [85, 96]
+        note: |
+          L85-L89: CLI 接收 config 和 run id。
+          L91-L96: 选择实现、读取配置并准备 run 目录。
+      - title: config write
+        lines: [97, 99]
+        note: |
+          L97-L99: resolved config 记录 mission、impl 和配置内容。
+      - title: tokenize metrics
+        lines: [137, 149]
+        note: |
+          L137-L146: 每个样本写 assistant token count metric。
+          L147-L149: report 记录实现、样本数和 accept。
+      - title: dependency fallback
+        lines: [154, 166]
+        note: |
+          L154-L164: train mode 需要 torch、datasets 和 transformers。
+          L165-L166: 依赖缺失时写 fallback artifact。
+      - title: model load
+        lines: [171, 176]
+        note: |
+          L171-L174: 加载 tokenizer，并在缺 pad 时复用 eos。
+          L175-L176: 根据 precision 加载模型。
+      - title: tokenized dataset
+        lines: [204, 209]
+        note: |
+          L204-L208: patch 函数把 messages 转成 tokenized rows。
+          L209: Dataset.from_list 接收同结构字段。
+      - title: training arguments
+        lines: [211, 222]
+        note: |
+          L211-L218: 写 batch、accumulation、lr、steps、warmup 和 bf16。
+          L219-L222: 日志、保存和 report_to 设定。
+      - title: trainer
+        lines: [223, 235]
+        note: |
+          L223-L229: Trainer 连接模型、dataset、tokenizer 和 collator。
+          L230-L235: 训练后汇总 head/tail loss 和 drop ratio。
+      - title: trainer artifacts
+        lines: [238, 250]
+        note: |
+          L238-L242: log history 写入 metrics。
+          L243-L250: 写 sft_summary 和 report。
+
+  - title: SGLang chat template
+    repo_path: github_repo/sglang/python/sglang/lang/chat_template.py
+    focus: 真实模板如何用 role prefix/suffix 拼 prompt
+    highlights:
+      - title: llama style prefix
+        lines: [22, 33]
+        note: |
+          L22-L25: get_prefix_and_suffix 根据 role 和历史消息取模板。
+          L27-L33: LLAMA2 system 在开头时会组合 user 和 system prefix。
+      - title: prompt assembly
+        lines: [43, 54]
+        note: |
+          L43-L46: get_prompt 按消息顺序遍历 role 和 content。
+          L47-L54: 处理默认 system，并拼 prefix/content/suffix。
+      - title: registry
+        lines: [61, 70]
+        note: |
+          L61-L66: 模板和匹配函数注册到全局 registry。
+          L69-L70: get_chat_template 按 name 查询。
+      - title: default template
+        lines: [81, 90]
+        note: |
+          L81-L85: default 模板无默认 system。
+          L86-L90: 三种 role 都有简单 prefix 和换行 suffix。
+
+  - title: SGLang tokenizer loader
+    repo_path: github_repo/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py
+    focus: 真实 tokenizer 的 class、配置和路径解析
+    highlights:
+      - title: declared class loader
+        lines: [52, 64]
+        note: |
+          L52-L58: 函数尝试按 tokenizer_config 声明的类加载。
+          L60-L64: 读取 revision 和 tokenizer_config 文件。
+      - title: config guards
+        lines: [67, 79]
+        note: |
+          L67-L69: 读取 tokenizer_class 字段。
+          L70-L79: 缺文件、解析失败或无 class 时返回 None。
+      - title: class guards
+        lines: [81, 90]
+        note: |
+          L81-L83: 跳过不能直接实例化的 tokenizer 基类。
+          L85-L90: transformers 内找不到类时尝试 auto_map。
+      - title: tokenizer name
+        lines: [137, 149]
+        note: |
+          L137-L142: 特殊 tokenizer 名称先经过 redirect。
+          L144-L149: GGUF 文件会解析到父目录。
+      - title: auto tokenizer
+        lines: [163, 172]
+        note: |
+          L163-L168: AutoTokenizer.from_pretrained 是默认加载路径。
+          L169-L172: 加载成功后安装 warning filter。
+
+mini_infra_targets: []
+notebooks: []
+tickets:
+  - sft_user_loss_leak
+  - sft_assistant_mask_empty
+  - sft_eos_missing
+  - sft_pad_loss_leak
+  - sft_template_mismatch
+prereq: l27_sglang_pd_cache
+next_lab: l28.5_multiturn_chat_mask
+gpu_modes:
+  local: CPU OK
+  cluster: Single GPU Trainer smoke optional
+
+lesson:
+  opening: |
+    L29 讲 SFT 的数据入口。训练代码最终只看到 `input_ids`、`labels` 和 `attention_mask`，但这些字段来自 chat messages、tokenizer、EOS、pad 和截断策略。只要 loss mask 错位，后面的 DPO、PPO 或 GRPO 都会继承错误的监督信号。
+
+    本讲把问题压到两个函数：`tokenize_chat_with_loss_mask` 和 `sft_loss`。学生要能解释每个 token 为什么进入或不进入 loss，并能用 CPU smoke 产出可复查 artifacts。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        SFT 位于 RLHF/RL 之前。它把 pretrained LM 调到能按 chat prompt 回答的状态，后续偏好优化和 RL 才有可用起点。L29 不训练真实大模型，而是先锁住 SFT 数据合同：messages 经过 tokenizer 后，哪些位置作为条件，哪些位置作为目标。
+      mental_model: |
+        SFT 数据处理像给一段 token 序列盖 mask：prompt 盖住，assistant 露出，pad 移出计算。
+      why_it_matters: |
+        prompt 泄漏进 loss 会让模型学复述问题；assistant 被 mask 掉会让样本没有监督；pad 进 loss 会污染训练目标。
+      source_refs:
+        - title: starter validation
+          repo_path: labs/l28_sft_qwen_alpaca/patch/starter/sft_pipeline.py
+          lines: [13, 25]
+          note: |
+            L13-L16: 空输入直接报错。
+            L17-L25: role 和结尾 assistant 决定样本是否合法。
+      common_confusions:
+        - 把 SFT 数据问题当成模型能力问题。
+        - 只看 loss 下降，不检查 labels。
+        - 忽略训练模板和推理模板的一致性。
+      checkpoint_questions:
+        - SFT 在偏好优化和 RL 之前解决什么问题？
+        - L29 patch 只验收哪两个函数？
+        - prompt token 为什么仍要输入模型？
+
+    - title: 三个序列
+      plain_explanation: |
+        `input_ids`、`labels` 和 `attention_mask` 必须等长。`input_ids` 是模型输入，`labels` 是训练目标，`attention_mask` 标出 pad。prompt 位置的 labels 是 `-100`，assistant 位置的 labels 等于 token id，pad 位置 labels 也是 `-100`，但 attention mask 为 `0`。
+      mental_model: |
+        同一个 token 位置有三张表：输入表、目标表、可见性表。
+      why_it_matters: |
+        这三个序列只要错位，训练还能运行，但优化目标已经变了。
+      source_refs:
+        - title: reference assistant labels
+          repo_path: labs/l28_sft_qwen_alpaca/patch/reference/sft_pipeline.py
+          lines: [52, 63]
+          note: |
+            L52-L57: 初始化输出并编码当前 message。
+            L58-L63: assistant token 和 EOS 都进入 labels。
+        - title: reference prompt labels
+          repo_path: labs/l28_sft_qwen_alpaca/patch/reference/sft_pipeline.py
+          lines: [64, 70]
+          note: |
+            L64-L65: prompt token labels 写 -100。
+            L67-L70: 截断时 input_ids 和 labels 同步处理。
+        - title: reference padding
+          repo_path: labs/l28_sft_qwen_alpaca/patch/reference/sft_pipeline.py
+          lines: [71, 78]
+          note: |
+            L71-L72: attention mask 覆盖真实 token。
+            L73-L78: pad 位置同步补齐三个列表。
+      common_confusions:
+        - 把 attention mask 当成 loss mask。
+        - pad id 与 EOS id 相同就放弃区分语义。
+        - 截断 input_ids 后忘记同步截断 labels。
+      checkpoint_questions:
+        - "`labels[i]` 有哪些合法含义？"
+        - pad 位置的 attention mask 和 label 分别是什么？
+        - assistant EOS 为什么进入 loss？
+
+    - title: Chat Template 简化
+      plain_explanation: |
+        L29 patch 用 `<|role|>{content}` 模拟 chat template。这个设计足够验证 role、assistant-only labels、EOS 和 pad。真实模板会插入模型专属 prefix、suffix、stop string 和默认 system，甚至根据历史消息改变前后缀。
+      mental_model: |
+        L29 先把模板当成稳定字符串拼接器；真实系统里模板是带条件分支的渲染器。
+      why_it_matters: |
+        训练和推理模板不一致时，模型学习到的格式和线上看到的格式不同，输出会漂移。
+      source_refs:
+        - title: prompt assembly
+          repo_path: github_repo/sglang/python/sglang/lang/chat_template.py
+          lines: [43, 54]
+          note: |
+            L43-L46: get_prompt 按消息顺序遍历。
+            L47-L54: 每条消息按 prefix、content 和 suffix 拼接。
+        - title: default template
+          repo_path: github_repo/sglang/python/sglang/lang/chat_template.py
+          lines: [81, 90]
+          note: |
+            L81-L85: default 模板声明基本配置。
+            L86-L90: role prefix 和 suffix 直接写在表里。
+      common_confusions:
+        - 认为所有模型的 chat template 格式相同。
+        - 只保存 tokenized 数据，不保存 tokenizer 版本和模板。
+        - 用推理 prompt 手写格式替代训练模板。
+      checkpoint_questions:
+        - L29 patch 为什么使用简化 role tag？
+        - 真实模板的 prefix/suffix 会影响什么？
+        - tokenizer 版本为什么要进入复盘记录？
+
+    - title: Loss 函数
+      plain_explanation: |
+        `sft_loss` 的职责很窄：把 logits 和 labels 展平，调用 PyTorch cross entropy，并把 `-100` 作为 ignore index。本讲假设 labels 已经对齐，不在 loss 函数里做 causal shift。真实框架可能在 model forward、collator 或 trainer 内部处理 shift，读代码时要先确认接口边界。
+      mental_model: |
+        tokenization 决定哪些位置有 target；loss 函数只按 target 表计分。
+      why_it_matters: |
+        把 shift、mask 和 CE 混在一起会让错误很难定位。L29 把 mask 和 CE 先分开验证。
+      source_refs:
+        - title: reference CE
+          repo_path: labs/l28_sft_qwen_alpaca/patch/reference/sft_pipeline.py
+          lines: [81, 90]
+          note: |
+            L81-L84: vocab 是 logits 最后一维。
+            L85-L90: cross_entropy 使用 ignore_index 和 mean reduction。
+        - title: finite loss test
+          repo_path: labs/l28_sft_qwen_alpaca/patch/tests/test_patch.py
+          lines: [86, 94]
+          note: |
+            L86-L91: 测试构造含 -100 的 labels。
+            L92-L94: loss 必须是有限值。
+      common_confusions:
+        - 在 loss 函数里重复 shift。
+        - 把 `-100` 当成真实类别 id。
+        - 只比较 loss 值，不确认有效 token 数。
+      checkpoint_questions:
+        - "`ignore_index=-100` 如何影响平均分母？"
+        - L29 的 `sft_loss` 是否做 causal shift？
+        - 何时需要检查有效 label 数？
+
+    - title: Smoke 与 Artifacts
+      plain_explanation: |
+        CPU smoke 用 synthetic messages 和 `_CharTokenizer` 快速验证数据合同。它会写 resolved config、metrics、tokenize summary 和 report。Trainer 路径会加载真实 tokenizer、模型和数据，再把 patch 输出交给 `Dataset` 与 `Trainer`。
+      mental_model: |
+        CPU smoke 验证数据形状和 mask；Trainer smoke 验证真实框架连接；长训才讨论模型质量。
+      why_it_matters: |
+        不同验证层证明的事情不同。把 CPU smoke 写成真实训练结论，会误导后续排障。
+      source_refs:
+        - title: impl selector
+          repo_path: labs/l28_sft_qwen_alpaca/scripts/run_sft.py
+          lines: [36, 45]
+          note: |
+            L36-L38: 读取 IMPL。
+            L39-L45: 显式选择 reference 或 starter。
+        - title: tokenize metrics
+          repo_path: labs/l28_sft_qwen_alpaca/scripts/run_sft.py
+          lines: [137, 149]
+          note: |
+            L137-L146: 写 assistant token count。
+            L147-L149: report 记录样本数和 accept。
+        - title: trainer dataset
+          repo_path: labs/l28_sft_qwen_alpaca/scripts/run_sft.py
+          lines: [204, 209]
+          note: |
+            L204-L208: patch 函数处理每条 example。
+            L209: Dataset.from_list 组装训练数据。
+      common_confusions:
+        - CPU smoke 通过后就认定真实 tokenizer 没问题。
+        - 只看 report，不看 metrics 和 config。
+        - 没记录模型与 tokenizer 版本。
+      checkpoint_questions:
+        - CPU smoke 产出哪些文件？
+        - Trainer 路径比 CPU smoke 多验证什么？
+        - 为什么 smoke 结论要写清边界？

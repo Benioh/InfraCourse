@@ -1,21 +1,21 @@
 id: l11_megatron_scale_optimization
-title: Bucketed Manual DDP（grad 合并 all-reduce）
-level: L05
-act: 第 1 章：训练框架
+title: L12 · Megatron Scale Optimization 与 Bucketed Manual DDP
+level: L12
+act: 第 2 章：训练系统、并行与数据
 role: Megatron 扩展学徒
 priority: 核心
-estimated_minutes: 90
+estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch Distributed
-  - Megatron-LM (对照)
+  - Megatron-LM
+  - TorchTitan
 
 patch:
   description: |
-    把 L01.5 ManualDDP 升级成 BucketedManualDDP：把 params 按字节数分桶，
-    每个桶用 _flatten_dense_tensors 拼接后一次 all-reduce，再 unflatten
-    回去。数值与 PyTorch DDP 完全一致。
+    实现 `BucketedManualDDP`：按字节数给 trainable params 分桶，把每个 bucket
+    的 grad flatten 成连续 tensor，all-reduce 求和后除以 world size，再 unflatten
+    copy 回原 grad。结果应与 PyTorch DDP 的平均梯度语义一致。
   task_md: labs/l11_megatron_scale_optimization/patch/task.md
   starter_file: labs/l11_megatron_scale_optimization/patch/starter/bucketed_ddp.py
   reference_file: labs/l11_megatron_scale_optimization/patch/reference/bucketed_ddp.py
@@ -25,25 +25,326 @@ patch:
   test_kind: 结果对比（与 PyTorch DDP 等价）
 
 source_reading:
-  - title: Megatron distributed_data_parallel
-    repo_path: github_repo/Megatron-LM/megatron/core/distributed/
-    focus: 看 ParamAndGradBuffer 的 bucket 划分与 reduce-scatter
-  - title: PyTorch DDP reducer 的 bucket 与 overlap
+  - title: Patch starter
+    repo_path: labs/l11_megatron_scale_optimization/patch/starter/bucketed_ddp.py
+    focus: 学生需要补齐的最小实现
+    highlights:
+      - title: 读 BucketedManualDDP 入口状态
+        lines: [23, 30]
+        note: |
+          L23-L30: 类入口声明 model、bucket size 和 process group。
+      - title: 读初始化 TODO
+        lines: [32, 39]
+        note: |
+          L32-L39: 初始化保存 module、process group、world size 和 bucket_size_bytes，并要求创建 buckets。
+      - title: 读同步 TODO
+        lines: [62, 74]
+        note: |
+          L62-L74: 同步路径要求处理 no-op、flatten、all-reduce、平均、unflatten 和 copy-back。
+  - title: Patch reference
+    repo_path: labs/l11_megatron_scale_optimization/patch/reference/bucketed_ddp.py
+    focus: 参考实现中的状态变化和边界处理
+    highlights:
+      - title: 读构造函数
+        lines: [13, 25]
+        note: |
+          L13-L25: 构造函数保存状态并立即调用 `_create_buckets`。
+      - title: 读分桶逻辑
+        lines: [27, 35]
+        note: |
+          L27-L35: 参考实现跳过 frozen param，并按参数顺序累加字节数。
+      - title: 读同步逻辑
+        lines: [45, 56]
+        note: |
+          L45-L56: 每个 bucket flatten 后 all-reduce，除以 world size，再 copy 回原 grad。
+  - title: Patch harness
+    repo_path: labs/l11_megatron_scale_optimization/patch/tests/conftest.py
+    focus: 多进程 gloo 测试入口
+    highlights:
+      - title: 读实现选择
+        lines: [28, 30]
+        note: |
+          L28-L30: `_get_impl` 根据 `IMPL` 选择 starter 或 reference。
+      - title: 读 worker 主路径
+        lines: [33, 45]
+        note: |
+          L33-L45: worker 设置分布式环境、初始化 gloo、导入实现并运行 case。
+  - title: Patch worker cases
+    repo_path: labs/l11_megatron_scale_optimization/patch/tests/worker_cases.py
+    focus: 数值对齐和边界 case
+    highlights:
+      - title: 读 PyTorch DDP 参考
+        lines: [26, 38]
+        note: |
+          L26-L38: 测试先用 PyTorch DDP 生成参考梯度。
+      - title: 读 BucketedManualDDP 对比
+        lines: [43, 55]
+        note: |
+          L43-L55: 同一输入下运行 bucketed 实现，并逐参数比较最大误差。
+      - title: 读超大参数边界
+        lines: [57, 69]
+        note: |
+          L57-L69: 单个参数大于 bucket size 时仍必须正常同步。
+  - title: Megatron-LM distributed_data_parallel
+    repo_path: github_repo/Megatron-LM/megatron/core/distributed/distributed_data_parallel.py
+    focus: 生产 DDP 的 bucket、buffer 和 overlap 入口
+    highlights:
+      - title: 读类说明
+        lines: [23, 35]
+        note: |
+          L23-L35: 类说明连续 grad buffer、bucket 和通信 overlap 的职责。
+      - title: 读 bucket size
+        lines: [67, 73]
+        note: |
+          L67-L73: 默认 bucket size 与 `overlap_grad_reduce` 共同决定是否分桶。
+      - title: 读 trainable params 收集
+        lines: [111, 123]
+        note: |
+          L111-L123: Megatron 只收集 `requires_grad=True` 参数，并为 main grad 状态做准备。
+  - title: Megatron-LM param_and_grad_buffer
+    repo_path: github_repo/Megatron-LM/megatron/core/distributed/param_and_grad_buffer.py
+    focus: 连续 buffer、bucket 和 bucket group 状态
+    highlights:
+      - title: 读 BufferType
+        lines: [51, 57]
+        note: |
+          L51-L57: buffer 类型区分 PARAM 和 GRAD。
+      - title: 读 ParamAndGradBucket
+        lines: [72, 84]
+        note: |
+          L72-L84: bucket 保存 params、param_data、grad_data、offset 和 scaling factor。
+      - title: 读 BucketGroup
+        lines: [159, 171]
+        note: |
+          L159-L171: bucket group 聚合多个 bucket，并在梯度 ready 后发起通信。
+  - title: TorchTitan parallel_dims
     repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
-    focus: 看 ParallelDims 如何组合 DDP/TP/PP
+    focus: 并行维度和 device mesh
+    highlights:
+      - title: 读 ParallelDims
+        lines: [21, 33]
+        note: |
+          L21-L33: `ParallelDims` 保存 DP、CP、TP、PP、EP 和 world size。
+      - title: 读维度校验
+        lines: [60, 71]
+        note: |
+          L60-L71: 校验并行度乘积必须匹配 world size。
+  - title: Scale drill
+    repo_path: labs/l11_megatron_scale_optimization/scripts/run_scale_stub.py
+    focus: 显存、吞吐和 MFU 估算 artifact
+    highlights:
+      - title: 读 estimate
+        lines: [29, 37]
+        note: |
+          L29-L37: `estimate` 把 TP、PP、recompute 和 GPU 数映射到 memory、tokens/sec 和 MFU。
+      - title: 读 metrics 写入
+        lines: [64, 76]
+        note: |
+          L64-L76: 脚本创建多个 scenario，并把结果写入 artifact 和 metrics。
 
 mini_infra_targets:
   - mini_infra/distributed/
-
-notebooks: []
-
+notebooks:
+  - notebooks/n04_tensor_parallel_linear.ipynb
+  - notebooks/n05_pipeline_parallel_bubble.ipynb
+  - notebooks/n06_activation_recompute.ipynb
 tickets:
   - mgt_low_mfu_005
   - mgt_recompute_tradeoff_007
-
-prereq: l09_long_context_cp
-next_lab: l13_moe_ep
-
+prereq: l10_megatron_pretrain_lifecycle
+next_lab: l12_fsdp2_llama
 gpu_modes:
   local: CPU gloo 即可
-  cluster: 多卡 NCCL 测试 throughput
+  cluster: 多卡 NCCL benchmark 与 Megatron 日志复盘
+
+lesson:
+  opening: |
+    L12 从 L11 的训练 step 进入扩展优化。问题很具体：backward 结束后，每个 data parallel rank 都有一份本地梯度，optimizer step 前必须得到跨 rank 平均梯度。如果每个参数单独 all-reduce，很多小参数会让 collective 启动开销进入 step time。
+
+    本关 patch 实现 `BucketedManualDDP`。它按字节数分桶，把同一桶的 grad flatten 成连续 buffer，一次 all-reduce 后除以 world size，再拆回原 shape。讲义同时把这个最小合同映射到 Megatron DDP 的 buffer、bucket group、overlap 和 distributed optimizer。
+  sections:
+    - title: 本讲目标：把 grad 同步从逐参数改成按桶通信
+      plain_explanation: |
+        学完本讲后，你应该能完成五件事：解释很多小参数逐个 all-reduce 为什么会浪费启动开销；按 `requires_grad=True` 参数顺序和 `bucket_size_mb` 构造 bucket；用 `_flatten_dense_tensors` 和 `_unflatten_dense_tensors` 保持梯度 shape 与数值等价；处理 world_size=1、超大单参数和 frozen param；把本地实现对照到 Megatron `ParamAndGradBuffer`、bucket group、overlap grad reduce 和 distributed optimizer。
+
+        本关的输入是一个 PyTorch module、bucket size 和可选 process group。初始化阶段输出 `self.buckets`；反向传播后，`synchronize_grads()` 读取每个 bucket 中已有的 `p.grad`，合并、all-reduce、除以 world size，再 copy 回原梯度。测试用 2-rank gloo CPU 验证结果和 PyTorch DDP 一致。
+      mental_model: |
+        逐参数通信像每张纸单独寄出；bucket 通信像把一摞纸装进同一个信封，收件后再按原顺序分发。
+      why_it_matters: |
+        DDP 的通信瓶颈不只由总字节数决定。collective 次数、启动开销、buffer 连续性和 backward overlap 都会影响 step time 和 MFU。
+      source_refs:
+        - title: Starter 初始化状态
+          repo_path: labs/l11_megatron_scale_optimization/patch/starter/bucketed_ddp.py
+          lines: [32, 39]
+          note: |
+            L32-L39: 初始化保存 module、process group、world size 和 bucket size，并要求创建 buckets。
+        - title: Reference 构造函数
+          repo_path: labs/l11_megatron_scale_optimization/patch/reference/bucketed_ddp.py
+          lines: [13, 25]
+          note: |
+            L13-L25: reference 在构造阶段完成 buckets 创建。
+      common_confusions:
+        - 认为 bucket 会减少总通信字节；它主要减少 collective 启动次数。
+        - 把 bucketed DDP 当成 ZeRO；本关仍让每个 rank 持有完整参数和完整梯度。
+        - 把 CPU/gloo 测试结果外推成 NCCL throughput 结论。
+      checkpoint_questions:
+        - BucketedManualDDP 相比逐参数 ManualDDP 改了哪一步？
+        - bucket 合并主要减少的是通信字节还是 collective 启动次数？
+        - 本关为什么禁止直接使用 PyTorch DDP？
+
+    - title: 核心概念：bucket、flatten 和平均梯度
+      plain_explanation: |
+        bucket 是一组需要同步梯度的参数列表。本关按 `self.module.parameters()` 顺序遍历，只收集 `requires_grad=True` 的参数，用 `p.numel() * p.element_size()` 估算字节数。当前桶加上下一个参数超过 `bucket_size_bytes` 时，先结束当前桶，再新开一桶；单个超大参数独占一桶。
+
+        `_flatten_dense_tensors(grads)` 会把一组 dense tensor 展平成连续 tensor；`_unflatten_dense_tensors(flat, grads)` 会按原 tensor 的 shape 和 numel 切回一组 tensor。本关对每个 bucket 执行 flatten、all-reduce、除以 world size、unflatten、copy 回原 grad。数值等价依赖两个条件：所有 rank 对同一参数位置做 sum 后平均，copy-back 的顺序和 shape 不变。
+      mental_model: |
+        bucket 构造是装箱清单，flatten 改变运输形态，unflatten 恢复 optimizer 要读取的梯度形态。
+      why_it_matters: |
+        参数顺序、冻结参数、超大参数和 copy-back 都是训练框架里的真实边界。任何一步错位都会让 optimizer 使用错误梯度。
+      source_refs:
+        - title: Reference 分桶逻辑
+          repo_path: labs/l11_megatron_scale_optimization/patch/reference/bucketed_ddp.py
+          lines: [27, 35]
+          note: |
+            L27-L35: 分桶逻辑跳过 frozen param，并在超过 bucket size 时开新桶。
+        - title: Reference 同步逻辑
+          repo_path: labs/l11_megatron_scale_optimization/patch/reference/bucketed_ddp.py
+          lines: [45, 56]
+          note: |
+            L45-L56: 同步逻辑 flatten、all-reduce、平均并 copy 回每个 grad。
+        - title: Starter 同步 TODO
+          repo_path: labs/l11_megatron_scale_optimization/patch/starter/bucketed_ddp.py
+          lines: [62, 74]
+          note: |
+            L62-L74: TODO 明确 no-op、空 grad、通信和 copy-back 的边界。
+      common_confusions:
+        - 按参数大小排序，导致 bucket 顺序和模型顺序对不上。
+        - 忘记 all-reduce 后除以 world size，得到 sum gradient。
+        - flatten 后直接替换 `p.grad` 对象，导致 optimizer 或外部引用失效。
+      checkpoint_questions:
+        - "`bucket_size_mb` 如何换算成 `bucket_size_bytes`？"
+        - 单个参数大于 bucket size 时应该怎么处理？
+        - 为什么 copy 回原 grad 时要保持 bucket 内顺序？
+
+    - title: 工程验证：用 PyTorch DDP 对齐语义
+      plain_explanation: |
+        本关验证命令是 `make patch-test M=l11_megatron_scale_optimization`。测试 harness 会用 multiprocessing 启动 1 或 2 个 gloo rank，设置分布式环境，然后在每个 worker 里导入 starter 或 reference。
+
+        核心测试包括：与 PyTorch DDP 的 grad 对齐；单个超大参数超过 bucket size 时不崩；很多小参数能合到同一桶；world_size=1 不改 grad；冻结层参数不参与同步。这些测试关注语义，不测真实性能。
+      mental_model: |
+        测试先证明手动通信没有改错数学，再让真实框架去处理异步、stream 和 NCCL 性能。
+      why_it_matters: |
+        bucket 代码很容易在边界上错。单 rank、frozen param、超大 param、小 param 合并会抓到不同类别的实现问题。
+      source_refs:
+        - title: Test harness worker
+          repo_path: labs/l11_megatron_scale_optimization/patch/tests/conftest.py
+          lines: [33, 45]
+          note: |
+            L33-L45: worker 初始化 gloo、导入实现、运行 per-rank case，并在结束时销毁进程组。
+        - title: PyTorch DDP reference
+          repo_path: labs/l11_megatron_scale_optimization/patch/tests/worker_cases.py
+          lines: [26, 38]
+          note: |
+            L26-L38: 测试先用 PyTorch DDP 生成参考梯度。
+        - title: BucketedManualDDP compare
+          repo_path: labs/l11_megatron_scale_optimization/patch/tests/worker_cases.py
+          lines: [43, 55]
+          note: |
+            L43-L55: bucketed 实现同步后逐参数比较最大误差。
+      common_confusions:
+        - 只在 world_size=1 跑通，就判断 DDP 语义正确。
+        - 只检查不报错，没有比较 PyTorch DDP 的梯度数值。
+        - 把 CPU/gloo 的速度当成 bucket size 调优依据。
+      checkpoint_questions:
+        - patch-test 为什么需要 2 个 rank？
+        - 哪个测试验证单个参数大于 bucket size 的情况？
+        - 为什么 frozen param 的 grad 应该保持 None？
+
+    - title: 生产对照：Megatron buffer、bucket group 和 distributed optimizer
+      plain_explanation: |
+        Megatron 的真实 DDP 先收集 trainable params，再按 dtype、grad dtype、expert parallel 等条件分组，给每组分配 `_ParamAndGradBuffer`。buffer 里有参数和梯度的连续存储，bucket 记录自己负责的参数列表、在大 buffer 中的 offset，以及 param 到局部区间的映射。
+
+        通信层还会把 bucket 放进 bucket group，用 backward hook 标记参数梯度 ready。当一个 bucket group 的梯度齐全时，可以异步发起 all-reduce 或 reduce-scatter。没有 distributed optimizer 时，它做 data parallel all-reduce；启用 distributed optimizer 时，它对 grad buffer 做 reduce-scatter，让每个 rank 只拿自己负责的 shard。
+      mental_model: |
+        本关是每个 bucket 同步发货；Megatron 是每个 bucket 有固定仓位，装满后可异步通信，还可能按 shard 分给不同 rank。
+      why_it_matters: |
+        读 Megatron DDP 时，先抓住 bucket、buffer、ready hook 和 collective 这四个状态，源码里的分支就能落回同一条通信主线。
+      source_refs:
+        - title: Megatron DDP 类说明
+          repo_path: github_repo/Megatron-LM/megatron/core/distributed/distributed_data_parallel.py
+          lines: [23, 35]
+          note: |
+            L23-L35: DDP 类说明连续 grad buffer、bucket 和通信 overlap。
+        - title: Megatron trainable params
+          repo_path: github_repo/Megatron-LM/megatron/core/distributed/distributed_data_parallel.py
+          lines: [111, 123]
+          note: |
+            L111-L123: Megatron 收集 trainable params，并初始化 main grad 相关状态。
+        - title: ParamAndGradBucket
+          repo_path: github_repo/Megatron-LM/megatron/core/distributed/param_and_grad_buffer.py
+          lines: [72, 84]
+          note: |
+            L72-L84: bucket 保存参数列表、buffer view、offset 和 scaling factor。
+        - title: ParamAndGradBucketGroup
+          repo_path: github_repo/Megatron-LM/megatron/core/distributed/param_and_grad_buffer.py
+          lines: [159, 171]
+          note: |
+            L159-L171: bucket group 追踪 ready 状态，并在条件满足时发起通信。
+      common_confusions:
+        - 把本关 flatten buffer 等同于 Megatron 的 param/grad buffer view；生产实现会减少额外 copy。
+        - 认为 bucket group 只是 list 包装；它还负责 ready 状态、handle 和 overlap。
+        - 把 reduce-scatter 当成普通 all-reduce 的别名；它改变每个 rank 得到的梯度分片。
+      checkpoint_questions:
+        - Megatron 为什么需要 ParamAndGradBuffer？
+        - bucket 和 bucket group 的职责有什么区别？
+        - distributed optimizer 路径为什么会影响 checkpoint layout？
+
+    - title: 扩展评审：把 bucket 放回 TP、PP、recompute 和 checkpoint
+      plain_explanation: |
+        bucketed DDP 主要改善 grad sync 的 collective 组织。它不减少模型参数量，不减少总梯度字节，也不解决 activation 显存、optimizer state 显存或 pipeline bubble。真实 scale optimization 要同时看 TP、PP、DP、recompute、bucket size、checkpoint I/O、数据加载和网络拓扑。
+
+        `run_scale_stub.py` 用一个估算表把这些指标放在一起：TP 会降低单卡模型显存但增加通信惩罚；PP 会降低部分激活压力但引入 bubble；activation recompute 会降低激活显存但增加计算；GPU 数增加会提高 tokens/sec，也可能暴露通信或 I/O 新瓶颈。报告里要写比较对象、指标、配置和代价。
+      mental_model: |
+        bucket 是通信工具箱里的一个部件。训练变慢可能来自通信，也可能来自显存、重算、流水线、数据或 checkpoint I/O。
+      why_it_matters: |
+        多模态训练会同时遇到长序列、图像 token、DDP 通信和显存压力。只调 bucket size 容易把瓶颈判断错。
+      source_refs:
+        - title: TorchTitan 并行维度
+          repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+          lines: [21, 33]
+          note: |
+            L21-L33: `ParallelDims` 保存 DP、CP、TP、PP、EP 和 world size。
+        - title: TorchTitan 维度校验
+          repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
+          lines: [60, 71]
+          note: |
+            L60-L71: 校验并行度乘积必须匹配 world size。
+        - title: Scale estimate
+          repo_path: labs/l11_megatron_scale_optimization/scripts/run_scale_stub.py
+          lines: [29, 37]
+          note: |
+            L29-L37: 估算函数把 TP、PP、recompute、GPU 数映射到 memory、throughput 和 MFU。
+        - title: Scale metrics
+          repo_path: labs/l11_megatron_scale_optimization/scripts/run_scale_stub.py
+          lines: [64, 76]
+          note: |
+            L64-L76: 脚本把多个场景写入 artifacts 和 metrics。
+      common_confusions:
+        - 把 bucket size 调大当作所有低 MFU 问题的修复。
+        - 只看显存下降，忽略 recompute 额外计算和 PP bubble。
+        - world size 改了之后直接加载旧 optimizer state，不检查 checkpoint 分片布局。
+      checkpoint_questions:
+        - bucketed DDP 解决 scale optimization 中的哪一类瓶颈？
+        - TP、PP、recompute 各自改变哪些指标和代价？
+        - 低 MFU 排查为什么要先固定 command、config 和 metrics？
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l11_megatron_scale_optimization/system_map.md
+    description: L12 在训练系统扩展路线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l11_megatron_scale_optimization/lecture.md
+    description: 从 bucketed grad sync、数值等价、Megatron DDP 对照讲到扩展评审。
+  - title: 源码带读讲义
+    path: labs/l11_megatron_scale_optimization/source_walkthrough.md
+    description: 按 patch、测试、Megatron DDP、ParamAndGradBuffer、TorchTitan 和 drill 组织源码阅读路线。

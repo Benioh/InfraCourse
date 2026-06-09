@@ -1,51 +1,696 @@
 id: l21_sglang_serving_core
-title: RadixCache 前缀缓存
-level: L08
+title: "L22 · SGLang RadixCache Prefix Reuse"
+level: L22
 act: 第 3 章：推理服务
 role: SGLang 学徒
 priority: 核心
 estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - Python stdlib
-  - SGLang (对照)
+  - SGLang
+  - MiniInfra
 
 patch:
   description: |
-    实现 RadixCache：trie-based 前缀缓存，支持 match_prefix / insert / LRU evict。
-    多轮 chat 共享 system prompt + 历史 KV，OpenAI / Anthropic 的 "prompt caching"
-    背后就是这个机制。
+    实现一个教学版 RadixCache：用 token id trie 做最长前缀匹配，重复插入不重复计数，
+    并用 LRU 叶子驱逐保护共享前缀。
   task_md: labs/l21_sglang_serving_core/patch/task.md
   starter_file: labs/l21_sglang_serving_core/patch/starter/radix_cache.py
   reference_file: labs/l21_sglang_serving_core/patch/reference/radix_cache.py
   test_command: make patch-test M=l21_sglang_serving_core
   status_file: labs/l21_sglang_serving_core/patch/.last_run.json
   test_count: 7
-  test_kind: 行为契约 + 结果对比
+  test_kind: RadixCache trie 行为合同验证
 
 source_reading:
-  - title: SGLang RadixCache 真实实现
-    repo_path: github_repo/sglang/python/sglang/srt/managers/
-    focus: 看 path compression、reference count、与 PagedAttention 集成
-  - title: SGLang paper section 3
-    repo_path: docs/术语表.md
+  - title: Patch starter
+    repo_path: labs/l21_sglang_serving_core/patch/starter/radix_cache.py
+    focus: 学生需要补齐的 trie 状态、匹配、插入和驱逐
+    highlights:
+      - title: 读 Node 字段
+        lines: [18, 25]
+        note: |
+          L18-L25: `_Node` 保存 child map、访问时间、父节点和从父节点来的 token。
+      - title: 读 cache 初始化和 match 入口
+        lines: [28, 40]
+        note: |
+          L28-L36: RadixCache 持有 root、容量、访问计数和节点总数。
+          L38-L40: `match_prefix` 的合同是返回已缓存的最长前缀长度。
+      - title: 读 match TODO
+        lines: [41, 51]
+        note: |
+          L41-L50: TODO 提示沿 token ids 走 trie，并在命中节点上刷新 LRU 时间。
+          L51: 未完成时抛出 L22 patch 错误。
+      - title: 读 insert 前半
+        lines: [53, 60]
+        note: |
+          L53-L60: `insert` 只在 child 缺失时创建新节点。
+      - title: 读 insert 后半
+        lines: [61, 69]
+        note: |
+          L61-L68: 新节点增加 `_total`，访问节点刷新时间，超容量后触发 evict。
+          L69: 未完成时抛出 L22 patch 错误。
+      - title: 读 evict TODO
+        lines: [71, 76]
+        note: |
+          L71-L76: docstring 说明 LRU 删除叶子节点。
+      - title: 读 evict 实现提示
+        lines: [77, 88]
+        note: |
+          L77-L88: TODO 要反复收集叶子，删除最久未访问的叶子。
+      - title: 读 leaves TODO
+        lines: [90, 92]
+        note: |
+          L90-L92: `_collect_leaves` 需要 DFS 返回非 root 叶子。
+  - title: Patch reference
+    repo_path: labs/l21_sglang_serving_core/patch/reference/radix_cache.py
+    focus: reference 中最长前缀、重复插入和 LRU 叶子驱逐的状态迁移
+    highlights:
+      - title: 读 match_prefix
+        lines: [28, 39]
+        note: |
+          L28-L31: 从 root 开始，matched 初始为 0。
+          L32-L39: 命中 child 时刷新访问时间，miss 时停止并返回长度。
+      - title: 读 insert 主循环
+        lines: [41, 51]
+        note: |
+          L41-L48: 缺失 child 才新建节点并增加计数。
+          L49-L51: 每个走过的节点都刷新访问时间。
+      - title: 读 insert 容量边界
+        lines: [52, 54]
+        note: |
+          L52-L54: 节点数超过容量时 evict 溢出部分，并返回新增数量。
+      - title: 读 evict
+        lines: [56, 68]
+        note: |
+          L56-L62: 每轮收集叶子并选择最冷节点。
+          L63-L68: 从父节点删除叶子，并减少 `_total`。
+      - title: 读 collect leaves
+        lines: [70, 81]
+        note: |
+          L70-L76: DFS 遇到非 root 叶子才加入结果。
+          L77-L81: 非叶子继续遍历 children。
+  - title: Patch tests
+    repo_path: labs/l21_sglang_serving_core/patch/tests/test_patch.py
+    focus: patch-test 对 trie 行为合同的验收边界
+    highlights:
+      - title: 读空 cache 和完整命中
+        lines: [21, 32]
+        note: |
+          L21-L25: 空 cache 匹配为 0，节点数也为 0。
+          L28-L32: 插入完整序列后应完整命中。
+      - title: 读部分命中
+        lines: [35, 41]
+        note: |
+          L35-L41: cached `[1,2,3,4,5]` 对短 query 和 mismatch query 返回不同前缀长度。
+      - title: 读重复插入
+        lines: [44, 51]
+        note: |
+          L44-L51: 同一序列第二次插入返回 0，节点总数不增加。
+      - title: 读节点数测试
+        lines: [54, 60]
+        note: |
+          L54-L60: `[1,2,3]` 和 `[1,2,4]` 共享前缀，节点总数是 4。
+      - title: 读 LRU 测试
+        lines: [62, 73]
+        note: |
+          L62-L69: 先插入两条路径，再 touch 第一条路径。
+          L70-L73: evict 后旧路径被删，最近访问路径保留。
+      - title: 读共享前缀测试
+        lines: [76, 85]
+        note: |
+          L76-L85: 两条路径共享 `[1,2]`，只 evict 一个叶子。
+      - title: 读共享前缀断言
+        lines: [86, 90]
+        note: |
+          L86-L90: 共享前缀和另一条完整路径必须仍能命中。
+  - title: MiniInfra RadixCache
+    repo_path: mini_infra/sglang/srt/mem_cache/radix_cache.py
+    focus: SGLang-shaped 参数、namespace、match、insert 和 cache_finished_req
+    highlights:
+      - title: 读 RadixKey
+        lines: [7, 13]
+        note: |
+          L7-L13: RadixKey 包含 token_ids 和可选 extra_key，长度来自 token 数。
+      - title: 读 match 参数和结果
+        lines: [16, 24]
+        note: |
+          L16-L18: MatchPrefixParams 把 lookup key 包成结构化参数。
+          L21-L24: MatchResult 返回命中长度和对应 value。
+      - title: 读 insert 参数
+        lines: [27, 31]
+        note: |
+          L27-L31: InsertParams 包含 key、value 和 priority。
+      - title: 读 MiniInfra match
+        lines: [60, 72]
+        note: |
+          L60-L66: lookup 按 `(token, extra_key)` 走 children。
+          L68-L72: 只有有 value 的节点才更新 best match。
+      - title: 读 MiniInfra insert
+        lines: [74, 81]
+        note: |
+          L74-L80: insert 走到路径末端后写入 value 和 priority。
+          L81: 返回旧 prefix 长度，表达重复插入边界。
+      - title: 读 cache_finished_req
+        lines: [83, 95]
+        note: |
+          L83-L90: 请求未插入或 prompt 为空时不写 cache。
+          L91-L95: prompt_tokens 被写成 RadixKey，并保存教学版 KV value。
+      - title: 读 evict
+        lines: [97, 105]
+        note: |
+          L97-L103: evict 按 key 找到节点，路径不存在时返回 false。
+          L104-L105: 教学版 evict 清 value，不删除整棵子树。
+  - title: MiniInfra Scheduler
+    repo_path: mini_infra/sglang/srt/managers/scheduler.py
+    focus: waiting 请求如何经过 prefix cache 再进入 decode
+    highlights:
+      - title: 读 scheduler 状态
+        lines: [19, 28]
+        note: |
+          L19-L25: Scheduler 持有 prefix_cache、waiting 和 running。
+          L27-L28: 新请求只进入 waiting。
+      - title: 读 run_batch lookup
+        lines: [30, 39]
+        note: |
+          L30-L35: run_batch 从 waiting 取请求。
+          L36-L39: prefill 前先调用 prefix_cache.match_prefix。
+      - title: 读 run_batch 输出
+        lines: [40, 50]
+        note: |
+          L40-L45: prefill 记录 matched_prefix_tokens。
+          L46-L50: 模拟生成 token 后写回 cache，并把请求放入 running。
+  - title: MiniInfra scheduler smoke
+    repo_path: mini_infra/sglang/run_scheduler.py
+    focus: repeated-prefix smoke 怎样制造可观察的 cache hit
+    highlights:
+      - title: 读 repeated-prefix 请求
+        lines: [19, 25]
+        note: |
+          L19-L24: 前两条请求共享 prompt 前缀，第三条重复第一条请求。
+          L25: payload 同时保存第一轮和第二轮结果。
+      - title: 读 run artifact
+        lines: [32, 36]
+        note: |
+          L32-L36: 带 run id 时写 command snapshot 和 scheduler artifact。
+  - title: SGLang BasePrefixCache
+    repo_path: github_repo/sglang/python/sglang/srt/mem_cache/base_prefix_cache.py
+    focus: 真实 prefix cache 的统一参数和返回值
+    highlights:
+      - title: 读 MatchPrefixParams
+        lines: [35, 43]
+        note: |
+          L35-L40: match 参数携带 RadixKey。
+          L41-L43: Mamba 分支会额外携带 req。
+      - title: 读 InsertParams 前半
+        lines: [46, 55]
+        note: |
+          L46-L52: insert 参数包含 key 和 KV value。
+          L53-L55: Mamba 可以带单独的 state value。
+      - title: 读 InsertParams 后半
+        lines: [56, 63]
+        note: |
+          L56-L63: SWA、chunked 和 priority 都进入 insert 参数。
+      - title: 读 MatchResult 字段说明
+        lines: [123, 135]
+        note: |
+          L123-L130: MatchResult 记录 device indices 和命中节点。
+          L132-L135: host_hit_length 服务 HiCache 或 hybrid cache。
+      - title: 读 MatchResult 类型字段
+        lines: [142, 147]
+        note: |
+          L142-L147: 真实返回值包含 KV device indices、节点引用和 cache_protected_len。
+  - title: SGLang RadixCache
+    repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+    focus: 真实 TreeNode、match_prefix、insert、cache_finished_req 和 evict
+    highlights:
+      - title: 读 TreeNode 主字段
+        lines: [211, 223]
+        note: |
+          L211-L219: TreeNode 保存 children、parent、key 和 KV value。
+          L220-L223: lock_ref 和访问时间决定驱逐安全性。
+      - title: 读 TreeNode 扩展字段
+        lines: [224, 233]
+        note: |
+          L224-L231: hit_count、host_ref_counter、host_value 和 hash_value 服务观测与 host cache。
+          L232-L233: priority 支持 priority-aware eviction。
+      - title: 读 RadixCache 初始化
+        lines: [321, 330]
+        note: |
+          L321-L330: 初始化保存 pool、page_size、metrics、finished insert 和 eviction policy。
+      - title: 读 eviction strategy
+        lines: [342, 348]
+        note: |
+          L342-L348: eviction_policy 选择 LRU、LFU、FIFO、MRU 或 FILO。
+      - title: 读更多 eviction strategy
+        lines: [349, 355]
+        note: |
+          L349-L355: MRU、FILO、priority 和 SLRU 也可作为策略。
+      - title: 读 match_prefix 文档
+        lines: [398, 410]
+        note: |
+          L398-L405: match_prefix 按 token ids 和 extra_key 查最长前缀。
+          L407-L410: extra_key 可隔离 adapter、cache version 或 retrieval context。
+      - title: 读 match_prefix 主路径
+        lines: [435, 447]
+        note: |
+          L435-L437: key 先处理 bigram view。
+          L438-L447: empty result 返回空 device indices 和 root node。
+      - title: 读 match_prefix 对齐和返回
+        lines: [449, 457]
+        note: |
+          L449-L455: cache 关闭、空 key 或 page 对齐后为空都会返回 empty result。
+          L457: helper 返回 KV value 和 last node。
+      - title: 读 match_prefix 返回
+        lines: [458, 466]
+        note: |
+          L458-L466: 命中 KV value 被拼接，并包装成 MatchResult。
+      - title: 读 insert
+        lines: [468, 480]
+        note: |
+          L468-L480: insert 处理 disable、key、value、priority、chunked 和 page alignment。
+      - title: 读 insert fallback 和返回
+        lines: [481, 486]
+        note: |
+          L481-L486: 没有 value 时用 token ids 构造 fallback，并返回已存在 prefix 长度。
+      - title: 读 cache_finished_req 前半
+        lines: [488, 500]
+        note: |
+          L488-L492: finished insert 可被配置关闭。
+          L494-L500: cache 关闭时释放已提交 KV indices 并返回。
+      - title: 读 cache_finished_req 插入
+        lines: [502, 512]
+        note: |
+          L502-L512: input/output ids 转成 page-aligned RadixKey 和 KV values。
+      - title: 读 cache_finished_req insert 调用
+        lines: [513, 518]
+        note: |
+          L513-L518: is_insert 时把 KV indices 插入 RadixCache。
+      - title: 读 cache_finished_req 释放
+        lines: [520, 530]
+        note: |
+          L520-L523: 已在树里的重复 KV indices 会被释放。
+          L524-L530: 未插入路径和未对齐 tail 也会释放。
+      - title: 读 evict 前半
+        lines: [608, 620]
+        note: |
+          L608-L614: evict 读取请求 token 数和当前可驱逐叶子。
+          L615-L620: 根据 eviction strategy 建 heap 并准备计数。
+      - title: 读 evict 后半
+        lines: [621, 630]
+        note: |
+          L621-L627: 逐个弹出叶子，释放 KV value 并删除 leaf。
+          L628-L630: 父节点变成可驱逐叶子时入 heap。
+      - title: 读 evict 指标
+        lines: [632, 635]
+        note: |
+          L632-L635: 删除事件和 eviction metrics 会被记录。
+  - title: SGLang schedule policy
+    repo_path: github_repo/sglang/python/sglang/srt/managers/schedule_policy.py
+    focus: prefix match 怎样进入 waiting queue 调度
+    highlights:
+      - title: 读 prefix match 入口
+        lines: [185, 193]
+        note: |
+          L185-L193: schedule policy 为 waiting queue 计算 prefix match，并重置临时 radix tree。
+      - title: 读真实 tree cache match
+        lines: [195, 203]
+        note: |
+          L195-L203: 每个 waiting 请求用 origin_input_ids、output_ids 和 extra_key 查 tree cache。
+      - title: 读 match 结果写回请求
+        lines: [204, 214]
+        note: |
+          L204-L214: prefix_indices、last_node、host_hit_length 写回 request。
+      - title: 读 in-batch prefix caching 判断
+        lines: [216, 223]
+        note: |
+          L216-L223: 小命中前缀会进入 in-batch prefix caching 逻辑。
+      - title: 读 in-batch prefix caching 降优先级
+        lines: [224, 234]
+        note: |
+          L224-L234: 如果当前 batch 内已有足够长共享前缀，请求可能临时降优先级。
+      - title: 读临时 radix 插入
+        lines: [236, 243]
+        note: |
+          L236-L243: 未命中时把 waiting 请求前缀插入临时 radix tree。
+      - title: 读 longest-prefix 排序
+        lines: [246, 256]
+        note: |
+          L246-L256: waiting queue 可按 prefix_indices 长度排序。
+  - title: Server validation script
+    repo_path: labs/l21_sglang_serving_core/scripts/run_server.py
+    focus: server validation 写出哪些本地证据
+    highlights:
+      - title: 读配置和环境检测
+        lines: [29, 38]
+        note: |
+          L29-L38: CLI 读取配置，准备 run 目录和 resolved config。
+      - title: 读 SGLang 可用性
+        lines: [40, 42]
+        note: |
+          L40-L42: 检查 SGLang import、CUDA 和推荐启动命令。
+      - title: 读 validation 输出
+        lines: [43, 55]
+        note: |
+          L43-L55: serve.log 和 artifact 写出本地 validation 边界。
+      - title: 读 validation metrics
+        lines: [56, 64]
+        note: |
+          L56-L64: metrics 行标记 config_validated 和 cache_hit_rate。
+  - title: SGLang benchmark script
+    repo_path: labs/l21_sglang_serving_core/scripts/bench_sglang.py
+    focus: repeated-prefix benchmark 如何区分 served 和 validation-only
+    highlights:
+      - title: 读请求 payload
+        lines: [28, 36]
+        note: |
+          L28-L36: call_server 构造 OpenAI-compatible chat completion payload。
+      - title: 读请求发送
+        lines: [37, 49]
+        note: |
+          L37-L41: 请求发往 `/v1/chat/completions`。
+          L42-L49: 成功返回耗时，URL 错误返回失败。
+      - title: 读请求结果
+        lines: [42, 49]
+        note: |
+          L42-L47: 请求成功时返回 ok 和 elapsed_ms。
+          L48-L49: URL 错误时返回失败和 0。
+      - title: 读 workload 构造
+        lines: [52, 60]
+        note: |
+          L52-L60: CLI 读取 run id、配置和 workload。
+      - title: 读 workload prompt
+        lines: [62, 69]
+        note: |
+          L62-L69: 不同 workload 选择不同 prompt。
+      - title: 读请求调用
+        lines: [70, 75]
+        note: |
+          L70-L75: repeated_prefix workload 调用 server 并传入固定前缀 prompt。
+      - title: 读 served metrics
+        lines: [76, 88]
+        note: |
+          L76-L88: server 成功时写 TTFT、requests_per_sec 和 cache_hit_rate。
+      - title: 读 validation-only metrics
+        lines: [89, 101]
+        note: |
+          L89-L101: server 不可达时写 validation_only 和空 TTFT。
+      - title: 读 metrics 追加
+        lines: [103, 104]
+        note: |
+          L103-L104: metrics 以 JSONL 追加到 run 目录。
 
 mini_infra_targets:
-  - mini_infra/sglang/
-
+  - mini_infra/sglang/srt/mem_cache/radix_cache.py
+  - mini_infra/sglang/srt/managers/scheduler.py
+  - mini_infra/sglang/run_scheduler.py
 notebooks:
   - notebooks/n09_prefix_cache.ipynb
-
 tickets:
   - sglang_high_ttft_001
   - sglang_cache_miss_002
   - sglang_port_conflict_003
   - sglang_model_load_004
-
 prereq: l20_vllm_scheduler_kv
-next_lab: l23_quant_serving
-
+next_lab: l22_flash_attn_v2_bench
 gpu_modes:
-  local: CPU 即可
-  cluster: 真 SGLang serving 验证
+  local: CPU patch-test、MiniInfra smoke 和 validation-only serving smoke
+  cluster: 真 SGLang server repeated-prefix benchmark
+
+lesson:
+  opening: |-
+    # L22：SGLang RadixCache Prefix Reuse
+
+    L22 继续推理服务主线。L21 讲 scheduler 和 KV block admission；本讲关注 repeated-prefix workload：相同 system prompt、few-shot examples、工具 schema、RAG 模板或多轮对话历史反复出现时，RadixCache 怎样复用已经算过的前缀 KV，减少重复 prefill。
+  sections:
+    - title: 系统位置：从 KV 容量到 prefix 复用
+      plain_explanation: |-
+        vLLM scheduler 课程把请求生命周期和 KV block 容量讲清楚。SGLang RadixCache 接着处理另一个常见瓶颈：请求已经能被接纳，但首 token 前还在重复计算同一段长 prompt。Prefix cache 的目标是让共享前缀只 prefill 一次，后续请求从 cache 中拿到对应 KV indices，只计算 suffix。
+
+        本讲 patch 不接 GPU，也不模拟真实 KV page。它只验证 trie 合同：token 前缀怎样匹配、插入如何避免重复计数、LRU 如何删除冷叶子并保护共享前缀。真实 SGLang 在同一合同上增加 page alignment、reference lock、namespace 和调度策略。
+      mental_model: Scheduler 决定谁能运行，RadixCache 决定这次运行还需要重新算多少 prompt 前缀。
+      why_it_matters: repeated-prefix workload 很常见。没有 prefix cache 时，TTFT 可能被重复 prefill 支配；cache miss 又常被误判成模型慢或 GPU 慢。
+      source_refs:
+        - title: Benchmark workload 构造
+          repo_path: labs/l21_sglang_serving_core/scripts/bench_sglang.py
+          lines: [62, 69]
+          note: |
+            L62-L69: workload 参数决定 prompt 模式。
+        - title: Benchmark 请求调用
+          repo_path: labs/l21_sglang_serving_core/scripts/bench_sglang.py
+          lines: [70, 75]
+          note: |
+            L70-L75: repeated_prefix 会拼接固定前缀和 suffix 后发请求。
+        - title: MiniInfra scheduler cache 入口
+          repo_path: mini_infra/sglang/srt/managers/scheduler.py
+          lines: [30, 39]
+          note: |
+            L30-L35: scheduler 从 waiting 取请求。
+            L36-L39: prefill 前先执行 prefix_cache.match_prefix。
+      common_confusions:
+        - 把 prefix cache 当成请求调度器，忽略它只减少 prefill 前缀计算。
+        - patch-test 通过后直接宣称真实 TTFT 改善。
+      checkpoint_questions:
+        - L22 解决的是 queue admission、prefix prefill 复用，还是 decode 采样？
+        - repeated-prefix workload 至少要固定哪些输入？
+    - title: 命中边界：cache key 是 token ids 和 namespace
+      plain_explanation: |-
+        Prefix cache 按 token id 前缀命中。两个 prompt 字符串相同，只要 chat template、BOS/EOS、空格、换行、工具 schema 顺序、tokenizer 版本或 RAG 文档排序不同，就可能得到不同 token ids。工程排查时先比较 token id 的最长公共前缀，再谈 RadixCache 实现。
+
+        真实 SGLang 还会把 `extra_key` 放进 RadixKey。它可以隔离不同 adapter、cache version、retrieval context 或租户。token ids 一样但 namespace 不同，也不应该共享同一段 KV。
+      mental_model: Prefix cache 认 token 齿形和 namespace，不认人类读起来是否相同。
+      why_it_matters: 很多 cache miss 来自模板漂移或 namespace 隔离。只看字符串和 TTFT，很容易定位错。
+      source_refs:
+        - title: MiniInfra RadixKey
+          repo_path: mini_infra/sglang/srt/mem_cache/radix_cache.py
+          lines: [7, 13]
+          note: |
+            L7-L10: RadixKey 同时包含 token_ids 和 extra_key。
+            L12-L13: key 长度由 token_ids 决定。
+        - title: 真实 match_prefix 文档
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+          lines: [398, 410]
+          note: |
+            L398-L405: 真实 match_prefix 使用 token ids 和 extra_key 共同决定 namespace。
+            L407-L410: extra_key 可隔离 adapter、cache version 或 retrieval context。
+      common_confusions:
+        - 认为文本相同就一定 hit。
+        - 忽略 extra_key，导致不同上下文错误共享或应该共享的请求被隔离。
+      checkpoint_questions:
+        - cache miss 时第一步应该比较字符串还是 token id LCP？
+        - "`extra_key` 可以用来隔离哪些请求？"
+    - title: Patch trie：最长前缀、新增节点和 LRU 时间
+      plain_explanation: |-
+        教学版 `_Node` 保存 children、last_access、parent 和 token_from_parent。`match_prefix` 从 root 沿 token ids 前进，返回能走到的最长长度，并刷新命中节点的 last_access。`insert` 沿已有路径复用节点，只在 child 缺失时创建节点并增加 `_total`。重复插入同一序列时，新增数量为 0。
+
+        `last_access` 必须在 match 和 insert 两条路径都更新。一个前缀可能很久没有新插入，但被持续命中；LRU 应该把它视为热数据。
+      mental_model: 每个 token 是 trie 上一步台阶；走得越远，说明可复用前缀越长。
+      why_it_matters: 节点计数、访问时间和父子关系任何一个错，都会表现为错误 hit、重复计数或误删热前缀。
+      source_refs:
+        - title: starter Node 和 cache 状态
+          repo_path: labs/l21_sglang_serving_core/patch/starter/radix_cache.py
+          lines: [18, 25]
+          note: |
+            L18-L25: _Node 保存 trie 结构和 LRU 需要的元数据。
+        - title: starter cache 状态
+          repo_path: labs/l21_sglang_serving_core/patch/starter/radix_cache.py
+          lines: [28, 36]
+          note: |
+            L28-L36: RadixCache 持有 root、容量、访问计数和总节点数。
+        - title: reference match_prefix
+          repo_path: labs/l21_sglang_serving_core/patch/reference/radix_cache.py
+          lines: [28, 39]
+          note: |
+            L28-L31: match 从 root 和 matched=0 开始。
+            L32-L39: 命中节点时刷新 LRU 时间，miss 时停止。
+        - title: reference insert
+          repo_path: labs/l21_sglang_serving_core/patch/reference/radix_cache.py
+          lines: [41, 51]
+          note: |
+            L41-L48: 缺失 child 才新建节点并增加 `_total`。
+            L49-L51: 访问节点刷新时间。
+        - title: reference insert 容量边界
+          repo_path: labs/l21_sglang_serving_core/patch/reference/radix_cache.py
+          lines: [52, 54]
+          note: |
+            L52-L54: 超容量后 evict，并返回新增数量。
+      common_confusions:
+        - 把 `_total` 当成插入序列条数。
+        - 只在 insert 时刷新 last_access，导致热门命中前缀被删。
+      checkpoint_questions:
+        - 重复插入 `[1,2,3]` 时第二次应返回多少？
+        - "`match_prefix([1,2,9])` 在 cache 只有 `[1,2,3]` 时返回多少？"
+    - title: Evict：只删可安全移除的叶子
+      plain_explanation: |-
+        如果 cache 中有 `[1,2,3]` 和 `[1,2,4]`，节点 `[1,2]` 被两条路径共享。删除共享前缀会破坏仍可命中的请求。教学版 evict 先收集所有非 root 叶子，选择 last_access 最小的叶子，从父节点删除它；如果父节点因此变成叶子，下一轮才可能删除。
+
+        真实 SGLang 还要考虑 lock_ref、KV value、eviction policy、priority 和指标。课堂版只用节点数模拟容量，是为了看清“叶子删除保护共享前缀”这个不变量。
+      mental_model: Evict 是修剪末端枝条，不是砍共享主干。
+      why_it_matters: 错删共享前缀会让 hit rate 波动，真实系统里还可能让 trie 和 KV page 引用不同步。
+      source_refs:
+        - title: reference evict
+          repo_path: labs/l21_sglang_serving_core/patch/reference/radix_cache.py
+          lines: [56, 68]
+          note: |
+            L56-L62: evict 每轮收集叶子，并选择最冷叶子。
+            L63-L68: 从父节点删除叶子并减少总数。
+        - title: shared prefix test
+          repo_path: labs/l21_sglang_serving_core/patch/tests/test_patch.py
+          lines: [76, 85]
+          note: |
+            L76-L85: 两条路径共享 `[1,2]`，测试只删除一个叶子。
+        - title: shared prefix assertions
+          repo_path: labs/l21_sglang_serving_core/patch/tests/test_patch.py
+          lines: [86, 90]
+          note: |
+            L86-L90: 共享前缀和另一条完整路径必须保留。
+        - title: real SGLang evict
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+          lines: [621, 630]
+          note: |
+            L621-L627: 真实 evict 弹出叶子、释放 KV value 并删除 leaf。
+            L628-L630: 父节点变成可驱逐叶子后继续加入 heap。
+        - title: real SGLang evict metrics
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+          lines: [632, 635]
+          note: |
+            L632-L635: 删除事件和 eviction metrics 会被记录。
+      common_confusions:
+        - 一次 evict 删除整条旧路径。
+        - 忽略 running 请求的 lock_ref，把正在使用的节点当作可驱逐。
+      checkpoint_questions:
+        - 为什么 evict 要重新收集叶子？
+        - 真实 SGLang 删除叶子时还要释放什么资源？
+    - title: MiniInfra 集成：prefill 前 match，完成后 insert
+      plain_explanation: |-
+        MiniInfra scheduler 展示 prefix cache 怎样进入 serving 路径。waiting 请求被取出后，scheduler 先调用 `prefix_cache.match_prefix`，把 `matched_prefix_tokens` 写入 prefill 记录；随后模拟生成一个 token，并调用 `cache_finished_req` 把 prompt KV 写回 cache。
+
+        这说明 trie 只是核心数据结构。服务效果取决于 scheduler 是否在 prefill 前查询、在完成后写回，并把命中长度转化为“少算多少 prompt token”。
+      mental_model: Scheduler 先问 cache 已经有什么，再决定本次 prefill 还需要做多少。
+      why_it_matters: 单测通过但 scheduler 没接入 cache，真实 TTFT 不会变化。
+      source_refs:
+        - title: MiniInfra cache_finished_req
+          repo_path: mini_infra/sglang/srt/mem_cache/radix_cache.py
+          lines: [83, 95]
+          note: |
+            L83-L90: 不插入或空 prompt 不写 cache。
+            L91-L95: prompt_tokens 转成 RadixKey 并写入教学版 KV value。
+        - title: MiniInfra run_batch 输出
+          repo_path: mini_infra/sglang/srt/managers/scheduler.py
+          lines: [40, 50]
+          note: |
+            L40-L45: prefill 记录 matched_prefix_tokens。
+            L46-L50: decode 后写回 cache，并把请求加入 running。
+        - title: MiniInfra repeated-prefix smoke
+          repo_path: mini_infra/sglang/run_scheduler.py
+          lines: [19, 25]
+          note: |
+            L19-L24: smoke 构造共享前缀和重复请求。
+            L25: payload 保存两轮结果，用于观察第二轮命中。
+      common_confusions:
+        - 只看 RadixCache 单测，忽略 scheduler 是否真的调用 cache。
+        - 把 MiniInfra 的 `["kv"]` value 当成真实 GPU KV tensor。
+      checkpoint_questions:
+        - MiniInfra 在 prefill 前和请求完成后分别调用哪个 cache 方法？
+        - "`matched_prefix_tokens` 应该怎样影响 prefill 工作量？"
+    - title: 真实 SGLang：KV indices、page alignment 和调度策略
+      plain_explanation: |-
+        真实 SGLang 的 MatchResult 返回 `device_indices`，这是已经命中的 KV cache indices。TreeNode 还保存 lock_ref、host_value、hash_value、priority 和访问时间。`match_prefix` 会按 page size 对齐 key，必要时 split node；`cache_finished_req` 会插入 KV indices，释放重复 KV 和未对齐 tail。
+
+        Prefix cache 也进入调度策略。schedule policy 会为 waiting 请求预计算 prefix matches，写回 `prefix_indices` 和 last node，并可以按最长 prefix 或 in-batch prefix caching 调整 waiting queue 顺序。
+      mental_model: 课堂版回答“命中多长”，真实 SGLang 还要回答“命中的 KV pages 在哪里、是否被锁、调度时优先谁”。
+      why_it_matters: 线上问题经常出在 page alignment、namespace、lock_ref、eviction strategy 或调度策略，而不是 trie 查找本身。
+      source_refs:
+        - title: Base MatchResult
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/base_prefix_cache.py
+          lines: [142, 147]
+          note: |
+            L142-L147: MatchResult 包含 device_indices、命中节点和 cache_protected_len。
+        - title: TreeNode production fields
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+          lines: [211, 223]
+          note: |
+            L211-L223: TreeNode 保存 key、value、lock_ref 和访问时间。
+        - title: TreeNode extended fields
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+          lines: [224, 233]
+          note: |
+            L224-L233: host cache、hash 和 priority 支撑生产特性。
+        - title: cache_finished_req release
+          repo_path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
+          lines: [520, 530]
+          note: |
+            L520-L523: 重复 KV indices 被释放。
+            L524-L530: 未插入路径和未对齐 tail 也被释放。
+        - title: schedule policy prefix matches
+          repo_path: github_repo/sglang/python/sglang/srt/managers/schedule_policy.py
+          lines: [195, 203]
+          note: |
+            L195-L203: waiting 请求用 input/output ids 和 extra_key 查 tree cache。
+        - title: schedule policy match result
+          repo_path: github_repo/sglang/python/sglang/srt/managers/schedule_policy.py
+          lines: [204, 214]
+          note: |
+            L204-L214: prefix_indices 和命中节点写回 request。
+      common_confusions:
+        - 以为真实 RadixCache 只返回命中长度。
+        - 认为 cache 命中只影响计算量，不会进入调度排序。
+      checkpoint_questions:
+        - "`device_indices` 和课堂版 matched length 的差别是什么？"
+        - page alignment 为什么会让可缓存长度和 prompt 长度不同？
+    - title: 验证边界：patch-test、server validation 和 benchmark
+      plain_explanation: |-
+        L22 有三个层次的验证。patch-test 验证 trie 行为；`run_server.py` 验证本地 SGLang/CUDA 状态和启动命令记录；`bench_repeated_prefix.py` 连接 OpenAI-compatible server 并写 TTFT/cache metrics。没有真实 server 时，benchmark 会写 `validation_only`。
+
+        报告必须写清本次属于哪一层。validation-only 可以证明命令、配置和 artifact 路径，但不能证明 TTFT 下降或 cache hit rate 改善。
+      mental_model: 单测证明树正确，server validation 证明路径可复查，真实 benchmark 才能讨论性能。
+      why_it_matters: Prefix cache 的收益依赖 workload 和真实 server 状态。把 validation-only 当成性能结果会误导后续调参。
+      source_refs:
+        - title: run_server validation
+          repo_path: labs/l21_sglang_serving_core/scripts/run_server.py
+          lines: [40, 42]
+          note: |
+            L40-L42: 脚本记录 SGLang import、CUDA 和启动命令。
+        - title: run_server validation artifact
+          repo_path: labs/l21_sglang_serving_core/scripts/run_server.py
+          lines: [43, 55]
+          note: |
+            L43-L55: serve.log 和 artifact 写出 validation 边界。
+        - title: run_server validation metrics
+          repo_path: labs/l21_sglang_serving_core/scripts/run_server.py
+          lines: [56, 64]
+          note: |
+            L56-L64: metrics 行标记 config_validated 和 cache_hit_rate。
+        - title: benchmark served metrics
+          repo_path: labs/l21_sglang_serving_core/scripts/bench_sglang.py
+          lines: [76, 88]
+          note: |
+            L76-L88: server 成功时写 TTFT、requests_per_sec、cache_hit_rate 和 workload。
+        - title: benchmark validation-only metrics
+          repo_path: labs/l21_sglang_serving_core/scripts/bench_sglang.py
+          lines: [89, 101]
+          note: |
+            L89-L101: server 不可达时写 validation_only 和空 TTFT。
+        - title: benchmark metrics append
+          repo_path: labs/l21_sglang_serving_core/scripts/bench_sglang.py
+          lines: [103, 104]
+          note: |
+            L103-L104: metrics 追加到 JSONL。
+      common_confusions:
+        - patch-test 通过后就认为真实 SGLang serving 已经变快。
+        - server 不可达时仍把 validation-only 产物写成真实 benchmark。
+      checkpoint_questions:
+        - L22 的三层验证分别证明什么？
+        - repeated-prefix benchmark 的报告必须写清哪些固定变量？
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l21_sglang_serving_core/system_map.md
+    description: 本讲在推理服务主线中的位置、RadixCache 局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l21_sglang_serving_core/lecture.md
+    description: 从 repeated-prefix 问题、prefix hit 边界、trie 合同讲到真实 SGLang 和 benchmark。
+  - title: 源码带读讲义
+    path: labs/l21_sglang_serving_core/source_walkthrough.md
+    description: 按 patch、MiniInfra、真实 SGLang 和 benchmark 组织源码阅读路线。

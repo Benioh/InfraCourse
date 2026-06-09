@@ -1,15 +1,13 @@
 id: l02_pytorch_systems
-title: 显存账本（params/grads/optimizer states）
-level: L01
-act: 第 0 章：分布式系统基础
+title: L02 · PyTorch 显存账本与训练 step 证据链
+level: L02
+act: 第 1 章：PyTorch 训练系统基础
 role: PyTorch 系统学徒
 priority: 核心
 estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
-  - PyTorch
-
+- PyTorch
 patch:
   description: |
     实现 3 个显存计数函数：count_param_bytes / count_grad_bytes /
@@ -22,29 +20,575 @@ patch:
   status_file: labs/l02_pytorch_systems/patch/.last_run.json
   test_count: 7
   test_kind: 结果对比
+lesson:
+  opening: |
+    这节课解决一个训练系统里最常见的定量问题：模型还没真正跑起来就 CUDA OOM 时，显存到底被哪几类对象占掉了。只说“模型太大”没有排障价值。学生需要能把训练显存先拆成参数（parameters, params）、梯度（gradients, grads）、优化器状态（optimizer states）、激活值（activations）、临时 workspace、通信 buffer 和 allocator cache。
 
-source_reading:
-  - title: PyTorch optim 的 Adam state 结构
-    repo_path: github_repo/torchtitan/torchtitan/optim/__init__.py
-    focus: 看 Adam 的 state["exp_avg"] / state["exp_avg_sq"] 在哪一步分配
-  - title: TorchTitan ParallelDims 与 state_dict 边界
-    repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
-    focus: 理解 state_dict 与 named_parameters 的关系
+    本关只实现三把最基础的尺子：`count_param_bytes`、`count_grad_bytes` 和 `count_optimizer_state_bytes`。它们不能替代 profiler，也不会完整估算 activation 峰值；它们的价值在于把长期存在、能从 PyTorch 对象直接访问的三本账量准。后面讲 ZeRO、FSDP、Megatron distributed optimizer、activation checkpointing 和 mixed precision 时，所有讨论都会回到一个问题：哪本账被切分、变小、延后创建或用算力换掉。
+  sections:
+  - title: 目标和边界
+    plain_explanation: |
+      本讲的目标有四个。第一，能用 `tensor.numel() * tensor.element_size()` 计算任意 tensor 的数据区字节数。第二，能区分参数、梯度、优化器状态在训练 step 中的创建时机和生命周期。第三，能解释 plain SGD、SGD momentum、Adam/AdamW 在 optimizer state 上的差异。第四，能读懂 7 个 CPU patch tests 为什么覆盖 mixed dtype、None grad、SGD 无状态、momentum 约一份参数和 Adam 约两份参数。
 
+      边界要先讲清。本关三个函数只统计可以从 `model.parameters()`、`p.grad` 和 `optimizer.state` 直接访问的 tensor。它们不统计 activation、CUDA allocator reserved memory、fragmentation、cublas/cudnn workspace、通信 bucket、DataLoader host memory 或 profiler trace。若报告里出现“显存优化”，必须说明优化的是哪本账，比较对象是什么，测试条件是什么，代价是什么。
+    mental_model: |
+      显存账本先分三册：参数册在模型创建时存在，梯度册在 backward 后出现，优化器状态册通常在第一次 optimizer step 后出现。
+    why_it_matters: |
+      OOM 的修复方向取决于主导项。参数主导时考虑量化或切分参数；梯度或 optimizer state 主导时考虑 ZeRO/FSDP；activation 主导时考虑 checkpointing、batch 或 sequence length。
+    common_confusions:
+    - 把本关函数当成完整 GPU profiler；它们只统计三类可访问 tensor。
+    - 把所有 OOM 都归因到参数；batch、sequence length 和 activation 也可能主导峰值。
+    - 只写“节省显存”；需要说明节省哪一项、对哪个配置有效、付出什么代价。
+    checkpoint_questions:
+    - 本关三个函数分别统计哪些对象？
+    - 本关明确不统计哪些显存来源？
+    - 遇到 OOM 时，为什么要先判断主导账本？
+  - title: 7B 训练账本
+    plain_explanation: |
+      7B 模型的参数量是 70 亿个可学习数值。若权重按 bf16 或 fp16 保存，每个元素通常 2 字节，参数本身约为 `7B × 2 bytes = 14GB`。这个数字只回答模型权重占多少，不回答训练能不能放进单卡。训练还要保存梯度、优化器状态、activation 和各种临时 buffer。
+
+      Adam/AdamW 的 optimizer state 是最容易低估的一项。标准 Adam 为每个参数维护一阶矩 `exp_avg` 和二阶矩 `exp_avg_sq`，形状与参数相同。fp32 训练时，7B 参数本身约 28GB，两份 Adam state 约 56GB。混合精度训练中，具体实现还可能维护 fp32 master weights、fp32 grads 或 bf16 optimizer states，不能只按权重 dtype 一刀切。
+
+      这就是为什么“7B bf16 参数 14GB”无法推出“24GB 卡能训练 7B”。若 OOM 在 `model.to(device)` 附近出现，先看参数账；若 backward 后峰值暴涨，先看 grad 和 activation；若第一次 optimizer step 后暴涨，先看 Adam state。将 OOM 放回训练阶段，排障才有方向。
+    mental_model: |
+      参数像教材，梯度像批改痕迹，Adam state 像两本历史记录。训练时往往要同时带着教材、批改痕迹和历史记录。
+    why_it_matters: |
+      大模型训练的并行和优化策略都在处理这些账。ZeRO-1 切 optimizer state，ZeRO-2 继续切梯度，ZeRO-3/FSDP 进一步切参数。
+    common_confusions:
+    - 用参数大小直接判断训练显存；训练还要看梯度、optimizer state 和 activation。
+    - 认为 Adam 的 step 计数也会带来一份参数级 tensor；常规 step 计数不是主项。
+    - 把混合精度理解成所有账都减半；实现不同，grads 和 optimizer state 可能仍是 fp32。
+    checkpoint_questions:
+    - 7B bf16 参数本身约多少 GB？
+    - Adam 的两份主要 tensor state 是什么？
+    - optimizer.step 后峰值第一次明显上涨时，优先检查哪本账？
+  - title: Tensor 字节数和参数账
+    plain_explanation: |
+      Tensor 字节数由两个量决定：元素个数和每个元素的字节数。`numel()` 返回元素个数，`element_size()` 返回当前 dtype 下单个元素的字节数。shape 为 `(3, 4)` 的 fp32 tensor 有 12 个元素，每个元素 4 字节，数据区为 48 字节；同样 shape 的 fp16 或 bf16 tensor 通常为 24 字节。参数账就是把模型中所有 `nn.Parameter` 的字节数加起来。
+
+      `count_param_bytes(model)` 的实现应该遍历 `model.parameters()`，对每个参数累加 `p.numel() * p.element_size()`。它不依赖参数名字，也不应该假设所有参数 dtype 相同。mixed dtype 测试故意把一个 Linear 设为 half，另一个保持 float，就是为了阻止学生写成“参数个数乘统一字节数”。batch size、sequence length 和输入数据不会改变参数数量，只会影响 activation 和临时 tensor。
+    mental_model: |
+      shape 决定格子数量，dtype 决定每个格子大小。参数账是模型里所有可学习格子的面积总和。
+    why_it_matters: |
+      参数账是其他估算的基准。梯度通常与参数同形，SGD momentum 常接近一份参数，Adam state 常接近两份参数。
+    source_refs:
+    - title: Starter param function
+      repo_path: labs/l02_pytorch_systems/patch/starter/memory_probe.py
+      lines:
+      - 19
+      - 26
+      note: |
+        L19-L26: starter 明确给出 `numel * element_size` 的参数字节公式。
+    - title: Reference param function
+      repo_path: labs/l02_pytorch_systems/patch/reference/memory_probe.py
+      lines:
+      - 9
+      - 10
+      note: |
+        L9-L10: 参考实现直接对 `model.parameters()` 求和。
+    - title: Param tests
+      repo_path: labs/l02_pytorch_systems/patch/tests/test_patch.py
+      lines:
+      - 34
+      - 46
+      note: |
+        L34-L46: 测试覆盖手算公式和 mixed dtype 模型。
+    common_confusions:
+    - 只看 shape，不看 dtype；相同 shape 在 fp32 和 bf16 下字节数不同。
+    - 把 batch size 变化写进参数账；batch 不会改变模型参数数量。
+    - 用固定 4 字节估算所有参数；half、bf16、int8 都会改变 `element_size()`。
+    checkpoint_questions:
+    - '`numel()` 和 `element_size()` 分别表示什么？'
+    - 为什么 mixed dtype 模型不能用统一字节数估算？
+    - batch size 翻倍会不会改变参数账？
+  - title: 梯度生命周期
+    plain_explanation: |
+      梯度是 loss 对参数的导数，通常保存在 `p.grad`。模型刚创建时，参数已经存在，但梯度多半是 `None`。执行 forward 和 loss 计算后，仍然没有梯度；只有 `loss.backward()` 运行后，参与计算的参数才会得到 grad tensor。优化器更新前会读取这些梯度，`zero_grad(set_to_none=True)` 又会把它们设回 `None`，让下一轮 backward 重新分配。
+
+      `count_grad_bytes(model)` 因此必须跳过 `p.grad is None` 的参数。None 不是 0 字节 tensor，它表示当前没有 grad 对象。fp32 小模型里，backward 后 grad shape 通常与 param shape 相同，因此 grad bytes 接近 param bytes。本关测试直接构造 MLP，backward 后要求 grad bytes 等于 param bytes；再手动把 `p.grad = None`，要求函数返回 0。
+
+      混合精度训练会让梯度账更复杂。quiz 里提醒学生，某些 AMP 流程会维护 fp32 master weights，grad dtype 不一定等于 forward matmul 的 dtype。课堂上不要求记住所有框架实现，但要养成读取实际 tensor dtype 的习惯，而不是从配置名推断显存。
+    mental_model: |
+      梯度像本轮批改纸。backward 写出批改纸，optimizer 读取它，zero_grad 决定把纸拿走还是留在原处填 0。
+    why_it_matters: |
+      梯度累积、DDP all-reduce bucket、ZeRO-2 和 mixed precision 都依赖梯度生命周期。统计时跳过 None，是理解这些机制的基础。
+    source_refs:
+    - title: Starter grad function
+      repo_path: labs/l02_pytorch_systems/patch/starter/memory_probe.py
+      lines:
+      - 29
+      - 40
+      note: |
+        L29-L40: starter 强调 backward 后才有 grad，None 需要跳过。
+    - title: Reference grad function
+      repo_path: labs/l02_pytorch_systems/patch/reference/memory_probe.py
+      lines:
+      - 13
+      - 18
+      note: |
+        L13-L18: 参考实现只统计存在的 `p.grad` tensor。
+    - title: Grad tests
+      repo_path: labs/l02_pytorch_systems/patch/tests/test_patch.py
+      lines:
+      - 56
+      - 68
+      note: |
+        L56-L68: 测试覆盖 backward 后和 grad=None 两个状态。
+    common_confusions:
+    - 把 None grad 当成一个 0 值 tensor；它表示没有 grad 对象。
+    - 认为 forward 后就有梯度；梯度由 backward 写入。
+    - 从 precision 配置直接推断 grad dtype；实际应检查 `p.grad.dtype`。
+    checkpoint_questions:
+    - 梯度通常在训练 step 的哪个阶段出现？
+    - '`set_to_none=True` 对 grad 对象有什么影响？'
+    - 为什么统计 grad bytes 时要检查 `p.grad is not None`？
+  - title: 优化器状态
+    plain_explanation: |
+      优化器状态是 optimizer 为更新参数保存的额外数据，存放在 `optimizer.state`。plain SGD 在没有 momentum 时，通常不需要为每个参数保存 tensor 状态；SGD momentum 会保存 `momentum_buffer`，大小接近一份参数；Adam/AdamW 会保存 `exp_avg` 和 `exp_avg_sq`，大小接近两份参数。很多 optimizer 是 lazy 初始化，第一次 `step()` 之后 state 才出现。
+
+      `count_optimizer_state_bytes(optimizer)` 不能假设 state 里全是 tensor。PyTorch 的 state 可能包含 Python int、float 或小标量，也可能包含参数级 tensor。本关要求遍历 `optimizer.state.values()`，再遍历每个 state dict 的值，只对 `isinstance(v, torch.Tensor)` 的项累加 `v.numel() * v.element_size()`。测试分别检查 plain SGD 为 0、SGD momentum 接近一份参数、Adam 接近两份参数。
+
+      还要区分 model checkpoint 和 optimizer checkpoint。`model.state_dict()` 保存参数和 buffer；`optimizer.state_dict()` 保存每个参数的 state 以及 param_groups 里的学习率、betas、weight decay 等超参。只恢复模型参数，不恢复 optimizer state，Adam 的历史会从头开始，loss 曲线可能短暂抖动。
+    mental_model: |
+      optimizer state 是训练历史，不是模型本体。SGD 可以只看当前梯度，momentum 记一份方向历史，Adam 记方向和波动两份历史。
+    why_it_matters: |
+      optimizer state 常是大模型训练的主要显存项。ZeRO-1、distributed optimizer、8bit optimizer 和 optimizer offload 都围绕这本账做文章。
+    source_refs:
+    - title: Starter optimizer function
+      repo_path: labs/l02_pytorch_systems/patch/starter/memory_probe.py
+      lines:
+      - 43
+      - 55
+      note: |
+        L43-L55: starter 说明 state 是 param 到 state dict 的映射，只统计 Tensor。
+    - title: Reference optimizer function
+      repo_path: labs/l02_pytorch_systems/patch/reference/memory_probe.py
+      lines:
+      - 21
+      - 27
+      note: |
+        L21-L27: 参考实现遍历 state values，并用 `isinstance(v, torch.Tensor)` 过滤。
+    - title: Optimizer tests
+      repo_path: labs/l02_pytorch_systems/patch/tests/test_patch.py
+      lines:
+      - 80
+      - 92
+      note: |
+        L80-L92: 测试覆盖 SGD、SGD momentum 和 Adam state 大小。
+    common_confusions:
+    - 把 optimizer state 当成模型参数的一部分；它属于 optimizer，需要单独保存和加载。
+    - 把 state dict 里的非 tensor 值也按 tensor 统计；本关只累加 Tensor。
+    - 认为 optimizer 创建时 state 立刻完整存在；很多状态在第一次 step 后才初始化。
+    checkpoint_questions:
+    - plain SGD、SGD momentum、Adam 的 state 大小大约分别是多少？
+    - 为什么遍历 optimizer.state 时要过滤 Tensor 类型？
+    - 恢复训练时为什么不能只加载 model checkpoint？
+  - title: 实现和测试闭环
+    plain_explanation: |
+      实现路径可以直接从三个函数写起。参数账是一行求和；梯度账在参数循环里判断 `p.grad` 是否存在；优化器状态账在双层循环里过滤 Tensor。不要引入 torchsummary、torchinfo 或额外 profiler，这会绕开本关想训练的 PyTorch 对象结构阅读能力。
+
+      一个最小 CPU 实验能观察生命周期：
+
+      ```python
+      import torch
+      import torch.nn as nn
+
+      def nbytes(t):
+          return t.numel() * t.element_size()
+
+      model = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4))
+      opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+      x = torch.randn(2, 8)
+
+      print(sum(nbytes(p) for p in model.parameters()))
+      print(sum(nbytes(p.grad) for p in model.parameters() if p.grad is not None))
+
+      model(x).sum().backward()
+      print(sum(nbytes(p.grad) for p in model.parameters() if p.grad is not None))
+
+      opt.step()
+      print(sum(nbytes(v) for s in opt.state.values() for v in s.values() if isinstance(v, torch.Tensor)))
+      ```
+
+      第一行输出参数账；第二行在 backward 前通常为 0；第三行在 backward 后接近参数账；第四行在 Adam step 后接近两份参数。完成 patch 后运行：
+
+      ```bash
+      make patch-test M=l02_pytorch_systems
+      ```
+
+      这 7 个测试足以验证本关三个函数的边界，但它们不覆盖 activation、CUDA allocator 或真实 GPU 峰值。讲义自查时不要把 patch-test 的范围扩大。
+    mental_model: |
+      先写三把可测量的尺子，再用单步训练观察账本何时出现。测试验证尺子，训练脚本验证生命周期。
+    why_it_matters: |
+      这种小闭环能让学生在 CPU 上先建立定量直觉，之后迁移到 GPU profiler、Megatron 显存报告和分布式优化器时更稳。
+    source_refs:
+    - title: Patch tests
+      repo_path: labs/l02_pytorch_systems/patch/tests/test_patch.py
+      lines:
+      - 34
+      - 46
+      note: |
+        L34-L46: 测试覆盖参数、梯度、优化器状态和 mixed dtype。
+    common_confusions:
+    - 用第三方 summary 库替代对象遍历；本关要练的是 PyTorch 原生结构。
+    - patch-test 通过后宣称真实 GPU 峰值已解释；测试只覆盖三类 tensor 账。
+    - 把 Adam state 的少量 per-param step 标量当成主要显存来源；主项是 m 和 v。
+    checkpoint_questions:
+    - 三把尺子的核心循环分别遍历什么对象？
+    - 为什么本关测试可以在 CPU 上完成？
+    - patch-test 没有覆盖哪些真实训练显存来源？
+  - title: 训练脚本和指标
+    plain_explanation: |
+      `train_tiny_transformer.py` 给出一个比 patch 更接近真实训练的上下文。它构造合成 token 数据集和 tiny decoder-only transformer，支持 fp32/bf16/fp16 autocast、activation checkpointing、DataLoader 延迟、profiler trace、timing metrics 和 CUDA peak memory。训练循环按 `zero_grad`、forward、loss、backward、grad clipping、optimizer.step 的顺序推进，正好对应三本账和 activation 峰值的生命周期。
+
+      两个配置展示不同压力面。`4090_debug.yaml` 使用短序列、2 层、fp32、不开 activation checkpointing，适合快速检查指标链路。`memory_stress.yaml` 把 seq_len 提到 256、层数提到 3、打开 checkpointing，并加入 DataLoader sleep，用来观察 step time、dataloader time、forward/backward/optimizer time 和 `peak_memory_gb` 的变化。这些指标用于训练“只改一个变量”的观测纪律，不用于推出通用性能结论。
+    mental_model: |
+      patch 量三本静态账，训练脚本观察一次 step 里账本和临时峰值如何变化。两者配合，才能解释 OOM 和吞吐指标。
+    why_it_matters: |
+      真实训练失败会混合显存、吞吐和数据加载问题。按阶段记录 timing 与 peak memory，能把 DataLoader 慢、activation 峰值和 optimizer step 成本分开。
+    source_refs:
+    - title: Tiny model
+      repo_path: labs/l02_pytorch_systems/scripts/train_tiny_transformer.py
+      lines:
+      - 57
+      - 69
+      note: |
+        L57-L69: tiny decoder 包含 embedding、position、Transformer 层、checkpoint 分支和 head。
+    - title: Training step
+      repo_path: labs/l02_pytorch_systems/scripts/train_tiny_transformer.py
+      lines:
+      - 181
+      - 193
+      note: |
+        L181-L193: 训练循环按 zero_grad、forward、backward、optimizer.step 推进。
+    - title: Metrics emission
+      repo_path: labs/l02_pytorch_systems/scripts/train_tiny_transformer.py
+      lines:
+      - 206
+      - 218
+      note: |
+        L206-L218: 每步写 tokens/s、peak memory、阶段耗时和 grad_norm。
+    common_confusions:
+    - 把 tiny transformer 的数值当成大模型通用结论；它只用于观察机制。
+    - 一次修改 seq_len、batch、precision 和 checkpointing；这样无法归因。
+    - 只看 tokens/s；显存问题还要看 `peak_memory_gb` 和各阶段耗时。
+    checkpoint_questions:
+    - 训练脚本中三本账分别会在哪些阶段出现或更新？
+    - '`memory_stress.yaml` 相比 debug 配置改变了哪些压力变量？'
+    - 为什么 DataLoader 时间要和 forward/backward 时间分开记录？
+  - title: Debug 路线
+    plain_explanation: |
+      OOM 先按阶段分类：`model.to(device)` 附近失败多看参数；forward/backward 附近失败多看 activation、batch、sequence length 和 grad；optimizer.step 附近失败多看 optimizer state。最小检查包括 `torch.cuda.max_memory_allocated()`、`torch.cuda.memory_summary()`、折半 seq_len、折半 batch、切换 checkpointing 和观察 `peak_memory_gb`。每次只改一个变量，报告里写清峰值变化和吞吐代价。
+
+      DataLoader 慢和 NaN loss 也要分开处理。DataLoader 慢时，看 `dataloader_time_ms`、配置 diff、主日志和 metrics；NaN loss 时，先用 `torch.isfinite` 找到是输入、forward、loss 还是 backward 先坏，再检查 lr、warmup、autocast、grad norm 和数据边界。三类 ticket 的共同要求是保留 evidence path，不能只写“已修复”。L02 的正确学习结果是能把“显存不够”“数据慢”“数值爆炸”三类故障分流，而不是混成一个训练失败。
+    mental_model: |
+      Debug 像分流诊室。OOM 看显存阶段，DataLoader 慢看输入等待，NaN 看数值链路中第一个非有限值。
+    why_it_matters: |
+      训练系统的症状会互相掩盖。分阶段指标和 ticket 能让学生从第一个可验证事实开始，而不是靠经验猜改参数。
+    source_refs:
+    - title: Report debug
+      repo_path: labs/l02_pytorch_systems/scripts/train_tiny_transformer.py
+      lines:
+      - 232
+      - 244
+      note: |
+        L232-L244: 报告模板记录配置、结果、诊断、debug ticket 和迁移说明。
+    common_confusions:
+    - OOM 后只调用 `torch.cuda.empty_cache()`；它不会释放仍被引用的活跃 tensor。
+    - NaN 后用 `nan_to_num(loss)` 继续训练；optimizer state 可能已经被污染。
+    - DataLoader 慢时只调模型；应先看输入等待时间和配置漂移。
+    checkpoint_questions:
+    - OOM 发生在 forward/backward/optimizer.step 时，排查方向有什么不同？
+    - NaN loss 的第一步检查应该放在哪里？
+    - 为什么修复报告要写峰值变化和吞吐代价？
 mini_infra_targets:
-  - mini_infra/gpu/
-
+- mini_infra/training/trainer.py
+- mini_infra/model/tiny_transformer.py
+- mini_infra/megatron/training/training.py
 notebooks:
-  - notebooks/n01_gpu_memory_anatomy.ipynb
-
-tickets:
-  - pt_oom_001
-  - pt_dataloader_slow_002
-  - pt_nan_loss_003
-
-prereq: l01_env_conda_cuda
-next_lab: l03_nccl_ddp_smoke
-
-gpu_modes:
-  local: CPU 即可
-  cluster: 1×4090 / 1×H200 跑 GPU 标记测试
+- notebooks/n01_gpu_memory_anatomy.ipynb
+- notebooks/n02_pytorch_profiler.ipynb
+lesson_docs:
+- title: 系统地图
+  path: labs/l02_pytorch_systems/system_map.md
+  description: 本讲在章节中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l02_pytorch_systems/lecture.md
+  description: 从真实问题、核心机制、源码抽象讲到 lab 验收和生产排查。
+- title: 源码带读讲义
+  path: labs/l02_pytorch_systems/source_walkthrough.md
+  description: 按主路径组织的源码阅读路线，说明每步要读什么和跳过什么。
+source_reading:
+- title: Patch starter
+  repo_path: labs/l02_pytorch_systems/patch/starter/memory_probe.py
+  focus: 显存计数函数的输入、输出和边界
+  highlights:
+  - title: count_param_bytes 合同
+    lines:
+    - 19
+    - 26
+    note: |
+      L19-L20: 函数只统计 `nn.Parameter` 的数据区字节数。
+      L22-L23: 公式必须使用 `numel() * element_size()`，不能写死 dtype。
+      L25-L26: starter 要求学生遍历 `model.parameters()` 并返回整数 bytes。
+  - title: count_grad_bytes 合同
+    lines:
+    - 29
+    - 40
+    note: |
+      L29-L30: 函数统计参数 `.grad` 的 tensor bytes。
+      L32-L35: 注释明确 backward 后才有 grad，`set_to_none=True` 后要跳过。
+      L37-L40: starter 要求只累加非 None grad。
+  - title: optimizer state 合同
+    lines:
+    - 43
+    - 55
+    note: |
+      L43-L48: 只统计 `optimizer.state[p]` 里 Tensor 类型 entry。
+      L50-L54: 注释给出 SGD、momentum、Adam/AdamW 的近似状态大小。
+      L55: docstring 结束，下面进入 TODO。
+  - title: optimizer state TODO
+    lines:
+    - 56
+    - 59
+    note: |
+      L56-L58: starter 要求遍历 state dict，并用 tensor 字节数累加。
+      L59: 未实现处是学生补丁出口。
+- title: Patch reference
+  repo_path: labs/l02_pytorch_systems/patch/reference/memory_probe.py
+  focus: 三个显存计数函数的最小实现
+  highlights:
+  - title: 参数 bytes
+    lines:
+    - 9
+    - 10
+    note: |
+      L9: `count_param_bytes` 接收 PyTorch module。
+      L10: 每个 parameter 按自身元素数和元素字节数计算，天然支持 mixed dtype。
+  - title: 梯度 bytes
+    lines:
+    - 13
+    - 18
+    note: |
+      L14-L15: 遍历所有 parameter。
+      L16: 只有 `.grad` 存在时才计入。
+      L17-L18: 用 grad 自己的 shape 和 dtype 计算 bytes。
+  - title: optimizer state bytes
+    lines:
+    - 21
+    - 27
+    note: |
+      L21-L23: optimizer state 按 parameter 对应的 state dict 遍历。
+      L24-L26: 只统计 Tensor entry，跳过 Python 标量。
+      L27: 返回 optimizer tensor state 的字节总和。
+- title: Patch tests
+  repo_path: labs/l02_pytorch_systems/patch/tests/test_patch.py
+  focus: 测试用例和行为合同
+  highlights:
+  - title: 参数账测试
+    lines:
+    - 31
+    - 35
+    note: |
+      L31-L35: 参数 bytes 必须等于手算公式。
+  - title: mixed dtype 测试
+    lines:
+    - 38
+    - 47
+    note: |
+      L38-L44: 构造 half + float 混合模型。
+      L45-L47: 期望值仍按每个参数自己的 element size 计算。
+  - title: grad 生命周期
+    lines:
+    - 52
+    - 58
+    note: |
+      L52-L58: backward 后 grad bytes 应该等于 fp32 param bytes。
+  - title: grad None 测试
+    lines:
+    - 61
+    - 68
+    note: |
+      L61-L68: grad 为 None 时必须返回 0。
+  - title: optimizer state 差异
+    lines:
+    - 75
+    - 81
+    note: |
+      L75-L81: plain SGD step 后 state bytes 为 0。
+  - title: SGD momentum state
+    lines:
+    - 84
+    - 94
+    note: |
+      L84-L94: SGD momentum 约等于一份参数。
+  - title: Adam state
+    lines:
+    - 97
+    - 107
+    note: |
+      L97: Adam 测试开始验证两份参数级 state。
+      L102-L107: Adam step 后 state bytes 约等于两份参数。
+- title: train_tiny_transformer
+  repo_path: labs/l02_pytorch_systems/scripts/train_tiny_transformer.py
+  focus: tiny transformer 的数据、模型、step timing 和 artifact
+  highlights:
+  - title: SyntheticTokens
+    lines:
+    - 36
+    - 48
+    note: |
+      L36-L43: 合成数据集记录 seq_len、vocab、sleep 和 size。
+      L48: `__getitem__` 返回一个训练样本。
+  - title: TinyDecoder 初始化
+    lines:
+    - 57
+    - 69
+    note: |
+      L57-L65: 模型规模由 vocab、hidden、heads、layers 和 checkpoint flag 决定。
+      L68-L69: token embedding 和 position embedding 是参数账的一部分。
+  - title: checkpointing 分支
+    lines:
+    - 94
+    - 99
+    note: |
+      L94: 逐层执行 transformer layer。
+      L95-L96: 开启 checkpointing 时 forward 少存部分 activation。
+      L97-L99: 关闭 checkpointing 时正常保存 forward 中间状态。
+  - title: 训练 step timing
+    lines:
+    - 171
+    - 181
+    note: |
+      L171-L177: dataloader 时间单独计量。
+      L181: step 开始时清空 grad。
+  - title: forward timing
+    lines:
+    - 183
+    - 193
+    note: |
+      L183-L193: forward 和 loss 时间单独计量。
+  - title: backward 和 optimizer
+    lines:
+    - 195
+    - 204
+    note: |
+      L195-L199: backward 后 grad 存在，并记录 grad norm。
+      L201-L204: optimizer step 时间单独计量。
+  - title: metrics row
+    lines:
+    - 206
+    - 212
+    note: |
+      L206: tokens/s 由本 step token 数和 step 时间计算。
+      L207-L211: CUDA 可用时记录 peak memory，CPU 时为 0。
+  - title: metrics 字段
+    lines:
+    - 213
+    - 225
+    note: |
+      L213-L226: metrics row 写入 loss、耗时、吞吐、peak memory 和 grad_norm。
+- title: MiniInfra trainer
+  repo_path: mini_infra/training/trainer.py
+  focus: MiniInfra 训练生命周期和 artifact 边界
+  highlights:
+  - title: TrainConfig
+    lines:
+    - 15
+    - 24
+    note: |
+      L15-L21: 训练配置固定 backend、step、batch、seq_len、lr 和 seed。
+      L23-L24: 配置可以转成 dict，便于写 artifact。
+  - title: run 分支
+    lines:
+    - 27
+    - 39
+    note: |
+      L27-L34: trainer 持有 model_config、train_config 和 metrics path。
+      L36-L39: 根据 backend 选择 torch 或 simulated 路径。
+  - title: torch backend step
+    lines:
+    - 95
+    - 107
+    note: |
+      L95-L103: 每 step 生成输入、标签并清 grad。
+      L104-L107: forward、loss、backward、optimizer step 构成最小训练循环。
+  - title: torch backend metrics
+    lines:
+    - 108
+    - 120
+    note: |
+      L110-L121: metrics 写入 loss、backend 和 device。
+- title: MiniInfra tiny_transformer
+  repo_path: mini_infra/model/tiny_transformer.py
+  focus: tiny 模型配置、构建和参数量估算
+  highlights:
+  - title: TinyModelConfig
+    lines:
+    - 8
+    - 17
+    note: |
+      L8-L14: 配置定义 vocab、hidden、layers、heads、seq_len 和 dropout。
+      L16-L17: 配置可序列化，方便报告记录模型条件。
+  - title: build_torch_model
+    lines:
+    - 20
+    - 32
+    note: |
+      L20-L25: torch backend 缺失时显式失败。
+      L27-L32: module 内建立 token、position 和 transformer layer。
+  - title: 参数量估算
+    lines:
+    - 53
+    - 58
+    note: |
+      L53: 配置级估算用于 planning 和 simulated backend。
+      L54-L57: embedding、attention、MLP、output 分项估计参数量。
+      L58: 返回参数量估计，不替代精确 tensor bytes。
+- title: MiniInfra training
+  repo_path: mini_infra/megatron/training/training.py
+  focus: Megatron-shaped train_step 和 pretrain 生命周期
+  highlights:
+  - title: train_step 主合同
+    lines:
+    - 83
+    - 94
+    note: |
+      L91-L94: 先清 grad，再执行 forward/backward。
+  - title: train_step step 和 scheduler
+    lines:
+    - 95
+    - 104
+    note: |
+      L97-L100: 聚合 loss，并执行 optimizer step。
+      L101-L104: 成功 step 后推进 lr scheduler 并准备 metrics。
+  - title: metrics 和 training_log
+    lines:
+    - 104
+    - 116
+    note: |
+      L104-L116: metrics 包含 iteration、loss、microbatch、skip、lr 和额外输出。
+  - title: training_log
+    lines:
+    - 119
+    - 122
+    note: |
+      L119-L122: `training_log` 把 metrics 写成 JSONL。
+  - title: pretrain 循环和 checkpoint
+    lines:
+    - 146
+    - 154
+    note: |
+      L146-L154: pretrain 循环调用 train_step。
+  - title: pretrain metrics
+    lines:
+    - 155
+    - 167
+    note: |
+      L155-L168: 添加并行和 optimizer state 指标后写日志。
+  - title: checkpoint state
+    lines:
+    - 169
+    - 176
+    note: |
+      L169-L176: 保存模型、optimizer、scheduler 和 parallel state。

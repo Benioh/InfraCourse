@@ -12,10 +12,10 @@ patch-hint:
 	@grep -nH "TODO(student)" patch/starter/*.py | head -20 || true
 	@echo ""
 	@echo "==> 关键提示："
-	@echo "  - GraphCache 按 batch_size 缓存，捕获时复用 static input/output buffer"
-	@echo "  - replay 必须 copy_ 到 static buffer，不能新 alloc"
-	@echo "  - MemorySavor.pause() 释放物理字节但记元数据，resume() 用元数据重建"
-	@echo "  - 真实场景：RL co-locate 训练时 savor.pause(rollout) 让出显存给 train"
+	@echo "  - GraphCache 按 args/kwargs 的 shape/dtype/scalar 生成 key"
+	@echo "  - 首次 key miss 保存 fn 并 capture_count += 1；命中时 replay_count += 1"
+	@echo "  - MemorySavor.pause(tensor) 保存 handle/data，resume(handle) 消费 handle"
+	@echo "  - CPU patch 验证结构语义，不验证真实 CUDA Graph timing 或 VMM 物理页"
 
 patch-show-solution:
 	@for f in patch/reference/*.py; do \

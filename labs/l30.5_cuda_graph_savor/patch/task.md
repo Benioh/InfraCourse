@@ -1,80 +1,73 @@
-# L10.7 Patch · CUDA Graph Cache + Memory Savor (CPU 模拟)
+# L34 Patch · CUDA Graph Cache + Memory Savor
 
 ## 你要交付什么
 
-两个 primitive：
+实现两个 CPU-safe primitive：
 
 ```python
 class GraphCache:
-    def capture_or_replay(
-        self,
-        bs: int,
-        forward_fn: Callable[[Tensor], Tensor],
-        real_input: Tensor,
-    ) -> Tensor:
-        """按 bs 缓存 captured graph；hit 时复用 static input_buffer (copy_)
-        + 只调一次 forward_fn 写入 output_buffer，返回 output 的 clone。"""
+    def capture_or_replay(self, fn: Callable, *args, **kwargs) -> Any: ...
 
 class MemorySavor:
-    def register(self, name: str, tensor: Tensor) -> None: ...
-    def pause(self) -> None:
-        """释放所有 registered tensor 的物理 bytes，记元数据 (shape, dtype, init_value)."""
-    def resume(self) -> None:
-        """按元数据重建 tensor，恢复物理 bytes."""
-    def get(self, name: str) -> Tensor: ...
-    def physical_bytes(self) -> int: ...
+    def pause(self, tensor: torch.Tensor) -> int: ...
+    def resume(self, handle: int) -> torch.Tensor: ...
+    def total_paused_bytes(self) -> int: ...
+    def is_paused(self, handle: int) -> bool: ...
 ```
 
-**禁止** import `torch.cuda.graph` 真实 API（CPU 没有）。
-**允许** torch.zeros / clone / data_ptr。
+禁止 import `torch.cuda.graph`。本关没有 GPU 依赖，只验证结构语义。
 
-补丁规模目标：80–120 行。
+## GraphCache 合同
 
-## 关键设计点（这是真实工程的精髓）
+`GraphCache` 根据输入生成 cache key：
 
-1. **CUDA Graph 的核心** = static buffers + 录制好的 kernel 序列。replay 时只需
-   把新输入 copy 到静态 input buffer，graph 会读静态 buffer、写静态 output buffer。
-   **不能** 每次 replay 都 alloc 新 tensor，否则就退化成普通 forward 了。
+- tensor 输入：`("tensor", shape, dtype)`
+- scalar 输入：`("scalar", type_name, value)`
+- kwargs：按 key 排序后进入 cache key，避免调用顺序影响命中
 
-2. **Memory Savor 的核心** = CUDA Virtual Memory 让物理页可以"暂停":
-   - `pause()`：unmap 物理页，但保留虚拟地址范围 + 元数据
-   - `resume()`：重新 map 物理页，按元数据复原 tensor
-   CPU 模拟里我们用 dict 替代 VM mapping，行为不变量保持。
+首次见到 key：
 
-3. **协作不变量**：`pause` 后 `physical_bytes() == 0`；`resume` 后恢复成 pause 前的总量。
-
-## 接口契约
-
-```python
-import torch
-
-cache = GraphCache()
-def fwd(x): return x * 2 + 1
-
-real_input = torch.tensor([1.0, 2.0, 3.0])
-out1 = cache.capture_or_replay(bs=3, forward_fn=fwd, real_input=real_input)
-assert torch.allclose(out1, torch.tensor([3.0, 5.0, 7.0]))
-
-# 第二次同 bs：static buffer 复用
-real_input2 = torch.tensor([10.0, 20.0, 30.0])
-out2 = cache.capture_or_replay(bs=3, forward_fn=fwd, real_input=real_input2)
-assert torch.allclose(out2, torch.tensor([21.0, 41.0, 61.0]))
-assert cache.captures == 1   # 只 capture 一次
-assert cache.replays == 1    # 第二次是 replay
+```text
+self._graphs[key] = fn
+self.capture_count += 1
+return fn(*args, **kwargs)
 ```
+
+再次见到相同 key：
+
+```text
+self.replay_count += 1
+return self._graphs[key](*args, **kwargs)
+```
+
+注意：replay 使用首次 capture 时保存的函数引用，不使用本次传入的新函数。这模拟真实 CUDA Graph 已经录制好的执行路径。
+
+## MemorySavor 合同
+
+`pause(tensor)`：
+
+1. 生成递增 handle。
+2. 保存 shape、dtype 和 `tensor.detach().clone().cpu()`。
+3. 返回 handle。
+
+`resume(handle)`：
+
+1. 从 `_paused` 中 `pop` 该 handle。
+2. 返回保存数据的 clone。
+3. resume 后 `is_paused(handle)` 应为 false。
+
+`total_paused_bytes()` 返回所有暂停数据的 `numel * element_size` 总和。
 
 ## 不变量
 
-1. **GraphCache**：
-   - 同 bs 第二次调用必须 hit cache（`replays += 1`，`captures` 不变）
-   - 不同 bs 触发新 capture
-   - 多次 replay 时 `_graphs[bs].input_buffer.data_ptr()` **不变**（buffer 复用）
-   - replay 输出与 forward_fn 直接调用结果数值相等
-2. **MemorySavor**：
-   - `register(name, tensor)` 后 `get(name)` 返回该 tensor
-   - `pause()` → `physical_bytes() == 0`
-   - `resume()` → `get(name).shape / .dtype` 与 pause 前一致
-   - 不允许在 pause 状态下 `get`（抛 RuntimeError）
+1. 第一次同 shape 调用会增加 `capture_count`。
+2. 第二次同 shape 调用会增加 `replay_count`。
+3. 不同 shape 触发新的 capture。
+4. replay 输出与 eager 函数输出数值一致。
+5. pause 后 handle 处于 paused。
+6. resume 返回与 pause 前相同的数据。
+7. paused bytes 统计等于池内 tensor 数据规模。
+8. resume 后 handle 从池中移除，bytes 归零。
 
 ## 怎么验证
 
@@ -82,11 +75,19 @@ assert cache.replays == 1    # 第二次是 replay
 make patch-test M=l30.5_cuda_graph_savor
 ```
 
-## 写完之后你能做什么
+8 个 CPU 测试：
 
-- 解释 `torch.cuda.graph` capture/replay 的工程价值（消除 CPU launch 开销，对
-  decode 一次 1 token 的小工作量尤其重要）。
-- 解释为什么 RL co-locate 必须用 memory savor 而不是 cudaFree（前者保留虚拟
-  地址，可以"原地"复活；后者会让指针失效，graph 就废了）。
-- 看懂 SGLang Dual AR omni 模型用 CUDA Graph + 多图复用统一覆盖的优化。
-- 在 Capstone Stage B 给 SGLang 服务接 graph cache，Stage C 给 RL 接 memory savor。
+| 测试 | 验证 |
+|---|---|
+| `test_first_call_captures` | 首次调用 capture，输出正确 |
+| `test_second_call_replays` | 第二次同 shape replay |
+| `test_different_shapes_distinct_graphs` | 不同 shape 新建 graph entry |
+| `test_replay_output_equal_to_eager` | replay 与 eager 数值一致 |
+| `test_savor_pause_records_metadata` | pause 后 handle 存在 |
+| `test_savor_resume_returns_same_data` | resume 返回相同数据 |
+| `test_total_paused_bytes_tracks_storage` | paused bytes 统计正确 |
+| `test_resume_removes_from_paused_pool` | resume 后移除 handle 并归零 bytes |
+
+## 边界
+
+patch 不验证真实 GPU `data_ptr()`、CUDA stream、VMM physical page、graph replay latency 或多进程 co-locate。报告中必须把 CPU 已验证和 GPU 待验证分开写。

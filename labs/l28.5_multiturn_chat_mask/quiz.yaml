@@ -1,73 +1,120 @@
 mission: l28.5_multiturn_chat_mask
-title: L09.7 Quiz · Multi-turn Tokenization 与 Loss Mask
+title: L30 Quiz · Multi-turn Chat Mask
 pass_threshold: 1.0
 description: |
-  3 题打中 multi-turn tokenization 三大暗坑。
+  检查学习者是否理解 Fixed Base Conversation、delta 截取、role mask、default system injection 和 QwQ think drop。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L30 和 L29 的关系
+    kind: doc
+    path: labs/l28.5_multiturn_chat_mask/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：理解 Fixed Base + Delta
+    kind: doc
+    path: labs/l28.5_multiturn_chat_mask/lecture.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 跟源码带读：按 starter、reference、mock 和 tests 阅读
+    kind: doc
+    path: labs/l28.5_multiturn_chat_mask/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 25
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l28.5_multiturn_chat_mask/patch/task.md
-  - title: 读 verl multi-turn fast tokenization 博客
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 patch reference
     kind: source
-    path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/verl/multi-turn/fast_tokenization/multiturn_tokenization_and_masking_ZH.md
+    path: labs/l28.5_multiturn_chat_mask/patch/reference/multiturn_tokenizer.py
+    estimate_min: 8
+  - title: 对照 mock tokenizer
+    kind: source
+    path: labs/l28.5_multiturn_chat_mask/patch/_mock_tokenizer.py
+    estimate_min: 8
 
 questions:
-  - id: q1_why_not_per_msg
-    prompt: |
-      为什么"每条 msg 单独 apply_chat_template 再拼接"在 multi-turn 下会失败？
+  - id: q1_fixed_base
+    prompt: Fixed Base Conversation 为什么要包含 system 和 user？
     options:
       - id: a
-        text: 因为 chat_template 不接受单条 msg
-      - id: b
-        text: 模板会自动注入默认 system message + BPE 在拼接边界合并 token，导致 token 序列与全量 tokenize 不一致
+        text: system 防默认 system 注入，user 让模板进入稳定普通对话路径
         correct: true
+      - id: b
+        text: 只是为了让 token 数更多
       - id: c
-        text: 因为单条 msg tokenize 太慢
+        text: 因为 assistant 不能被 encode
       - id: d
-        text: 因为 attention mask 必须整段计算
-    explanation: |
-      B 对：模板的 conditional 行为（隐式塞默认 system；连续 \n\n 在拼接处被 BPE 合并）
-      让"分段 + 拼接"得到的 token 序列与全量 tokenize 不一致，loss_mask 跟着错位。
-      详见 verl PR #1668 的失败原型记录。
+        text: 为了跳过 tokenizer
+    explanation: "base 的作用是让每条真实 message 都在同一个稳定模板上下文中被测量。"
 
-  - id: q2_fixed_base_choice
-    prompt: |
-      为什么 BASE_CONVERSATION 选择 `[system, user]` 而不是 `[]` 或 `[system]`？
+  - id: q2_delta
+    prompt: delta_str 的来源是什么？
     options:
       - id: a
-        text: 为了避免 chat_template 触发 conditional 修改（默认 system 注入 / think strip），
-              system + user 是 main-stream 模板下都不会被修改的稳定起手
+        text: 对 `BASE + [msg]` 渲染出的 full_str 截掉 base_str 前缀
         correct: true
       - id: b
-        text: 因为 BASE 必须包含一条 assistant 才能算 delta
+        text: 直接取 msg["content"]
       - id: c
-        text: 单条 system 在某些模板里会被裁掉
+        text: 从 loss_mask 中反解
       - id: d
-        text: 长度必须 ≥ 2 个 message 才能算 delta
-    explanation: |
-      A 对：经测试主流模板都不会在 system+user 起手的对话上做条件式修改。空 BASE
-      会触发默认 system 注入；纯 system 起手在某些模板下也会被特殊处理。
-      详见原文："放在最前面的系统消息会阻止模板添加默认值"。
+        text: 随机生成一个字符串
+    explanation: "delta 表示当前 message 在固定模板上下文中新增的字符串。"
 
-  - id: q3_think_token_edge
-    prompt: |
-      QwQ-32B / Qwen3 系模板会在 assistant 不是最后一条 message 时 **strip
-      `<think>...</think>`** 内容。这对训练有什么影响？为什么 fixed-base 增量法
-      能绕过这个问题？
+  - id: q3_role_mask
+    prompt: tool 消息在 L30 中应如何写入 loss_mask？
     options:
       - id: a
-        text: 推理优化：上下文窗口被 think 占用浪费；训练时如果 think 被 strip，模型
-              学不到 "何时 think + 如何 think"，必须保留。增量法在 isolation 下处理
-              每条 assistant，模板看到的 assistant 始终是"最后一条"，不会触发 strip
+        text: 写等长 -100，因为 tool 是环境输出
         correct: true
       - id: b
-        text: 没影响，think 内容是冗余的
+        text: 写同位置 token id
       - id: c
-        text: 增量法只能处理单轮
+        text: 删除 token_ids 中的 tool
       - id: d
-        text: 必须改 chat_template 才能保留 think
-    explanation: |
-      A 对：think strip 是推理优化（节约 context window），但训练时必须保留以让模型学
-      会推理链。fixed-base 增量法把每条 assistant 都放在 BASE+[msg] 的末尾，模板视角
-      下永远是"最后一条"，conditional strip 不会触发。这是 fixed-base 的最大价值之一。
+        text: 写成 attention mask
+    explanation: "tool 内容可以作为上下文 token，但不应作为 assistant 训练目标。"
+
+  - id: q4_default_system
+    prompt: default system injection 会破坏哪类朴素方案？
+    options:
+      - id: a
+        text: 缺少稳定 system 前缀时，模板会额外插入系统消息，导致 delta 或拼接错位
+        correct: true
+      - id: b
+        text: 只会让 optimizer 变慢
+      - id: c
+        text: 只影响 batch size
+      - id: d
+        text: 只影响 GPU 显存
+    explanation: "模板自动补系统消息会改变字符串前缀，进而改变 token 边界。"
+
+  - id: q5_think_drop
+    prompt: QwQ 风格 think drop 对训练 mask 的风险是什么？
+    options:
+      - id: a
+        text: 非末尾 assistant 的 `<think>...</think>` 可能被模板删除，训练会漏掉应学习内容
+        correct: true
+      - id: b
+        text: 它会让所有 user token 变成 assistant token
+      - id: c
+        text: 它只影响 attention_mask 长度
+      - id: d
+        text: 它会删除 pad token
+    explanation: "Fixed Base 让当前 assistant 在局部模板里成为最后一条，从而保留 think。"
+
+  - id: q6_outputs
+    prompt: L30 的 attention_mask 为什么可以全部为 1？
+    options:
+      - id: a
+        text: 本关函数不做 padding，只返回单条样本的真实 token
+        correct: true
+      - id: b
+        text: 因为 attention_mask 和 loss_mask 完全一样
+      - id: c
+        text: 因为 tokenizer 不需要 attention
+      - id: d
+        text: 因为 assistant token 不参与训练
+    explanation: "padding 和 batch collate 不在 L30 patch 的边界内。"

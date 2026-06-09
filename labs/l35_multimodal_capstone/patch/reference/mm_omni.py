@@ -1,4 +1,4 @@
-"""Reference solution for L12 Capstone Patch · MM-Tiny-Omni components."""
+"""Reference solution for L41 Capstone Patch · MM-Tiny-Omni components."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""L03 Patch tests · CPU OK; one GPU-only memory test auto-skips."""
+"""L07 Patch tests · CPU OK; one GPU-only memory test auto-skips."""
 
 from __future__ import annotations
 

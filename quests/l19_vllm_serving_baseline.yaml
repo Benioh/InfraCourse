@@ -1,49 +1,564 @@
 id: l19_vllm_serving_baseline
-title: typical_p Sampling Filter
-level: L07
+title: "L20 · vLLM Serving Baseline and Typical-p Sampling"
+level: L20
 act: 第 3 章：推理服务
 role: vLLM 学徒
 priority: 核心
 estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - vLLM (对照)
+  - vLLM
+  - MiniInfra
 
 patch:
   description: |
-    实现 Locally Typical Sampling (Meister 2022) 的 logits filter：
-    保留 surprisal 接近期望信息量的 token，剔除 outlier。可用于替代 / 补充
-    top_p / top_k。
+    实现 Locally Typical Sampling 的 logits filter：从 logits 计算概率、surprisal、
+    entropy 和 typicality distance，按 distance 排序后用累计概率截断候选集合。
   task_md: labs/l19_vllm_serving_baseline/patch/task.md
   starter_file: labs/l19_vllm_serving_baseline/patch/starter/typical_p.py
   reference_file: labs/l19_vllm_serving_baseline/patch/reference/typical_p.py
   test_command: make patch-test M=l19_vllm_serving_baseline
   status_file: labs/l19_vllm_serving_baseline/patch/.last_run.json
   test_count: 5
-  test_kind: 结果对比 + 行为契约
+  test_kind: Typical-p logits filter 行为合同验证
 
 source_reading:
-  - title: vLLM sampler 源码
+  - title: Patch starter
+    repo_path: labs/l19_vllm_serving_baseline/patch/starter/typical_p.py
+    focus: 学生需要补齐的 typical-p 最小合同
+    highlights:
+      - title: 读函数签名和 bypass
+        lines: [18, 25]
+        note: |
+          L18-L23: 输入是 `(batch, vocab)` logits，输出仍是同形 logits。
+          L24-L25: `typical_p >= 1.0` 时不截断，直接保持原张量。
+      - title: 读概率和信息量 TODO
+        lines: [27, 31]
+        note: |
+          L27-L31: TODO 前半要求计算 softmax、surprisal、entropy 和 distance。
+      - title: 读排序和累计概率 TODO
+        lines: [33, 41]
+        note: |
+          L33-L37: 按 distance 升序排序，再按排序索引收集概率。
+          L38-L41: 超过阈值的位置会被删除，但第 0 列强制保留。
+      - title: 读 scatter 和返回 TODO
+        lines: [43, 49]
+        note: |
+          L43-L45: sorted mask 必须 scatter 回原 vocab 顺序。
+          L47-L49: 删除位置写入 filter_value，未实现时抛出 L20 patch 错误。
+  - title: Patch reference
+    repo_path: labs/l19_vllm_serving_baseline/patch/reference/typical_p.py
+    focus: 参考实现中的数学步骤和边界处理
+    highlights:
+      - title: 读 reference 入口
+        lines: [8, 14]
+        note: |
+          L8-L12: reference 的参数和 starter 一致。
+          L13-L14: 阈值为 1 时不做额外计算。
+      - title: 读 typicality 统计量
+        lines: [16, 19]
+        note: |
+          L16-L19: 概率、surprisal、entropy 和 distance 都按 batch 行独立计算。
+      - title: 读排序和删除 mask
+        lines: [21, 29]
+        note: |
+          L21-L23: 按 distance 排序，并按同一顺序收集概率。
+          L25-L29: 累计概率超过 typical_p 的位置删除，首位保留。
+      - title: 读 mask 回填
+        lines: [31, 34]
+        note: |
+          L31-L32: scatter 把 sorted mask 放回原 vocab id 位置。
+          L34: `masked_fill` 只改删除位置，保留位置的 logit 不变。
+  - title: Patch tests
+    repo_path: labs/l19_vllm_serving_baseline/patch/tests/test_patch.py
+    focus: patch-test 对 shape、filter_value 和 batch 独立性的验收
+    highlights:
+      - title: 读 typical_p=1 合同
+        lines: [22, 27]
+        note: |
+          L22-L27: 阈值为 1 时输出必须和输入完全相等。
+      - title: 读最小阈值合同
+        lines: [30, 37]
+        note: |
+          L30-L37: 阈值接近 0 时每行仍必须保留一个 token。
+      - title: 读 filter_value 合同
+        lines: [40, 50]
+        note: |
+          L40-L47: 被删除 token 必须等于传入的 filter_value。
+          L48-L50: 被保留 token 的原始 logit 必须保持不变。
+      - title: 读 distance 不变量
+        lines: [63, 71]
+        note: |
+          L63-L71: 保留集合中最大的 distance 不应超过被删除集合中最小的 distance。
+      - title: 读 batch 合同
+        lines: [74, 83]
+        note: |
+          L74-L79: batch 输入的输出 shape 必须不变。
+          L80-L83: 每个 batch 行都要独立保留至少一个 token。
+  - title: vLLM SamplingParams
     repo_path: github_repo/vllm/vllm/sampling_params.py
-    focus: 看 SamplingParams 的所有可选 filter（top_p, top_k, typical_p, min_p）
+    focus: 当前 vLLM 参数中哪些采样 filter 被公开
+    highlights:
+      - title: 读采样字段
+        lines: [201, 213]
+        note: |
+          L201-L204: temperature 控制随机性，0 表示 greedy。
+          L205-L213: 当前源码公开 top_p、top_k 和 min_p，没有公开 typical_p 字段。
+      - title: 读 greedy 分支重置
+        lines: [425, 430]
+        note: |
+          L425-L430: temperature 接近 0 时会把 top_p、top_k 和 min_p 重置到 greedy 合同。
+      - title: 读参数校验
+        lines: [466, 477]
+        note: |
+          L466-L477: temperature 和 top_p 在构造 SamplingParams 时被校验。
+      - title: 读 top-k 和 min-p 校验
+        lines: [478, 488]
+        note: |
+          L478-L488: top_k 和 min_p 也有独立边界检查。
+  - title: vLLM Sampler
+    repo_path: github_repo/vllm/vllm/v1/sample/sampler.py
+    focus: sampler 单步里 logits processors 和候选过滤的顺序
+    highlights:
+      - title: 读 sampler 步骤前半
+        lines: [21, 33]
+        note: |
+          L21-L24: Sampler 定义模型输出到下一个 token 的采样层。
+          L26-L33: logprobs、float32 转换、白名单和 bad words 在前面处理。
+      - title: 读 sampler 步骤后半
+        lines: [38, 49]
+        note: |
+          L38-L42: penalties 后进入 `sample` 方法。
+          L43-L49: sample 内部依次处理 greedy、temperature、processors、top_k/top_p 和随机采样。
+      - title: 读 sample 热路径
+        lines: [261, 269]
+        note: |
+          L261-L264: 先应用 temperature。
+          L266-L269: 再应用 argmax-invariant processors。
+      - title: 读 top-k/top-p 调用
+        lines: [271, 277]
+        note: |
+          L271-L277: logits 随后进入 top_k/top_p sampler。
+  - title: vLLM top-k/top-p PyTorch path
+    repo_path: github_repo/vllm/vllm/v1/sample/ops/topk_topp_sampler.py
+    focus: 真实 filter 如何排序、mask 并回到原 logits
+    highlights:
+      - title: 读路径选择
+        lines: [257, 267]
+        note: |
+          L257-L264: 批量较大且有 Triton 时走 Triton 路径。
+          L266-L267: 小 batch 使用 PyTorch 排序实现。
+      - title: 读排序和 top-k
+        lines: [291, 299]
+        note: |
+          L291: logits 先按 vocab 维排序，得到排序值和原索引。
+          L293-L299: top-k mask 在排序空间里写入 `-inf`。
+      - title: 读 top-p 和 scatter
+        lines: [301, 311]
+        note: |
+          L301-L308: top-p 按累计概率 mask，并强制至少保留一个 token。
+          L310-L311: 最后 scatter 回原 logits 顺序。
+  - title: vLLM lab runner
+    repo_path: labs/l19_vllm_serving_baseline/scripts/run_vllm_lab.py
+    focus: serving baseline 如何区分健康检查和真实请求
+    highlights:
+      - title: 读配置和 run 目录
+        lines: [37, 49]
+        note: |
+          L37-L43: CLI 读取 run id、配置和模式。
+          L44-L49: run 目录写入命令快照、prediction 和解析后的配置。
+      - title: 读环境和命令快照
+        lines: [51, 57]
+        note: |
+          L51-L57: runner 记录 vLLM 是否可 import、端口是否打开和建议 serve 命令。
+      - title: 读请求和 TTFT
+        lines: [60, 71]
+        note: |
+          L60-L71: 端口打开时构造 OpenAI-compatible chat 请求。
+      - title: 读请求耗时结果
+        lines: [72, 78]
+        note: |
+          L72-L78: 请求成功才记录 TTFT 并标记 ok。
+      - title: 读指标行
+        lines: [79, 90]
+        note: |
+          L79-L89: 指标行区分 server_available、vllm_available、TTFT 和 status。
+          L90: metrics 以 JSONL 形式追加到 run 目录。
+  - title: vLLM log parser
+    repo_path: labs/l19_vllm_serving_baseline/scripts/parse_vllm_log.py
+    focus: 日志复盘时哪些字段能支持 serving 结论
+    highlights:
+      - title: 读指标正则
+        lines: [13, 23]
+        note: |
+          L13-L23: parser 识别 TTFT、ITL、请求吞吐和输出 token 吞吐。
+      - title: 读 workload 正则
+        lines: [24, 33]
+        note: |
+          L24-L33: parser 也识别 workload 相关字段，供 fingerprint 使用。
+      - title: 读可用性字段
+        lines: [45, 53]
+        note: |
+          L45-L53: 日志里的 command 会被保留到 payload。
+      - title: 读健康检查字段
+        lines: [54, 61]
+        note: |
+          L54-L61: availability、validation_only 和日志行数构成健康检查结果。
+      - title: 读 fingerprint 和状态
+        lines: [62, 73]
+        note: |
+          L62-L73: prompt/output/concurrency 都存在时生成 workload_fingerprint。
+      - title: 读 parser 状态
+        lines: [74, 82]
+        note: |
+          L74-L82: status 只有在端口打开且延迟拆分完整时才进入 served_with_metrics。
+  - title: MiniInfra OpenAI facade
+    repo_path: mini_infra/vllm/entrypoints/openai/api_server.py
+    focus: OpenAI-compatible 请求怎样进入 MiniInfra engine
+    highlights:
+      - title: 读 facade 初始化
+        lines: [8, 14]
+        note: |
+          L8-L14: OpenAIServingChat 包装 MiniInfra LLMEngine 和 model 名称。
+      - title: 读 chat completion
+        lines: [15, 24]
+        note: |
+          L15-L19: messages 被拼成 prompt，并作为 request 加入 engine。
+          L20-L24: engine step 到请求完成后构造 OpenAI-like 响应。
+      - title: 读返回结构
+        lines: [25, 35]
+        note: |
+          L25-L34: 返回 id、object、model、choices 和 finish_reason。
+          L35: debug payload 保留 MiniInfra 内部输出。
+  - title: MiniInfra LLMEngine
+    repo_path: mini_infra/vllm/v1/engine/llm_engine.py
+    focus: add_request、step、finished output 的最小生命周期
+    highlights:
+      - title: 读 engine 初始化
+        lines: [20, 23]
+        note: |
+          L20-L23: engine 创建 KV manager、scheduler 和输出缓存。
+      - title: 读 add_request
+        lines: [25, 28]
+        note: |
+          L25-L28: 外部请求被包装成 scheduler Request。
+      - title: 读 step decode
+        lines: [30, 42]
+        note: |
+          L30-L36: scheduler 返回本步应 decode 的 request。
+          L37-L42: 每个 running request 生成一个 token 并写入输出。
+      - title: 读 finished 输出
+        lines: [43, 51]
+        note: |
+          L43-L50: 完成请求从 scheduler.finished 取出并标记 finished。
+          L51: step 返回当前所有已知输出。
+  - title: MiniInfra Scheduler
+    repo_path: mini_infra/vllm/v1/core/sched/scheduler.py
+    focus: waiting、running、finished 与 KV block admission
+    highlights:
+      - title: 读 request 状态
+        lines: [9, 17]
+        note: |
+          L9-L17: Request 保存 prompt、输出 token 和占用的 KV blocks。
+      - title: 读 scheduler 输出
+        lines: [19, 23]
+        note: |
+          L19-L23: SchedulerOutput 把 prefill、decode 和 finished 列表分开。
+      - title: 读 waiting 入队
+        lines: [38, 40]
+        note: |
+          L38-L40: 新请求先 tokenize 成 prompt_token_ids，再进入 waiting 队列。
+      - title: 读 admission
+        lines: [46, 57]
+        note: |
+          L46-L48: waiting 非空且 running 未满时，按 prompt 长度估算 KV block。
+          L49-L57: KV 分配失败时停止接纳，成功时移动到 running。
+      - title: 读 finished 释放
+        lines: [58, 66]
+        note: |
+          L58-L65: 已到 max_tokens 的请求释放 KV blocks，其余请求进入 decode。
+          L66: schedule 输出本轮 prefill、decode 和 finished 集合。
+  - title: MiniInfra KVCacheManager
+    repo_path: mini_infra/vllm/v1/core/kv_cache_manager.py
+    focus: KV block 分配、释放和 usage snapshot
+    highlights:
+      - title: 读 block 和初始化
+        lines: [6, 18]
+        note: |
+          L6-L9: KVBlock 用 block id 和 owner_request_id 表示归属。
+          L12-L18: docstring 说明 MiniInfra 保留真实 vLLM 的生命周期位置。
+      - title: 读 blocks 初始化
+        lines: [21, 23]
+        note: |
+          L21-L23: KVCacheManager 初始化固定数量的 blocks。
+      - title: 读 usage 和 allocate
+        lines: [24, 34]
+        note: |
+          L24-L27: usage 用已占用 block 比例表示。
+          L29-L34: allocate_slots 检查容量，不足时抛出 KV cache exhausted。
+      - title: 读 allocate 写入
+        lines: [35, 38]
+        note: |
+          L35-L38: 分配成功后写入 owner_request_id，并返回 block id。
+      - title: 读 free 和 snapshot
+        lines: [43, 51]
+        note: |
+          L43-L47: free 按 request_id 清空 block 归属。
+          L48-L51: reset_prefix_cache 清空所有 block 归属。
+      - title: 读 snapshot 前半
+        lines: [53, 61]
+        note: |
+          L53-L61: snapshot 输出总数、usage 和空闲 blocks。
+      - title: 读 snapshot 后半
+        lines: [62, 67]
+        note: |
+          L62-L67: snapshot 输出已用 blocks 与 owner_request_id。
 
 mini_infra_targets:
-  - mini_infra/vllm/
-
+  - mini_infra/vllm/entrypoints/openai/api_server.py
+  - mini_infra/vllm/v1/engine/llm_engine.py
+  - mini_infra/vllm/v1/core/sched/scheduler.py
+  - mini_infra/vllm/v1/core/kv_cache_manager.py
 notebooks:
   - notebooks/n07_kv_cache.ipynb
   - notebooks/n08_prefill_decode.ipynb
-
 tickets:
   - vllm_memory_pressure_001
   - vllm_bad_chat_template_002
   - vllm_port_conflict_003
-
 prereq: l18_data_engineering
 next_lab: l20_vllm_scheduler_kv
-
 gpu_modes:
-  local: CPU 即可
-  cluster: 真 vLLM serving 验证（可选）
+  local: CPU patch-test 和 validation_only serving smoke
+  cluster: 真 vLLM serving、TTFT/ITL/throughput 和显存指标验证
+
+lesson:
+  opening: |-
+    # L20：vLLM Serving Baseline and Typical-p Sampling
+
+    本讲进入推理服务主线。先建立 vLLM/OpenAI-compatible serving baseline，明确服务进程、端口、请求、TTFT 和报告状态的边界；再实现一个 locally typical sampling 的 logits filter，理解候选过滤器在 decode 热路径中的位置。
+  sections:
+    - title: 系统位置：服务 baseline 先于采样实验
+      plain_explanation: |-
+        L20 接在数据工程之后，切换到推理服务。推理实验如果没有 baseline，很容易把端口错误、模型名不匹配、server 未启动或日志解析问题误认为采样策略问题。本讲先要求学生能跑出可复查的 serving 报告，再把 patch 限定在一个可测试的 logits filter。
+
+        这条边界影响课堂验收方式：patch-test 只证明 typical-p 数学和 shape 合同正确；`run_vllm_lab.py` 只证明 serving 环境、请求路径和报告字段被记录。二者都通过后，才适合在真实 vLLM server 上比较采样参数。
+      mental_model: patch-test 检查函数，serving smoke 检查服务，benchmark 才能比较性能。
+      why_it_matters: 没有 baseline 的采样实验会产生无法解释的 TTFT、ITL 或吞吐数字，也会掩盖端口和模板错误。
+      source_refs:
+        - title: vLLM lab runner 配置入口
+          repo_path: labs/l19_vllm_serving_baseline/scripts/run_vllm_lab.py
+          lines: [37, 49]
+          note: |
+            L37-L43: CLI 读取 run id、配置和模式。
+            L44-L49: run 目录写入命令快照、prediction 和解析后的配置。
+        - title: vLLM lab runner 指标状态
+          repo_path: labs/l19_vllm_serving_baseline/scripts/run_vllm_lab.py
+          lines: [79, 90]
+          note: |
+            L79-L89: 指标行明确区分 server_available、vllm_available、TTFT 和 status。
+            L90: metrics 以 JSONL 追加，便于课后审计。
+      common_confusions:
+        - patch-test 通过后就认为真实 vLLM server 已经可用。
+        - validation_only 也写成 served，导致报告里出现伪服务指标。
+        - benchmark 时同时改模型、并发、prompt 和采样参数，最后无法解释差异。
+      checkpoint_questions:
+        - L20 的 patch-test 和 serving smoke 分别验证什么？
+        - "`validation_only` 能支持哪些结论，不能支持哪些结论？"
+        - 比较采样参数前，哪些 workload 条件必须固定？
+    - title: vLLM sampler：logits filter 在 decode 后段
+      plain_explanation: |-
+        自回归推理每生成一个 token，模型先对当前 batch 输出 logits。sampler 再处理白名单、bad words、logits processors、penalties、temperature 和候选过滤，最后抽样得到 token。typical-p 属于候选过滤器，它编辑 logits 的可选集合，不负责请求调度、KV cache 分配或 OpenAI API 响应。
+
+        当前 checkout 的 `SamplingParams` 公开了 temperature、top_p、top_k 和 min_p，没有直接公开 typical_p 字段。本讲 patch 因此不修改 vLLM API，而是用 PyTorch 写一个数学等价的 filter。读 vLLM sampler 时，应关注它可以接入的位置和需要补齐的框架层校验。
+      mental_model: 模型给 logits，processors 改 logits，sampler 从剩余分布里选 token。
+      why_it_matters: 采样 filter 位于每个 decode token 的热路径上，任何 shape、dtype 或 batch 维度错误都会放大到服务行为。
+      source_refs:
+        - title: SamplingParams 的候选过滤字段
+          repo_path: github_repo/vllm/vllm/sampling_params.py
+          lines: [201, 213]
+          note: |
+            L201-L204: temperature 控制随机性，0 表示 greedy。
+            L205-L213: 当前源码公开 top_p、top_k 和 min_p。
+        - title: Sampler 的随机采样顺序
+          repo_path: github_repo/vllm/vllm/v1/sample/sampler.py
+          lines: [38, 49]
+          note: |
+            L38-L42: penalties 后进入 sample 方法。
+            L43-L49: sample 内部依次处理 greedy、temperature、processors、top_k/top_p 和随机采样。
+        - title: sample 热路径
+          repo_path: github_repo/vllm/vllm/v1/sample/sampler.py
+          lines: [261, 269]
+          note: |
+            L261-L264: 先应用 temperature。
+            L266-L269: 再应用 argmax-invariant processors。
+        - title: top-k/top-p 调用
+          repo_path: github_repo/vllm/vllm/v1/sample/sampler.py
+          lines: [271, 277]
+          note: |
+            L271-L277: logits 随后进入 top_k/top_p sampler。
+      common_confusions:
+        - 看到 typical-p 练习就以为当前 vLLM API 已经有同名参数。
+        - 把 logits filter 当成完整解码器，忽略后面还要归一化和随机采样。
+        - 忽略 greedy 分支，导致 temperature 接近 0 时仍按随机路径理解。
+      checkpoint_questions:
+        - logits filter 在模型 forward 前还是后？
+        - 当前源码中公开了哪些候选过滤参数？
+        - 如果要把 typical-p 接入真实 vLLM，还要改哪些 API 或校验层？
+    - title: Typical-p 数学：按信息量距离选候选
+      plain_explanation: |-
+        typical-p 从 logits 得到概率分布，计算每个 token 的 surprisal：`-log(p)`。整行 entropy 是当前分布的期望 surprisal。一个 token 的 locally typical 程度由 `|surprisal - entropy|` 衡量，距离越小，说明它的信息量越接近这一步分布的平均信息量。
+
+        top-p 按概率从高到低累计，优先保留最可能的一段。typical-p 按 distance 从小到大累计，优先保留信息量接近平均的 token。它可能删除概率极低的离群 token，也可能删除概率过高、容易让输出重复的 token。这个算法改变候选集合，不改变模型权重。
+      mental_model: top-p 问“概率最高的一段是谁”，typical-p 问“信息量最接近本步平均值的是谁”。
+      why_it_matters: 排序依据不同会改变输出分布；在事实问答、代码补全和创作任务里，采样参数的风险边界不同。
+      source_refs:
+        - title: reference typicality 统计量
+          repo_path: labs/l19_vllm_serving_baseline/patch/reference/typical_p.py
+          lines: [16, 19]
+          note: |
+            L16-L19: softmax、surprisal、entropy 和 distance 都按 batch 行独立计算。
+        - title: reference 排序和截断
+          repo_path: labs/l19_vllm_serving_baseline/patch/reference/typical_p.py
+          lines: [21, 29]
+          note: |
+            L21-L23: 按 distance 排序，并按同一索引收集概率。
+            L25-L29: 累计概率超过 typical_p 的位置删除，首位保留。
+      common_confusions:
+        - 把 entropy 当成每个 token 的属性，实际它是每一行分布的统计量。
+        - 认为 typical-p 一定保留最高概率 token。
+        - 把 `typical_p=0.9` 理解成保留 90% 的词表大小。
+      checkpoint_questions:
+        - surprisal 怎样由 token 概率计算？
+        - entropy 在本算法中表示什么？
+        - typical-p 和 top-p 的排序依据分别是什么？
+    - title: Patch 实现：排序空间和 vocab 空间要分清
+      plain_explanation: |-
+        patch 的关键在于张量空间的转换。先在原 logits 空间计算 `(B,V)` 的概率和 distance；再按 distance 排序，得到 sorted view；累计概率后生成 `sorted_remove`；最后必须用 `scatter_` 把删除 mask 放回原 vocab id 顺序，再对原 logits 做 `masked_fill`。
+
+        函数返回值必须和输入同形。被删除位置等于 `filter_value`，被保留位置保持原始 logit。阈值接近 0 时仍要保留每行 distance 最小的 token，否则后续 softmax 会面对空候选集合。batch 输入时，每一行都有自己的 entropy、排序和截断。
+      mental_model: 排序空间只用来决定删谁，返回给 sampler 的张量仍在原 vocab 空间。
+      why_it_matters: 忘记 scatter 会让 token id 错位；这个错误通常不崩溃，但生成分布会变得无法解释。
+      source_refs:
+        - title: starter 的实现步骤
+          repo_path: labs/l19_vllm_serving_baseline/patch/starter/typical_p.py
+          lines: [27, 39]
+          note: |
+            L27-L31: TODO 先计算概率、信息量、entropy 和 distance。
+            L33-L39: TODO 再排序、收集概率并找出超过阈值的位置。
+        - title: starter 的 scatter 提示
+          repo_path: labs/l19_vllm_serving_baseline/patch/starter/typical_p.py
+          lines: [40, 49]
+          note: |
+            L40-L45: 第 0 列保留，并把 sorted_remove scatter 回原顺序。
+            L47-L49: 返回 masked logits，未实现时抛出 L20 patch 错误。
+        - title: reference 的 mask 回填
+          repo_path: labs/l19_vllm_serving_baseline/patch/reference/typical_p.py
+          lines: [31, 34]
+          note: |
+            L31-L32: mask_to_remove 使用 sorted_idx scatter 回原 vocab 位置。
+            L34: `masked_fill` 只替换删除位置。
+      common_confusions:
+        - 在 sorted 空间里直接 mask 原 logits。
+        - 对整个 batch 求一个全局 entropy。
+        - 参数很小时没有强制保留一个 token。
+      checkpoint_questions:
+        - "`scatter_` 在本算法里解决什么问题？"
+        - 为什么 entropy 要保留 `(B,1)` 形状？
+        - 哪些输出位置必须保持原始 logit 值？
+    - title: 行为验收：测试检查的是合同，不是文风质量
+      plain_explanation: |-
+        patch tests 覆盖五个边界：`typical_p=1.0` 时完全不改 logits；阈值接近 0 时每行只保留一个 token；自定义 `filter_value` 必须生效；保留 token 的 distance 不应大于被删除 token；batch 中每一行都必须至少保留一个 token。
+
+        这些测试不评价生成文本好不好，它们验证 sampler 前置 filter 的数学合同。真实服务中的质量判断还要固定 prompt、max_tokens、temperature、top_p、并发和模型，再看输出、TTFT、ITL 和吞吐。
+      mental_model: 单测先证明候选集合被正确编辑，服务实验再讨论输出和性能。
+      why_it_matters: Serving bug 经常表现为偶发空分布、某个 batch 行异常或 filter_value 没生效，合同测试能提前拦截。
+      source_refs:
+        - title: typical_p=1 与最小阈值测试
+          repo_path: labs/l19_vllm_serving_baseline/patch/tests/test_patch.py
+          lines: [22, 27]
+          note: |
+            L22-L27: 阈值为 1 时输出必须完全等于输入。
+        - title: 最小阈值测试
+          repo_path: labs/l19_vllm_serving_baseline/patch/tests/test_patch.py
+          lines: [30, 37]
+          note: |
+            L30-L37: 阈值接近 0 时仍保留一个 token。
+        - title: filter_value 和 distance 测试
+          repo_path: labs/l19_vllm_serving_baseline/patch/tests/test_patch.py
+          lines: [40, 50]
+          note: |
+            L40-L50: 删除位置等于 filter_value，保留位置保持原值。
+        - title: distance 测试入口
+          repo_path: labs/l19_vllm_serving_baseline/patch/tests/test_patch.py
+          lines: [53, 61]
+          note: |
+            L53-L61: 测试先计算 kept 与 dropped 需要比较的 typicality distance。
+        - title: batch 合同测试
+          repo_path: labs/l19_vllm_serving_baseline/patch/tests/test_patch.py
+          lines: [74, 83]
+          note: |
+            L74-L79: batch 输入的输出 shape 必须不变。
+            L80-L83: 每个 batch 行都要至少保留一个 token。
+      common_confusions:
+        - 只检查保留数量，不检查保留位置的 logit 是否改变。
+        - 在 batch size 为 1 时通过，却在多行输入时互相污染。
+        - 用服务输出质量替代函数级合同测试。
+      checkpoint_questions:
+        - "`typical_p=1.0` 的输出合同是什么？"
+        - "`test_kept_tokens_dist_minimal` 检查哪个不变量？"
+        - 为什么 batch 每一行都要独立保留候选？
+    - title: Serving 复盘：端口、模板、KV cache 和指标要分开排查
+      plain_explanation: |-
+        L20 的三个 tickets 覆盖常见 serving 故障。KV cache 压力会表现为 OOM、preemption 增长、cache usage 接近上限或 ITL 抖动。端口冲突会让客户端请求打到错误服务或没有服务。chat template 错误会改变 prompt token 序列，影响 prefix cache、输出质量和指标解释。
+
+        排查时先看 `command.sh`、`config.resolved.yaml`、`serve.log` 和 `metrics.jsonl` 是否一致，再决定问题发生在启动、请求、采样还是日志解析。`parse_vllm_log.py` 可以抽取 TTFT、ITL、吞吐和 workload fingerprint；fingerprint 的作用是确认两次实验是否真的使用了同一组 workload。
+      mental_model: 采样 bug 看 logits 和 mask，服务 bug 看命令、端口、模板、KV cache 和日志指标。
+      why_it_matters: 多个故障可能都表现为“服务慢”或“输出不对”，但证据和修复路径不同。
+      source_refs:
+        - title: OpenAI-compatible 客户端请求
+          repo_path: labs/l19_vllm_serving_baseline/scripts/client_openai.py
+          lines: [11, 21]
+          note: |
+            L11-L15: payload 明确包含 model、messages 和 max_tokens。
+            L16-L21: 请求发往 `/chat/completions` 并打印响应前缀。
+        - title: 日志 parser 可用性字段
+          repo_path: labs/l19_vllm_serving_baseline/scripts/parse_vllm_log.py
+          lines: [45, 53]
+          note: |
+            L45-L53: command 从日志中保留，便于复盘启动参数。
+        - title: 日志 parser 健康检查字段
+          repo_path: labs/l19_vllm_serving_baseline/scripts/parse_vllm_log.py
+          lines: [54, 61]
+          note: |
+            L54-L61: availability、validation_only 和日志行数进入 payload。
+        - title: 日志 parser workload fingerprint
+          repo_path: labs/l19_vllm_serving_baseline/scripts/parse_vllm_log.py
+          lines: [62, 73]
+          note: |
+            L62-L73: prompt/output/concurrency 都存在时生成 workload_fingerprint。
+        - title: 日志 parser 状态
+          repo_path: labs/l19_vllm_serving_baseline/scripts/parse_vllm_log.py
+          lines: [74, 82]
+          note: |
+            L74-L82: status 依赖端口和延迟拆分是否完整。
+      common_confusions:
+        - 输出异常时先改采样参数，没有检查 chat template 和 model 名。
+        - 端口已有服务还继续 benchmark，结果测到另一个进程。
+        - 只看 tokens/s，不拆 TTFT、ITL、请求吞吐和输出 token 吞吐。
+      checkpoint_questions:
+        - 端口冲突和采样 filter 错误分别应该看哪些证据？
+        - "`workload_fingerprint` 对 benchmark 复盘有什么用？"
+        - KV cache 压力出现时，应该优先检查哪些配置或日志字段？
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l19_vllm_serving_baseline/system_map.md
+    description: 本讲在推理服务主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l19_vllm_serving_baseline/lecture.md
+    description: 从 serving baseline、采样机制、patch 合同讲到服务复盘。
+  - title: 源码带读讲义
+    path: labs/l19_vllm_serving_baseline/source_walkthrough.md
+    description: 按 vLLM sampler、typical-p patch 和 serving runner 组织源码阅读路线。

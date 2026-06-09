@@ -1,5 +1,5 @@
 mission: l02_pytorch_systems
-title: L01 Quiz · 显存账本基础
+title: L02 Quiz · 显存账本基础
 pass_threshold: 1.0
 description: |
   这 5 题打中"显存四件套"（params / grads / activations / optimizer states）
@@ -7,15 +7,30 @@ description: |
   还没有定量直觉，复习 notebook n01 之后再答。
 
 prereq_checklist:
-  - title: 读 patch/task.md（10min）
-    kind: read
+  - title: 读系统地图：确认 L02 在训练内存主线中的位置
+    kind: doc
+    path: labs/l02_pytorch_systems/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从参数、梯度和优化器状态讲到显存账本
+    kind: doc
+    path: labs/l02_pytorch_systems/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 memory probe、训练脚本和测试阅读
+    kind: doc
+    path: labs/l02_pytorch_systems/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l02_pytorch_systems/patch/task.md
-  - title: 跑 notebook n01 · GPU memory anatomy（30min）
-    kind: notebook
-    path: notebooks/n01_gpu_memory_anatomy.ipynb
-  - title: 读 PyTorch optim 源码 SGD/Adam 状态结构（15min）
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 PyTorch memory probe reference
     kind: source
-    path: github_repo/torchtitan/torchtitan/optim/__init__.py
+    path: labs/l02_pytorch_systems/patch/reference/memory_probe.py
+    estimate_min: 10
 
 questions:
   - id: q1_adam_state
@@ -124,7 +139,7 @@ questions:
         - LLaMA-7B 默认 seq=2048 batch=1 fp16，activation 约 **数百 GB**
 
       所以 activation checkpointing（recompute）才是 7B+ 训练能跑起来的根本原因。
-      L03 TorchTitan 这一关你会亲自给 framework 加一个 selective ckpt policy。
+      L07 TorchTitan 这一关你会亲自给 framework 加一个 selective ckpt policy。
 
       记忆口诀：**模型大看 4×params，batch 大看 activations。**
 
@@ -143,7 +158,7 @@ questions:
       - id: d
         text: PyTorch 已经统一成一个 dict，不存在区别
     explanation: |
-      这是 ckpt 处理最常见的误解，也是 L04 Megatron / L11 SLiME 写 ckpt 时
+      这是 ckpt 处理最常见的误解，也是后续 Megatron / SLiME 写 ckpt 时
       最容易出 bug 的地方。
 
       `model.state_dict()` 包含：

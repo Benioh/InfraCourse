@@ -1,5 +1,5 @@
 """
-L09 Patch · Prometheus Metrics Exporter
+L27 Patch · Prometheus Metrics Exporter
 
 填空规则：
 - TODO(student) 必须自己写
@@ -39,7 +39,7 @@ class MetricsExporter:
 
     def set_gauge(self, name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
         # TODO(student): self.gauges[(name, _label_key(labels))] = float(value)
-        raise NotImplementedError("L09: implement set_gauge")
+        raise NotImplementedError("L27: implement set_gauge")
 
     def inc_counter(
         self, name: str, by: float = 1, labels: Optional[Dict[str, str]] = None
@@ -47,7 +47,7 @@ class MetricsExporter:
         # TODO(student):
         #   key = (name, _label_key(labels))
         #   self.counters[key] = self.counters.get(key, 0.0) + by
-        raise NotImplementedError("L09: implement inc_counter")
+        raise NotImplementedError("L27: implement inc_counter")
 
     def record_event(self, name: str, hit: bool) -> None:
         # TODO(student):
@@ -55,7 +55,7 @@ class MetricsExporter:
         #   if hit: h += 1
         #   else:   m += 1
         #   self.ratios[name] = (h, m)
-        raise NotImplementedError("L09: implement record_event")
+        raise NotImplementedError("L27: implement record_event")
 
     def export(self) -> str:
         """返回 Prometheus exposition 文本。
@@ -79,4 +79,4 @@ class MetricsExporter:
         #         分母为 0 时输出 0.0
         #
         # 最后 return "\n".join(lines) + "\n"
-        raise NotImplementedError("L09: implement export")
+        raise NotImplementedError("L27: implement export")

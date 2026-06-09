@@ -1,0 +1,476 @@
+id: l14_pipeline_1f1b
+title: L15 · Pipeline Parallel 1F1B 调度
+level: L15
+act: 第 2 章：训练系统、并行与数据
+role: Pipeline 调度学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+frameworks:
+  - Megatron-LM
+  - MiniInfra
+
+patch:
+  description: |
+    实现 `make_1f1b_schedule(num_stages, num_microbatches)` 和 `bubble_count(num_stages)`：
+    生成每个 pipeline stage 的 warmup、steady 1F1B、cooldown timeline，
+    并验证标准 non-interleaved 1F1B 的 bubble 公式。
+  task_md: labs/l14_pipeline_1f1b/patch/task.md
+  starter_file: labs/l14_pipeline_1f1b/patch/starter/pp_schedule.py
+  reference_file: labs/l14_pipeline_1f1b/patch/reference/pp_schedule.py
+  test_command: make patch-test M=l14_pipeline_1f1b
+  status_file: labs/l14_pipeline_1f1b/patch/.last_run.json
+  test_count: 8
+  test_kind: Pipeline timeline 行为合同
+
+source_reading:
+  - title: Patch starter
+    repo_path: labs/l14_pipeline_1f1b/patch/starter/pp_schedule.py
+    focus: 学生需要补齐的 per-stage timeline 合同
+    highlights:
+      - title: 读 schedule 签名与 TODO
+        lines: [6, 14]
+        note: |
+          L6-L7: `make_1f1b_schedule` 返回按 stage 分组的 op timeline。
+          L8-L13: TODO 明确要求按 warmup、steady、cooldown 三段生成。
+          L14: 未实现时抛出 L15 的错误提示。
+      - title: 读 bubble_count 合同
+        lines: [17, 20]
+        note: |
+          L17-L18: `bubble_count` 只描述标准 non-interleaved 1F1B 的 bubble。
+          L19-L20: TODO 要求返回 `2 * (num_stages - 1)`。
+  - title: Patch reference
+    repo_path: labs/l14_pipeline_1f1b/patch/reference/pp_schedule.py
+    focus: warmup、steady 和 cooldown 的参考实现
+    highlights:
+      - title: 读输入校验
+        lines: [6, 12]
+        note: |
+          L6: 函数接收 stage 数和 microbatch 数。
+          L7-L8: stage 数必须为正。
+          L9-L12: microbatch 数不足时显式拒绝。
+      - title: 读 stage 状态初始化
+        lines: [13, 18]
+        note: |
+          L13-L16: 为每个 stage 建立独立 timeline，并计算 warmup。
+          L17-L18: forward 和 backward 游标都从 0 开始。
+      - title: 读 warmup 与 steady
+        lines: [19, 27]
+        note: |
+          L19-L21: warmup 只追加 forward。
+          L22-L23: steady 次数是 `num_microbatches - warmup`。
+          L24-L27: steady 每轮追加一个 forward 和一个 backward。
+      - title: 读 cooldown 与返回
+        lines: [28, 32]
+        note: |
+          L28-L30: cooldown 只追加 backward。
+          L31-L32: 当前 stage timeline 写入 schedule 后返回整体结果。
+      - title: 读 bubble 公式
+        lines: [35, 36]
+        note: |
+          L35-L36: 标准首尾 bubble 是 `2 * (num_stages - 1)`。
+  - title: Patch tests
+    repo_path: labs/l14_pipeline_1f1b/patch/tests/test_patch.py
+    focus: 测试覆盖的 1F1B 不变量
+    highlights:
+      - title: 读 warmup 测试
+        lines: [20, 27]
+        note: |
+          L20-L22: 构造 4 stage、8 microbatch 的 schedule。
+          L23-L26: 每个 stage 的 prefix 长度按 `4 - stage - 1` 计算。
+          L27: prefix 内必须全是 forward。
+      - title: 读 steady 交替测试
+        lines: [29, 38]
+        note: |
+          L29-L35: 找出 steady 区间。
+          L36-L38: 偶数位置必须是 forward，奇数位置必须是 backward。
+      - title: 读每个 microbatch 的 F/B 数
+        lines: [50, 57]
+        note: |
+          L50-L53: 对每个 stage 的 timeline 收集 forward 和 backward。
+          L54-L57: 每个 microbatch 都必须各出现一次。
+      - title: 读 backward 依赖测试
+        lines: [70, 77]
+        note: |
+          L70-L74: 记录每个 microbatch 的 forward 位置。
+          L75-L77: backward 必须晚于对应 forward。
+      - title: 读 bubble 与非法输入测试
+        lines: [80, 90]
+        note: |
+          L80-L84: 验证 bubble count 对 1、4、8 stage 的结果。
+          L87-L90: microbatch 数小于 stage 数时必须抛 `ValueError`。
+  - title: PP smoke script
+    repo_path: labs/l14_pipeline_1f1b/scripts/run_pp_smoke.py
+    focus: mock 时间模型、acceptance 和 artifact 落盘
+    highlights:
+      - title: 读配置与 run 目录
+        lines: [53, 61]
+        note: |
+          L53-L55: 选择实现、读取配置并准备 run 目录。
+          L56-L61: 写入命令快照、prediction 和 resolved config。
+      - title: 读 schedule 生成
+        lines: [70, 76]
+        note: |
+          L70-L73: 从配置读取 stage、microbatch 和 mock op 时间。
+          L75-L76: 调用 schedule generator 和 bubble 公式。
+      - title: 读 bubble ratio
+        lines: [78, 85]
+        note: |
+          L78-L82: 用最长 stage timeline 估算 makespan。
+          L83-L85: 用理想时间和最长时间计算 bubble ratio。
+      - title: 读 acceptance
+        lines: [87, 97]
+        note: |
+          L87-L89: 读取 bubble、total ops 和 ratio 的验收条件。
+          L90-L97: 任一条件不满足时标记 accept false。
+      - title: 读 metrics 落盘
+        lines: [99, 111]
+        note: |
+          L99-L111: 写入 `metrics.jsonl`，保留 stage、microbatch、bubble 和 accept。
+      - title: 读 summary artifact
+        lines: [113, 124]
+        note: |
+          L113-L121: 写入 `pp_summary.json` 的核心指标。
+          L122-L124: 保存首尾 stage 的 schedule 样本。
+  - title: MiniInfra schedules
+    repo_path: mini_infra/megatron/core/pipeline_parallel/schedules.py
+    focus: 教学版 PP 函数选择和事件流
+    highlights:
+      - title: 读函数选择
+        lines: [14, 19]
+        note: |
+          L14: 根据 pipeline model parallel size 选择函数。
+          L15-L18: PP size 大于 1 时走 pipeline，否则走 no pipeline。
+      - title: 读 pipeline 入口
+        lines: [31, 34]
+        note: |
+          L31-L33: 教学版 pipeline 函数接收 microbatch 数和 stage 数。
+          L34: 初始化事件列表。
+      - title: 读 forward 事件
+        lines: [35, 44]
+        note: |
+          L35-L36: forward 按 microbatch 和 stage 嵌套遍历。
+          L37-L44: 每个 forward 事件记录 time、stage、microbatch 和 op。
+      - title: 读 backward 事件
+        lines: [45, 57]
+        note: |
+          L45-L46: backward 按 microbatch 和 stage 反向遍历。
+          L47-L56: 每个 backward 事件写入反向时间、stage 和 microbatch。
+          L57: 返回完整事件流。
+      - title: 读 bubble ratio
+        lines: [60, 61]
+        note: |
+          L60-L61: 教学版用 stage 数和 microbatch 数估算 bubble ratio。
+  - title: Megatron schedule selector
+    repo_path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+    focus: 真实 Megatron 如何选择 no PP、non-interleaved PP 和 interleaved PP
+    highlights:
+      - title: 读 selector 目标
+        lines: [48, 54]
+        note: |
+          L48-L54: `get_forward_backward_func` 根据 PP/VPP 配置返回 forward-backward 函数。
+      - title: 读 selector 分支
+        lines: [147, 154]
+        note: |
+          L147-L151: PP size 大于 1 时，有 VPP 走 interleaved，否则走 non-interleaved。
+          L152-L154: PP size 为 1 时回到 no pipelining。
+      - title: 读 activation deallocate
+        lines: [157, 168]
+        note: |
+          L157-L162: output tensor 发送后只保留 autograd 需要的 `grad_fn`。
+          L164-L168: 支持 tensor、list 和 dict 等输出格式。
+  - title: Megatron non-interleaved 1F1B
+    repo_path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+    focus: warmup、steady、cooldown 和 gradient finalize 主路径
+    highlights:
+      - title: 读函数入口
+        lines: [2035, 2047]
+        note: |
+          L2035-L2043: non-interleaved 1F1B 接收 forward step、模型、microbatch 和 shape 参数。
+          L2044-L2047: forward_only、收集输出和 shape 调整也会进入 schedule。
+      - title: 读入口补充参数
+        lines: [2048, 2055]
+        note: |
+          L2048-L2052: P2P communicator、process groups 和 grad all-reduce 选项进入函数。
+          L2054-L2055: docstring 明确这是带 pipeline stage 通信的 non-interleaved 1F1B。
+      - title: 读 warmup 数
+        lines: [2166, 2169]
+        note: |
+          L2166-L2168: warmup 数由总 stage、当前 stage 和 microbatch 数共同限制。
+          L2169: remaining 数进入 steady 阶段。
+      - title: 读 warmup 准备
+        lines: [2223, 2233]
+        note: |
+          L2223-L2224: warmup 循环只跑前置 forward。
+          L2225-L2233: 每个 warmup microbatch 选择 activation checkpoint 策略。
+      - title: 读 warmup forward
+        lines: [2234, 2245]
+        note: |
+          L2234-L2236: 从上一个 stage 接收 forward tensor。
+          L2237-L2245: 调用 `forward_step` 计算当前 stage 输出。
+      - title: 读 warmup send
+        lines: [2246, 2252]
+        note: |
+          L2246-L2250: forward_step 继续接收 checkpoint、microbatch 和 last stage 标记。
+          L2252: 把 forward 输出发送到下一个 stage。
+      - title: 读 steady 入口
+        lines: [2260, 2269]
+        note: |
+          L2260-L2266: 如果存在 remaining microbatch，先接收第一个 forward tensor。
+          L2268-L2269: 进入 1F1B steady 循环。
+      - title: 读 steady forward
+        lines: [2280, 2290]
+        note: |
+          L2280-L2288: steady 先执行当前 microbatch 的 forward_step。
+          L2289-L2290: 收集输出与 checkpoint 策略继续传入。
+      - title: 读 steady microbatch id
+        lines: [2291, 2296]
+        note: |
+          L2291-L2294: 当前 microbatch id 要加上 warmup 偏移。
+          L2295-L2296: last stage 标记决定 loss/output 处理。
+      - title: 读 steady forward-send/backward-recv
+        lines: [2301, 2308]
+        note: |
+          L2301-L2304: forward_only 分支只继续接收 forward。
+          L2306-L2308: 训练分支发送 forward，并接收 backward gradient。
+      - title: 读 steady tensor 队列
+        lines: [2310, 2318]
+        note: |
+          L2310-L2313: 新 forward 的 input/output tensor 入队。
+          L2315-L2318: 弹出最早的 tensor 对做 backward。
+      - title: 读 steady backward
+        lines: [2320, 2328]
+        note: |
+          L2320-L2324: 最后一轮可能重新打开 grad sync。
+          L2326-L2328: 调用 backward 函数得到 input gradient。
+      - title: 读 steady send backward
+        lines: [2330, 2338]
+        note: |
+          L2330-L2334: 最后一轮只发送 backward。
+          L2336-L2338: 非最后一轮发送 backward 并接收下一个 forward。
+      - title: 读 cooldown sync
+        lines: [2340, 2351]
+        note: |
+          L2340-L2342: warmup 留下的 backward 进入 cooldown。
+          L2344-L2351: 最后一个 cooldown backward 前可能重新打开 grad sync。
+      - title: 读 cooldown backward
+        lines: [2353, 2364]
+        note: |
+          L2353-L2358: 弹出 tensor 并接收 backward gradient。
+          L2360-L2364: 执行 backward，并把 input gradient 发给前一 stage。
+      - title: 读 gradient finalize
+        lines: [2380, 2388]
+        note: |
+          L2380-L2382: 最后处理 data parallel、sequence parallel 和 embedding 相关梯度规约。
+          L2383-L2388: 调用 finalize hook 完成模型梯度收尾。
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l14_pipeline_1f1b/system_map.md
+    description: L15 在训练并行主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l14_pipeline_1f1b/lecture.md
+    description: 从 PP 真实问题、1F1B 三段式、bubble 讲到 Megatron schedule 主路径。
+  - title: 源码带读讲义
+    path: labs/l14_pipeline_1f1b/source_walkthrough.md
+    description: 按 patch、MiniInfra、Megatron selector 和 non-interleaved schedule 组织源码阅读路线。
+
+mini_infra_targets:
+  - mini_infra/megatron/core/pipeline_parallel/schedules.py
+notebooks: []
+tickets:
+  - pp_warmup_off_by_one
+  - pp_steady_double_F
+  - pp_micro_underrun
+  - pp_bubble_ratio_too_high
+prereq: l13_moe_ep
+next_lab: l15_megatron_parallel_checkpoint
+gpu_modes:
+  local: CPU patch 和 PP smoke
+  cluster: Megatron PP dryrun 或真实训练 benchmark
+
+lesson:
+  opening: |
+    # 第 15 讲：Pipeline Parallel 1F1B 调度
+
+    L15 解决模型按层切分后的训练 step 调度问题。Pipeline parallelism 把模型切成多个 stage，再把 global batch 切成 microbatch，让不同 stage 同时处理不同 microbatch。1F1B 用 warmup 填充流水线，用 forward/backward 交替缩短激活驻留窗口，再用 cooldown 排空剩余 backward。
+
+    Patch 只生成每个 stage 的局部 timeline，并计算标准 non-interleaved 1F1B 的 bubble count。它不执行真实模型，不做 P2P 通信，也不覆盖 Megatron 的 interleaved schedule。
+  sections:
+    - title: 课程定位：PP 解决模型切层后的训练调度
+      plain_explanation: |
+        Data Parallel 复制模型，FSDP2 分片状态，MoE/EP 把 token 路由到不同 expert。Pipeline Parallelism 处理另一类问题：模型按层切成多个 stage 后，一个训练 step 怎样穿过这些 stage。
+
+        L15 只讲 non-interleaved 1F1B 主线。学生要先能解释 stage、microbatch、forward dependency、backward dependency 和 bubble，再去看 Megatron 的 P2P communicator、activation deallocate 和 gradient finalize。
+      mental_model: |
+        把 PP 想成多段流水线。microbatch 是流水线里的工件，stage 是不同工位，1F1B 是让工位在前向和反向之间按依赖切换的排程表。
+      why_it_matters: |
+        PP 配置不合理会造成 stage 空闲、激活驻留过长、P2P 等待或 step time 抖动。读懂 schedule 后，才能判断问题来自调度、切层还是通信。
+      source_refs:
+        - title: MiniInfra 函数选择
+          repo_path: mini_infra/megatron/core/pipeline_parallel/schedules.py
+          lines: [14, 19]
+          note: |
+            L14: 根据 pipeline model parallel size 选择 forward-backward 函数。
+            L15-L18: PP size 大于 1 时进入 pipeline 版本。
+        - title: Megatron selector
+          repo_path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+          lines: [147, 154]
+          note: |
+            L147-L151: 有 virtual PP size 时选择 interleaved，否则选择 non-interleaved。
+            L152-L154: PP size 为 1 时走 no pipelining。
+      common_confusions:
+        - 认为 PP 会让单个 microbatch 更快。
+        - 把 microbatch 数和 global batch size 视为同一件事。
+        - 还没读懂 non-interleaved 1F1B 就先追 interleaved 分支。
+      checkpoint_questions:
+        - L15 解决的是数据并行、状态分片、专家路由，还是模型切层后的调度？
+        - patch timeline 和真实 Megatron schedule 差在哪些层？
+
+    - title: 1F1B 三段式：warmup、steady、cooldown
+      plain_explanation: |
+        对 stage `s`，warmup forward 数是 `D - s - 1`。前面的 stage 要先连续 forward，把 activation 送到后面的 stage。进入 steady 后，每个 stage 交替执行 forward 和 backward。所有 forward 排入 pipeline 后，cooldown 继续处理剩余 backward。
+
+        Patch 的输出是每个 stage 的局部 timeline。它不放真实时间戳，但会验证本地顺序：forward 和 backward 的 microbatch index 都递增，同一 microbatch 的 backward 晚于 forward。
+      mental_model: |
+        warmup 是把流水线装满，steady 是边进新工件边处理回流，cooldown 是把剩下的反向依赖清空。
+      why_it_matters: |
+        warmup 或 cooldown 少一个 op，短测试可能还能生成列表，但真实 pipeline 会出现 tensor 对不上、stage 等不到输入或梯度回不来的问题。
+      source_refs:
+        - title: Reference 状态初始化
+          repo_path: labs/l14_pipeline_1f1b/patch/reference/pp_schedule.py
+          lines: [13, 18]
+          note: |
+            L13-L16: 每个 stage 建立独立 timeline，并计算 warmup。
+            L17-L18: forward 和 backward 游标都从 0 开始。
+        - title: Reference warmup 与 steady
+          repo_path: labs/l14_pipeline_1f1b/patch/reference/pp_schedule.py
+          lines: [19, 27]
+          note: |
+            L19-L21: warmup 只追加 forward。
+            L22-L27: steady 每轮追加一个 forward 和一个 backward。
+        - title: Reference cooldown
+          repo_path: labs/l14_pipeline_1f1b/patch/reference/pp_schedule.py
+          lines: [28, 32]
+          note: |
+            L28-L30: cooldown 只追加 backward。
+            L31-L32: 当前 stage timeline 写入 schedule 后返回。
+      common_confusions:
+        - 把所有 stage 的 warmup 写成同一个数。
+        - steady 阶段连续发多个 forward，破坏 1F1B。
+        - backward index 用反向顺序生成，导致本地测试失败。
+      checkpoint_questions:
+        - 4 个 stage 时，stage 0 和 stage 3 的 warmup 分别是多少？
+        - 为什么 cooldown backward 数和 warmup 对称？
+
+    - title: Bubble 与 microbatch 数
+      plain_explanation: |
+        标准 non-interleaved 1F1B 的 bubble count 是 `2 * (D - 1)`。开头要填充 pipeline，结尾要排空 backward。microbatch 数增加时，固定 bubble 被更多有效工作摊薄，bubble ratio 通常下降。
+
+        这个结论有边界。比较时必须保持 stage 数、forward/backward 耗时模型和训练 batch 语义清楚；真实训练还要看 microbatch size、梯度累积、P2P wait 和 loss 稳定性。
+      mental_model: |
+        bubble 像流水线首尾的空工位。工件越多，首尾空工位占总时间的比例越小，但工件本身也会影响搬运和统计。
+      why_it_matters: |
+        只追求低 bubble ratio 可能把 microbatch 切得过细，增加通信频率和调度开销。配置选择要同时看吞吐、显存、通信和收敛。
+      source_refs:
+        - title: Reference bubble
+          repo_path: labs/l14_pipeline_1f1b/patch/reference/pp_schedule.py
+          lines: [35, 36]
+          note: |
+            L35-L36: 返回 `2 * (num_stages - 1)`。
+        - title: Smoke bubble ratio
+          repo_path: labs/l14_pipeline_1f1b/scripts/run_pp_smoke.py
+          lines: [78, 85]
+          note: |
+            L78-L82: 用最长 stage timeline 估算 makespan。
+            L83-L85: 用理想时间和最长时间计算 bubble ratio。
+        - title: Smoke acceptance
+          repo_path: labs/l14_pipeline_1f1b/scripts/run_pp_smoke.py
+          lines: [87, 97]
+          note: |
+            L87-L89: 读取 bubble、total ops 和 ratio 验收条件。
+            L90-L97: 任一条件不满足时 accept 为 false。
+      common_confusions:
+        - 把 bubble count 和 bubble ratio 当成同一个指标。
+        - 认为 microbatch 数越大训练配置一定越好。
+        - 只看 mock 时间模型，不看真实 P2P wait。
+      checkpoint_questions:
+        - 8 个 stage 的标准 bubble count 是多少？
+        - 增加 microbatch 数为什么通常降低 bubble ratio？
+
+    - title: Megatron non-interleaved schedule 主路径
+      plain_explanation: |
+        Megatron 的真实实现先选择 schedule 函数，再进入 non-interleaved 1F1B。函数内部会创建或接收 P2P communicator，计算 warmup 和 remaining，执行 warmup forward，进入 steady 的 forward/backward 交替，最后 cooldown 排空剩余 backward。
+
+        Patch 里的 `("F", i)` 和 `("B", i)` 在 Megatron 里对应的是 `forward_step`、`backward_step` 以及发送/接收 activation 或 gradient 的组合。真实代码还要处理 activation deallocate 和 gradient finalize。
+      mental_model: |
+        patch 是排程表，Megatron 是拿着排程表搬 tensor、做计算、释放激活和收尾梯度的执行器。
+      why_it_matters: |
+        真实 PP 问题常常表现为某个 stage 等不到 forward tensor、backward gradient 或 grad sync 时机不对。主路径清楚后才能继续追生产分支。
+      source_refs:
+        - title: Megatron warmup 数
+          repo_path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+          lines: [2166, 2169]
+          note: |
+            L2166-L2168: warmup 数由总 stage、当前 stage 和 microbatch 数共同限制。
+            L2169: remaining 数进入 steady 阶段。
+        - title: Megatron warmup forward
+          repo_path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+          lines: [2234, 2245]
+          note: |
+            L2234-L2236: 从上一个 stage 接收 forward tensor。
+            L2237-L2245: 调用 `forward_step` 计算当前 stage 输出。
+        - title: Megatron steady send/recv
+          repo_path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+          lines: [2301, 2308]
+          note: |
+            L2301-L2304: forward_only 分支只继续接收 forward。
+            L2306-L2308: 训练分支发送 forward，并接收 backward gradient。
+        - title: Megatron cooldown backward
+          repo_path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
+          lines: [2353, 2364]
+          note: |
+            L2353-L2358: 弹出 tensor 并接收 backward gradient。
+            L2360-L2364: 执行 backward，并把 input gradient 发给前一 stage。
+      common_confusions:
+        - 把 patch 的 timeline 当成真实跨 stage 时间戳。
+        - 忽略 activation deallocate，以为 1F1B 自动消除所有激活压力。
+        - 把 interleaved schedule 的 virtual stage 和真实 PP rank 混在一起。
+      checkpoint_questions:
+        - Megatron 在哪几行计算 warmup 和 remaining？
+        - steady 阶段为什么要同时处理 forward 输出和 backward 梯度？
+
+    - title: Lab 和复盘：最小合同与真实证据分开看
+      plain_explanation: |
+        L15 patch 验证的是本地 timeline 不变量。通过 patch 后，再跑 `run_pp_smoke.sh`，用 artifact 检查 bubble count、bubble ratio、total ops 和首尾 stage 的 schedule 样本。
+
+        如果进入真实 Megatron 训练，还要记录 PP size、virtual PP size、microbatch 数、global batch、stage 切层、P2P wait、activation peak 和 step time。CPU smoke 可以证明 schedule 生成器正确，不能证明真实多机通信已经高效。
+      mental_model: |
+        patch 是语法和依赖顺序考试，drill 是小型系统证据，真实训练日志才包含通信、显存和 stage imbalance。
+      why_it_matters: |
+        没有分清证据层级，很容易把单元测试通过误判成 PP 配置可上线。L15 要求把每次结论写进复盘模板，保留可追溯条件。
+      source_refs:
+        - title: Patch tests bubble 与输入校验
+          repo_path: labs/l14_pipeline_1f1b/patch/tests/test_patch.py
+          lines: [80, 90]
+          note: |
+            L80-L84: 验证 bubble count 对 1、4、8 stage 的结果。
+            L87-L90: microbatch 数小于 stage 数时必须抛 `ValueError`。
+        - title: Smoke metrics
+          repo_path: labs/l14_pipeline_1f1b/scripts/run_pp_smoke.py
+          lines: [99, 111]
+          note: |
+            L99-L111: 写入 `metrics.jsonl`，保留 stage、microbatch、bubble 和 accept。
+        - title: Smoke summary
+          repo_path: labs/l14_pipeline_1f1b/scripts/run_pp_smoke.py
+          lines: [113, 124]
+          note: |
+            L113-L121: 写入 `pp_summary.json` 的核心指标。
+            L122-L124: 保存首尾 stage 的 schedule 样本。
+      common_confusions:
+        - patch 通过后不跑 smoke。
+        - drill 只看 accept，不看 schedule 样本。
+        - 真实训练只看 throughput，不看 P2P wait 和 stage imbalance。
+      checkpoint_questions:
+        - L15 patch-test 能证明哪些不变量？
+        - "`pp_summary.json` 中哪两个字段最适合快速检查首尾 stage 形态？"

@@ -1,5 +1,5 @@
 """
-L04.5 Patch · Ring Attention Forward (Online Softmax)
+L10 Patch · Ring Attention Forward (Online Softmax)
 
 填空规则：
 - TODO(student) 必须自己写
@@ -38,7 +38,7 @@ def ring_attention_forward(
     # 切分 K, V 沿 seq 维。chunks 列表是 list[(k_chunk, v_chunk)]。
     # TODO(student): 用 torch.chunk(k, num_chunks, dim=2) / torch.chunk(v, num_chunks, dim=2)
     #   注意 torch.chunk 处理不整除时最后一块会更小，符合不变量 3。
-    raise NotImplementedError("L04.5 Patch: implement chunking")
+    raise NotImplementedError("L10 Patch: implement chunking")
 
     # 初始化 running 状态：
     #   running_out  : (B, H, Sq, D)
@@ -57,4 +57,4 @@ def ring_attention_forward(
     #   8. running_max = new_max
 
     # 最后 normalize：return running_out / running_denom
-    raise NotImplementedError("L04.5 Patch: implement online softmax loop")
+    raise NotImplementedError("L10 Patch: implement online softmax loop")

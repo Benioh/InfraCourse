@@ -1,5 +1,5 @@
 """
-MoE 端到端聚合（L05.5 教学入口）。
+MoE 端到端聚合（L14 教学入口）。
 
 教学目的：
     把 router → capacity → all-to-all 三段拼成可一键调用的 moe_summary，

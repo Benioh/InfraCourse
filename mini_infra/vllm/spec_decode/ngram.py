@@ -1,5 +1,5 @@
 """
-N-gram speculative decoding（无 draft model 版本）（L08.7 教学）。
+N-gram speculative decoding（无 draft model 版本）（L25 教学）。
 
 教学目的：
     最便宜的 spec：从 prompt 自身提 n-gram 当候选。命中率比 draft model

@@ -1,4 +1,4 @@
-"""L08.8 · 用 patch 的 harness 跑 GSM8K-style 评测。
+"""L26 · 用 patch 的 harness 跑 GSM8K-style 评测。
 
 stub 模式：不需要任何外部服务。
 openai 模式：通过任意 OpenAI-compatible endpoint 打分（vLLM / SGLang / OpenAI）。
@@ -36,14 +36,14 @@ MISSION_ID = "l25_serve_eval_lm_eval"
 
 
 def _impl():
+    import importlib
+    import os
+
+    requested = os.environ.get("IMPL", "starter")
     try:
-        from starter import eval_harness as mod  # type: ignore[import-not-found]
-
-        return mod, "starter"
+        return importlib.import_module(f"{requested}.eval_harness"), requested
     except (ImportError, NotImplementedError):
-        from reference import eval_harness as mod  # type: ignore[import-not-found]
-
-        return mod, "reference"
+        return importlib.import_module("reference.eval_harness"), "reference"
 
 
 def _toy_gsm8k(n: int) -> list[dict]:

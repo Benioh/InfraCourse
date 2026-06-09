@@ -1,17 +1,14 @@
 id: l05_distributed_primitives
-title: 手写 Tensor Parallel Linear
-level: L02
-act: 第 0 章：分布式系统基础
+title: L06 · 手写 Tensor Parallel Linear
+level: L06
+act: 第 1 章：分布式训练基础
 role: 分布式原语学徒
 priority: 核心
 estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch Distributed
   - Megatron Core (对照)
-
-# ★ 本关核心：Patch Track（学完做这一件事就过关）
 patch:
   description: |
     不用 Megatron，自己用 torch.distributed.all_reduce / all_gather +
@@ -23,34 +20,400 @@ patch:
   test_command: make patch-test M=l05_distributed_primitives
   status_file: labs/l05_distributed_primitives/patch/.last_run.json
   test_count: 5
-  test_kind: 结果对比（不规定实现方式，输出/梯度对就过）
+  test_kind: 结果对比（与单卡 nn.Linear 等价）
+lesson:
+  opening: |
+    这节课解决层内并行的第一个核心问题：一个 nn.Linear 的矩阵太大时，怎样把权重切到多个 rank 上，同时保持 forward 输出、输入梯度和权重梯度与单卡 nn.Linear 等价。TP 切的是层内张量和矩阵乘法；DP 切的是数据 shard 并同步梯度。两者解决的压力不同，通信位置也不同。
 
-# 配套学习资源（可选，强烈建议在写 patch 前/后参考）
-source_reading:
-  - title: Megatron ColumnParallelLinear 真实实现
-    repo_path: github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
-    focus: 写完 patch 之后对照真实工程级实现的边界（async TP / sequence parallel / ckpt 切片）
-  - title: MiniInfra 同构 TP 骨架
-    repo_path: mini_infra/megatron/core/tensor_parallel/layers.py
-    focus: 本课同构最小骨架，写完 patch 后可与之对比
+    本关只写两个最小线性层：ColumnParallelLinear 和 RowParallelLinear。Column 沿输出维度切 weight，每个 rank 得到一段输出；Row 沿输入维度切 weight，每个 rank 计算同一输出的一份 partial contribution，再 all-reduce 求和。forward 和 backward 的 collective 位置是这节课的核心。
+  sections:
+    - title: 问题和边界
+      plain_explanation: |
+        本讲的目标是用 2-rank CPU/gloo 测试证明 TP Linear 与单卡 Linear 等价。学生要实现三个 autograd primitive，再实现 Column 和 Row 两个 layer。
 
+        本关不调用 Megatron TP，也不使用 DDP 包装 layer。patch-test 证明语义正确，不证明 GPU/NCCL 性能，不覆盖 sequence parallel、async dgrad、checkpoint 转换、fused kernel 或混合精度通信。
+      mental_model: |
+        DP 是多个 rank 做完整层的不同样本；TP 是多个 rank 合作完成同一个层。
+      why_it_matters: |
+        大模型训练常把 DP、TP、PP、EP 组合使用。先写对 TP Linear，后面才能读懂 Megatron MLP、attention projection 和 projector 分片。
+      source_refs:
+        - title: Test harness header
+          repo_path: labs/l05_distributed_primitives/patch/tests/test_patch.py
+          lines: [1, 13]
+          note: |
+            L1-L18: 测试说明 CPU/gloo、world_size=2 和无 GPU 要求。
+      common_confusions:
+        - 把 TP 当成 DP；TP 切层内矩阵，DP 切数据并同步梯度。
+        - 把 CPU/gloo 通过写成 GPU/NCCL 性能结论；本关 patch-test 只验证语义。
+        - 绕过 patch 自己调用 Megatron；本关要求亲手写切分和通信路径。
+      checkpoint_questions:
+        - TP 和 DP 分别切什么？
+        - 本关 patch-test 证明什么，不能证明什么？
+        - 为什么禁止直接调用 Megatron TP Linear？
+    - title: Column Parallel
+      plain_explanation: |
+        PyTorch nn.Linear 的 weight shape 是 (out_features, in_features)。Column Parallel 沿输出维度切 weight，每个 rank 保存 (out/world_size, in) 的权重和对应 bias。输入在所有 rank 上完整，每个 rank 计算自己的输出片段。
+
+        如果 gather_output=True，forward 用 all-gather 拼回完整输出。Column forward 不对输出求和，因为各 rank 计算的是不同输出坐标。Column backward 要对输入梯度求和，因为完整输入被多个输出分片共同使用。
+      mental_model: |
+        Column 是每个 rank 写答案的一段。所有 rank 看同一个输入，但产出不同输出片段。
+      why_it_matters: |
+        Transformer MLP 的扩展层常用 Column 切分，并把分片中间表示交给 Row layer 消费。
+      source_refs:
+        - title: Column reference params
+          repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+          lines: [88, 100]
+          note: |
+            L88-L107: Column 计算 out_per_partition，创建本地 weight 和本地 bias。
+        - title: Column reference forward
+          repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+          lines: [108, 113]
+          note: |
+            L108-L113: Column 先 copy input，本地 linear，再按配置 gather output。
+        - title: Column forward test
+          repo_path: labs/l05_distributed_primitives/patch/tests/worker_cases.py
+          lines: [31, 43]
+          note: |
+            L31-L49: 测试把 canonical weight 的输出维切片复制给本地 layer，并比较输出。
+      common_confusions:
+        - Column 名字让人以为切输入列；在 PyTorch shape 下它切输出维。
+        - 认为 Column forward 需要 all-reduce；输出片段互不重叠，求和会破坏结果。
+        - 忘记 Column backward 要聚合各 rank 对输入的梯度贡献。
+      checkpoint_questions:
+        - Column 的本地 weight shape 是什么？
+        - gather_output=True 和 False 时输出 shape 分别是什么？
+        - 为什么 Column backward 要 all-reduce grad_x？
+    - title: Row Parallel
+      plain_explanation: |
+        Row Parallel 沿输入维度切 weight，每个 rank 保存 (out, in/world_size) 的权重。输入若未分片，就沿最后一维 chunk 后取本 rank 分片。每个 rank 计算完整输出维度的一份 partial output，再用 all-reduce sum 合成完整输出。
+
+        Row bias 是 replicated 完整向量，只能在 all-reduce 后加一次。如果把 bias 传进本地 F.linear，每个 rank 的 partial output 都会带 bias，reduce 后变成 bias * world_size。
+      mental_model: |
+        Row 是每个 rank 算同一答案的一部分来源。输出维完整，贡献需要求和。
+      why_it_matters: |
+        Column 和 Row 常成对出现，形成 Megatron MLP TP 的基本结构。
+      source_refs:
+        - title: Row reference params
+          repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+          lines: [134, 146]
+          note: |
+            L134-L158: Row 计算 in_per_partition，创建本地 weight，并 broadcast replicated bias。
+        - title: Row reference forward
+          repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+          lines: [160, 171]
+          note: |
+            L160-L171: Row 切输入，本地 linear 不带 bias，reduce 后加 bias。
+        - title: Row bias test
+          repo_path: labs/l05_distributed_primitives/patch/tests/worker_cases.py
+          lines: [235, 247]
+          note: |
+            L235-L270: 测试专门抓 bias 在 reduce 前重复加的问题。
+      common_confusions:
+        - 把 Row bias 切成分片；本关 Row bias 是完整 replicated 向量。
+        - 在 local F.linear 里提前加 bias，导致 all-reduce 后 bias 被重复加。
+        - 认为 Row backward 还要 reduce grad-output；本关 reduce primitive backward 是 identity。
+      checkpoint_questions:
+        - Row 的本地 weight shape 是什么？
+        - Row forward 为什么要 all-reduce partial output？
+        - Row bias 如果在 reduce 前加入，会出现什么数值错误？
+    - title: Autograd 通信 Primitive
+      plain_explanation: |
+        _CopyToParallelRegion 的 forward 是 identity，backward all-reduce grad；_ReduceFromParallelRegion 的 forward all-reduce，backward identity；_GatherAlongLastDim 的 forward all-gather + cat，backward split。它们把 forward 形状变换和 backward 梯度路径放在同一个 autograd Function 里。
+
+        只在 module forward 中调用 collective，很容易得到输出正确但梯度错误的实现。Megatron mappings.py 也使用同样的双向规则。
+      mental_model: |
+        primitive 是双向路标：forward 怎么复制、求和或拼接，backward 就按链式法则把梯度送回对应分片。
+      why_it_matters: |
+        真实框架会把这些通信封装成 helper。手写一次后，再读 Megatron copy/reduce/gather 才知道每个 helper 保护哪条梯度路径。
+      source_refs:
+        - title: Copy reference
+          repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+          lines: [20, 31]
+          note: |
+            L20-L31: copy primitive forward identity，backward all-reduce grad。
+        - title: Reduce reference
+          repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+          lines: [34, 45]
+          note: |
+            L34-L45: reduce primitive forward all-reduce，backward identity。
+        - title: Gather reference
+          repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+          lines: [48, 59]
+          note: |
+            L48-L67: gather primitive forward all-gather + cat，backward split。
+        - title: Megatron copy mapping
+          repo_path: github_repo/Megatron-LM/megatron/core/tensor_parallel/mappings.py
+          lines: [197, 209]
+          note: |
+            L197-L214: Megatron copy mapping 的 forward identity 和 backward reduce。
+      common_confusions:
+        - 认为 all-gather backward 也是 all-gather；它应把梯度切回本 rank。
+        - 看到 copy forward 什么都不做，就忽略它的 backward all-reduce。
+        - 把通信写在普通函数里，忘记定义 autograd 反向路径。
+      checkpoint_questions:
+        - _CopyToParallelRegion 的 forward 和 backward 分别做什么？
+        - _GatherAlongLastDim 的 backward 为什么是 split？
+        - 为什么只检查 forward 输出不足以验收 TP Linear？
+    - title: Tests、Toy 和 Smoke
+      plain_explanation: |
+        patch-test 用 multiprocessing 启动多个 worker，初始化 gloo process group，再运行 worker case。worker case 用 canonical 单卡 Linear 作为比较对象，把权重切片复制到 TP layer，然后比较输出和梯度。
+
+        toy_column_parallel_linear.py 只展示单进程 Column forward；collectives_demo.py 只展示 collective 字段；run_lab.py 只证明 artifact 链路。它们帮助理解，但不能替代 patch-test。
+      mental_model: |
+        toy 看数学，demo 看通信，smoke 看 artifact，patch-test 才验收完整 TP Linear。
+      why_it_matters: |
+        分布式代码常在单进程 toy 里看起来正确。2-rank 结果对比能抓住遗漏 collective、梯度路径错误和 bias 重复加。
+      source_refs:
+        - title: Worker init
+          repo_path: labs/l05_distributed_primitives/patch/tests/conftest.py
+          lines: [54, 65]
+          note: |
+            L54-L65: worker 设置 rendezvous 环境变量，初始化 gloo group，并调用 worker case。
+        - title: Test entries
+          repo_path: labs/l05_distributed_primitives/patch/tests/test_patch.py
+          lines: [23, 35]
+          note: |
+            L23-L60: pytest 入口覆盖 Column/Row forward、Column/Row grad 和 Row bias。
+        - title: Toy column
+          repo_path: labs/l05_distributed_primitives/scripts/toy_column_parallel_linear.py
+          lines: [14, 26]
+          note: |
+            L14-L27: 单进程 toy 将 weight 按输出维切分后 cat，并输出 max_error。
+        - title: Lab metrics
+          repo_path: labs/l05_distributed_primitives/scripts/run_lab.py
+          lines: [67, 79]
+          note: |
+            L67-L79: smoke 把 collective、DDP、TP toy 和 pipeline toy 指标写入 metrics。
+      common_confusions:
+        - 把 toy_column 的 max_error 当成完整 patch 通过；它没有覆盖 Row 和 backward。
+        - 以为本关必须 GPU；patch-test 默认用 CPU/gloo。
+        - 只看测试名，不读 worker_cases 里的 canonical weight 分片和断言。
+      checkpoint_questions:
+        - patch-test 的 5 个 case 分别覆盖什么？
+        - toy_column 和 collectives_demo 分别不能证明什么？
+        - 失败时为什么要看每个 rank 的最后状态？
+    - title: 性能、Checkpoint 和 Debug
+      plain_explanation: |
+        TP 降低单 rank 的 weight 分片和本地 matmul 工作量，同时增加 all-gather 或 all-reduce。是否更快取决于矩阵大小、batch/sequence、world size、互联带宽、通信计算重叠和下游是否能消费分片 tensor。CPU/gloo patch-test 不能外推到 GPU/NCCL throughput。
+
+        TP checkpoint 保存的是本地分片。改变 TP size 时，通常要先 gather 完整权重，再按新 TP size 重新切。Debug 时按初始化失败、collective hang、forward diff、backward diff、bias diff 分流。
+      mental_model: |
+        TP 把矩阵切小，但把交换结果的成本放进关键路径。checkpoint 也随切分维度改变形状。
+      why_it_matters: |
+        配置 TP 时不能只看显存。通信、checkpoint 形状和后续层是否接受分片输出都会影响工程可用性。
+      source_refs:
+        - title: MiniInfra Column
+          repo_path: mini_infra/megatron/core/tensor_parallel/layers.py
+          lines: [13, 25]
+          note: |
+            L13-L49: MiniInfra Column 记录输出维分片和 gather/local_output 通信类型。
+        - title: MiniInfra Row
+          repo_path: mini_infra/megatron/core/tensor_parallel/layers.py
+          lines: [52, 64]
+          note: |
+            L52-L88: MiniInfra Row 记录输入维分片和 reduce 通信类型。
+        - title: Megatron Row reduce
+          repo_path: github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
+          lines: [1336, 1348]
+          note: |
+            L1336-L1352: Megatron Row 在本地 linear 后 reduce，再处理 bias 或 output_bias。
+      common_confusions:
+        - 把 TP 写成多卡必然线性加速；通信和小矩阵会吞掉收益。
+        - 改变 TP size 后直接加载旧分片；本地 weight shape 已经不同。
+        - 把 CPU/gloo 语义测试当成 GPU/NCCL 性能测试。
+      checkpoint_questions:
+        - TP 的收益和代价分别落在哪些地方？
+        - 为什么 TP=2 checkpoint 不能直接当成 TP=4 使用？
+        - rank hang 时为什么要收集所有 rank 的最后日志？
 mini_infra_targets:
   - mini_infra/megatron/core/tensor_parallel/layers.py
-  - mini_infra/megatron/core/pipeline_parallel/schedules.py
-
 notebooks:
   - notebooks/n03_ddp_collectives.ipynb
   - notebooks/n04_tensor_parallel_linear.ipynb
-
-tickets:
-  - dist_wrong_world_size_001
-  - dist_rank_hang_002
-  - dist_device_mismatch_003
-
-prereq: l03_nccl_ddp_smoke
-next_lab: l06_torchtitan_training
-
-# 兼容旧字段（curriculum / dashboard 页面渐进迁移）
-gpu_modes:
-  local: 1×4090 / CPU gloo
-  cluster: 8×H200 (可选)
+lesson_docs:
+  - title: 系统地图
+    path: labs/l05_distributed_primitives/system_map.md
+    description: 本讲在分布式训练路线中的位置、Column/Row 系统图和易混点。
+  - title: 主讲义
+    path: labs/l05_distributed_primitives/lecture.md
+    description: 从 TP/DP 边界、Column/Row 机制、autograd primitive 讲到测试和 checkpoint。
+  - title: 源码带读讲义
+    path: labs/l05_distributed_primitives/source_walkthrough.md
+    description: 按 starter、reference、tests、MiniInfra 和 Megatron 对照组织阅读路径。
+source_reading:
+  - title: Starter TP Linear
+    repo_path: labs/l05_distributed_primitives/patch/starter/tp_linear.py
+    focus: 学生需要补齐的 primitive 和 layer。
+    highlights:
+      - title: Copy primitive TODO
+        lines: [30, 42]
+        note: |
+          L30-L42: copy primitive forward identity，backward 需要 all-reduce grad。
+      - title: Reduce primitive TODO
+        lines: [45, 57]
+        note: |
+          L45-L57: reduce primitive forward 需要 all-reduce，backward 是 identity。
+      - title: Gather forward TODO
+        lines: [60, 72]
+        note: |
+          L60-L73: gather primitive forward 需要 all-gather 并沿最后一维拼接。
+      - title: Gather backward TODO
+        lines: [75, 80]
+        note: |
+          L75-L80: gather primitive backward 要把 grad_output 切回本 rank。
+      - title: Column TODO
+        lines: [118, 130]
+        note: |
+          L118-L142: Column 检查 out_features 可切分，创建本地参数，并实现 forward。
+      - title: Row TODO
+        lines: [178, 190]
+        note: |
+          L178-L213: Row 检查 in_features 可切分，创建本地参数，并在 reduce 后加 bias。
+  - title: Reference TP Linear
+    repo_path: labs/l05_distributed_primitives/patch/reference/tp_linear.py
+    focus: 最小正确实现。
+    highlights:
+      - title: Copy reference
+        lines: [20, 31]
+        note: |
+          L20-L31: copy primitive backward 对 grad_output 做 all-reduce。
+      - title: Reduce reference
+        lines: [34, 45]
+        note: |
+          L34-L45: reduce primitive forward all-reduce，backward 直接返回 grad。
+      - title: Gather reference
+        lines: [48, 59]
+        note: |
+          L48-L67: gather primitive forward all-gather + cat，backward split。
+      - title: Column params
+        lines: [88, 100]
+        note: |
+          L88-L107: Column 创建输出维分片 weight 和本地 bias。
+      - title: Column forward
+        lines: [108, 113]
+        note: |
+          L108-L113: Column copy input，本地 linear，再可选 gather。
+      - title: Row params
+        lines: [134, 146]
+        note: |
+          L134-L158: Row 创建输入维分片 weight，并 broadcast replicated bias。
+      - title: Row forward
+        lines: [160, 171]
+        note: |
+          L160-L171: Row 切输入，本地 linear，不带 bias，reduce 后加 bias。
+  - title: Test harness
+    repo_path: labs/l05_distributed_primitives/patch/tests/conftest.py
+    focus: 2-rank gloo worker 如何启动。
+    highlights:
+      - title: Worker init
+        lines: [54, 65]
+        note: |
+          L54-L65: worker 设置环境变量、初始化 gloo group，并运行指定 worker case。
+      - title: Spawn workers
+        lines: [77, 89]
+        note: |
+          L77-L92: parallel_run 创建 spawn context、端口和 worker 进程。
+      - title: Failure handling
+        lines: [93, 102]
+        note: |
+          L93-L108: harness 处理 timeout、非零退出和 rank0 状态。
+  - title: Worker cases
+    repo_path: labs/l05_distributed_primitives/patch/tests/worker_cases.py
+    focus: 输出、梯度和 bias 的结果对比。
+    highlights:
+      - title: Column setup
+        lines: [20, 32]
+        note: |
+          L20-L39: Column case 构造 canonical Linear，并复制输出维权重切片。
+      - title: Column compare
+        lines: [41, 49]
+        note: |
+          L41-L49: Column case 广播输入，并比较 TP 输出和单卡输出。
+      - title: Row setup
+        lines: [52, 64]
+        note: |
+          L52-L69: Row case 构造 canonical Linear，并复制输入维权重切片和 replicated bias。
+      - title: Row compare
+        lines: [71, 79]
+        note: |
+          L71-L79: Row case 广播输入，并比较输出。
+      - title: Column grad
+        lines: [95, 107]
+        note: |
+          L95-L125: Column backward 比较 grad_x 和本地 grad_W 切片。
+      - title: Row grad
+        lines: [128, 140]
+        note: |
+          L128-L161: Row backward 比较输入梯度切片和本地 grad_W。
+      - title: Row bias
+        lines: [235, 247]
+        note: |
+          L235-L270: Row bias case 抓 reduce 前重复加 bias 的错误。
+  - title: MiniInfra TP layers
+    repo_path: mini_infra/megatron/core/tensor_parallel/layers.py
+    focus: Column/Row 的同构概念骨架。
+    highlights:
+      - title: Column shard
+        lines: [13, 25]
+        note: |
+          L13-L27: MiniInfra Column 保存 input/output size、TP size 和 gather_output。
+      - title: Column partition
+        lines: [28, 40]
+        note: |
+          L28-L49: Column 计算输出维分片范围，并返回通信类型。
+      - title: Row shard
+        lines: [52, 64]
+        note: |
+          L52-L66: MiniInfra Row 保存 input/output size、TP size 和 input_is_parallel。
+      - title: Row partition
+        lines: [67, 79]
+        note: |
+          L67-L88: Row 计算输入维分片范围，并返回 reduce 通信类型。
+  - title: Megatron mappings
+    repo_path: github_repo/Megatron-LM/megatron/core/tensor_parallel/mappings.py
+    focus: 真实框架中的 autograd 通信 Function。
+    highlights:
+      - title: Copy mapping
+        lines: [197, 209]
+        note: |
+          L197-L214: copy mapping 的 forward 返回输入，backward 调用 reduce。
+      - title: Reduce mapping
+        lines: [217, 229]
+        note: |
+          L217-L233: reduce mapping 的 forward 调用 reduce，backward 返回 grad。
+      - title: Gather mapping
+        lines: [256, 268]
+        note: |
+          L256-L273: gather mapping 的 forward gather，backward split。
+  - title: Megatron TP layers
+    repo_path: github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
+    focus: 真实 Column/Row forward 主路径。
+    highlights:
+      - title: Column input copy
+        lines: [1020, 1031]
+        note: |
+          L1020-L1031: Column 决定是否 copy 到 tensor model parallel region。
+      - title: Column gather
+        lines: [1069, 1081]
+        note: |
+          L1069-L1090: Column 根据 gather_output 配置 gather 或保留分片输出。
+      - title: Row partition
+        lines: [1200, 1209]
+        note: |
+          L1200-L1209: Row 按输入维度计算每个 partition 的大小。
+      - title: Row reduce
+        lines: [1336, 1348]
+        note: |
+          L1336-L1352: Row 对 partial output 做 reduce，再处理 bias。
+  - title: Toy and smoke scripts
+    repo_path: labs/l05_distributed_primitives/scripts/run_lab.py
+    focus: 课程 smoke 的 artifact 路径。
+    highlights:
+      - title: Script artifacts
+        lines: [52, 64]
+        note: |
+          L52-L65: run_lab 依次运行 collective、DDP、TP toy 和 pipeline toy。
+      - title: Metrics
+        lines: [67, 79]
+        note: |
+          L67-L79: smoke 把 all_reduce_ms、loss、tp_max_error 和 bubble 写入 metrics。

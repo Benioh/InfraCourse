@@ -1,5 +1,5 @@
 """
-L02 Patch tests · run with `make patch-test M=l05_distributed_primitives`.
+L06 Patch tests · run with `make patch-test M=l05_distributed_primitives`.
 
 Pure-CPU, gloo-backed, world_size=2 by default. No GPU required.
 Each test spawns 2 processes, joins them, and fails the test if any rank fails.
@@ -14,7 +14,7 @@ import pytest
 from .conftest import parallel_run
 
 
-WORLD_SIZE = int(os.environ.get("L02_WORLD_SIZE", "2"))
+WORLD_SIZE = int(os.environ.get("L06_WORLD_SIZE", "2"))
 
 
 # ---- Numerical equivalence ----

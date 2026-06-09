@@ -1,4 +1,4 @@
-"""L09.8 · SFT smoke：tokenize 一段 Alpaca-shaped 数据并跑 HF Trainer。
+"""L29 · SFT smoke：tokenize 一段 Alpaca-shaped 数据并跑 HF Trainer。
 
 CPU mode 只验证 tokenize；GPU mode 跑 HuggingFace Trainer 100 步。
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,15 @@ MISSION_ID = "l28_sft_qwen_alpaca"
 
 
 def _impl():
+    requested = os.environ.get("IMPL")
+    if requested == "reference":
+        from reference import sft_pipeline as mod  # type: ignore[import-not-found]
+
+        return mod, "reference"
+    if requested == "starter":
+        from starter import sft_pipeline as mod  # type: ignore[import-not-found]
+
+        return mod, "starter"
     try:
         from starter import sft_pipeline as mod  # type: ignore[import-not-found]
 

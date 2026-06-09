@@ -1,81 +1,120 @@
 mission: l28_sft_qwen_alpaca
-title: L09.8 Quiz · SFT loss mask 与 chat template
-pass_threshold: 0.8
+title: L29 Quiz · SFT Loss Mask
+pass_threshold: 1.0
 description: |
-  这 5 题确认你能解释 SFT 为什么必须屏蔽 prompt token 的 loss，以及 chat
-  template 的细节。
+  检查学习者是否理解 SFT 数据合同、assistant-only loss、EOS、pad、attention mask 和 CPU smoke 边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 SFT 在 RLHF 主线中的位置
+    kind: doc
+    path: labs/l28_sft_qwen_alpaca/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：理解 tokenization、labels 和 loss
+    kind: doc
+    path: labs/l28_sft_qwen_alpaca/lecture.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 跟源码带读：按 patch、测试、smoke 和 tokenizer 阅读
+    kind: doc
+    path: labs/l28_sft_qwen_alpaca/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 25
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l28_sft_qwen_alpaca/patch/task.md
-  - title: 读 HuggingFace Trainer 文档
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 patch reference
     kind: source
-    path: github_repo/transformers/src/transformers/trainer.py
+    path: labs/l28_sft_qwen_alpaca/patch/reference/sft_pipeline.py
+    estimate_min: 8
+  - title: 对照 SFT smoke
+    kind: source
+    path: labs/l28_sft_qwen_alpaca/scripts/run_sft.py
+    estimate_min: 10
 
 questions:
-  - id: q1_loss_mask
-    prompt: SFT 训练为什么不能在 prompt token 上算 loss？
+  - id: q1_prompt_mask
+    prompt: SFT 样本中，system/user token 的 labels 应该是什么？
     options:
       - id: a
-        text: 因为 prompt 不是模型应该"产生"的内容，只把 assistant 回答作为目标更稳定
+        text: 全部写成 -100，让 prompt 只作为条件输入
         correct: true
       - id: b
-        text: 反过来才对
+        text: 写成同位置 input id
       - id: c
-        text: 不影响结果
+        text: 写成 pad token id
       - id: d
-        text: prompt token 必须 fp32
-    explanation: "若 prompt 也算 loss，模型会试图复述 prompt，对话能力下降。"
-  - id: q2_ignore_index
-    prompt: PyTorch `F.cross_entropy(ignore_index=-100)` 的语义？
+        text: 删除这些 token
+    explanation: "prompt token 仍输入模型，但不作为训练目标。"
+
+  - id: q2_assistant_labels
+    prompt: assistant token 的 labels 应该怎样写？
     options:
       - id: a
-        text: labels==-100 的位置不计入 loss，也不进入分母
+        text: 等于同位置 input_ids，末尾 EOS 也保留为训练目标
         correct: true
       - id: b
-        text: 把对应位置 logits 置零
+        text: 全部写 -100
       - id: c
-        text: 抛 RuntimeError
+        text: 只保留第一个 token
       - id: d
-        text: 当作 padding token
-    explanation: "ignore_index 既不计 loss 也不计样本数。"
-  - id: q3_chat_template
-    prompt: Qwen2.5 / Llama-3 等 chat template 的核心目的是？
+        text: 全部替换成 user token
+    explanation: "SFT 要学习 assistant 回答本身，EOS 训练模型停止。"
+
+  - id: q3_attention_mask
+    prompt: attention_mask 和 labels mask 的职责差异是什么？
     options:
       - id: a
-        text: 让 tokenizer 在 system / user / assistant 之间插入特殊分隔符，便于 SFT 与推理一致
+        text: attention_mask 控制 pad 是否参与模型计算；labels 的 -100 控制哪些位置进入 loss
         correct: true
       - id: b
-        text: 让 model 自动输出 markdown
+        text: 二者都只控制 optimizer lr
       - id: c
-        text: 强制使用 fp16
+        text: attention_mask 决定答案文本，labels 决定 tokenizer
       - id: d
-        text: 固定 max_length
-    explanation: "chat template = 消息 → 一段拼好的 prompt 字符串 + 特殊分隔符。"
-  - id: q4_eos
-    prompt: SFT 数据里 assistant 回答末尾要不要加 EOS？
+        text: 二者没有任何影响
+    explanation: "pad 可见性和 loss 目标是两个不同合同，不能混用。"
+
+  - id: q4_ignore_index
+    prompt: "`F.cross_entropy(ignore_index=-100, reduction=\"mean\")` 对 `-100` 位置的处理是什么？"
     options:
       - id: a
-        text: 必须加，否则推理时模型不知道何时停止
+        text: 不计入 loss，也不进入平均分母
         correct: true
       - id: b
-        text: 一定不能加
+        text: 当作类别 100
       - id: c
-        text: 加了会报错
+        text: 把 logits 全部置零
       - id: d
-        text: 与 model 无关
-    explanation: "EOS 是 assistant 段的最后一个学习目标，对应推理 stop。"
-  - id: q5_lr
-    prompt: SFT 推荐 lr 量级（相对 pretrain）？
+        text: 只影响 backward，不影响 forward loss
+    explanation: "ignore_index 会把对应 target 位置从 CE 平均中排除。"
+
+  - id: q5_pad_eos
+    prompt: pad_token_id 和 eos_token_id 相同的时候，L29 最需要检查什么？
     options:
       - id: a
-        text: 比 pretrain lr 小一到两个数量级（如 1e-5 ~ 5e-5）
+        text: pad 位置 attention_mask 为 0，labels 为 -100；assistant EOS 位置仍进入 loss
         correct: true
       - id: b
-        text: 比 pretrain 大 10×
+        text: 所有 EOS 都删除
       - id: c
-        text: 与 pretrain 完全一致
+        text: 所有 pad 都进入 loss
       - id: d
-        text: 必须固定为 0.1
-    explanation: "SFT 不要破坏 pretrain 知识；lr 通常 1e-5 ~ 5e-5。"
+        text: max_length 必须等于 1
+    explanation: "id 相同不代表语义相同，位置和 mask 决定训练含义。"
+
+  - id: q6_smoke_boundary
+    prompt: CPU tokenize-only smoke 能证明什么？
+    options:
+      - id: a
+        text: patch 函数能生成 assistant token、metrics 和 artifacts，但不能证明真实大模型训练质量
+        correct: true
+      - id: b
+        text: 证明任意 7B 模型已经收敛
+      - id: c
+        text: 证明 tokenizer 下载一定成功
+      - id: d
+        text: 证明后续 RL 不需要 reward
+    explanation: "CPU smoke 验证数据合同和证据写出，真实训练还需要模型、数据、硬件和长训指标。"

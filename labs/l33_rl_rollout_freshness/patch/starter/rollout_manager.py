@@ -1,4 +1,4 @@
-"""L11.5 Patch · SLiME-shaped versioned rollout manager."""
+"""L38 Patch · SLiME-shaped versioned rollout manager."""
 
 from __future__ import annotations
 
@@ -53,13 +53,13 @@ class RolloutManager:
         # TODO(student): choose the next server whose actor_version - weight_version
         # is <= max_staleness, using round-robin order.
         # Raise RuntimeError if no server is fresh enough.
-        raise NotImplementedError("L11.5: implement RolloutManager.generate")
+        raise NotImplementedError("L38: implement RolloutManager.generate")
 
     def update_weights(self, version: int, server_ids: list[str] | None = None) -> list[str]:
         # TODO(student): update all servers, or only server_ids when provided.
         # Return the updated server ids.
-        raise NotImplementedError("L11.5: implement RolloutManager.update_weights")
+        raise NotImplementedError("L38: implement RolloutManager.update_weights")
 
     def freshness(self, actor_version: int) -> dict[str, int]:
         # TODO(student): return {server_id: actor_version - weight_version}.
-        raise NotImplementedError("L11.5: implement RolloutManager.freshness")
+        raise NotImplementedError("L38: implement RolloutManager.freshness")

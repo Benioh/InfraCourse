@@ -1,4 +1,4 @@
-"""L05.8 Patch tests · CPU only."""
+"""L16 Patch tests · CPU only."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    return importlib.import_module(f"{os.environ.get('IMPL', 'starter')}.checkpointing")
+    return importlib.import_module(f"{os.environ.get('IMPL') or 'starter'}.checkpointing")
 
 
 def _states():

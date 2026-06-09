@@ -1,5 +1,5 @@
 """
-Speculative decoding draft + verify 骨架（L08.7 教学）。
+Speculative decoding draft + verify 骨架（L25 教学）。
 
 教学目的：
     把投机解码一次 step 的"draft 提议 K → target 一次 forward 验证 →

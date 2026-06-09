@@ -1,4 +1,4 @@
-"""L05.3 Patch tests · CPU first, GPU optional."""
+"""L13 Patch tests · CPU first, GPU optional."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    return importlib.import_module(f"{os.environ.get('IMPL', 'starter')}.fsdp2_wrap")
+    return importlib.import_module(f"{os.environ.get('IMPL') or 'starter'}.fsdp2_wrap")
 
 
 class _TinyBlock(nn.Module):

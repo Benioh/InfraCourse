@@ -117,7 +117,7 @@ def main() -> None:
 把估算表替换为真实 Megatron logs，并保留同样的 metrics 字段。
 
 ## 11. 下一步
-在 L04 可运行命令上逐步 sweep micro batch、TP 和 recompute。
+在 L12 的扩展评审模板上逐步 sweep micro batch、TP 和 recompute。
 """,
     )
     print(run_dir)

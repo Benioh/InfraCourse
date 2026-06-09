@@ -1,22 +1,28 @@
-# L28.5 · Multi-turn Chat Template & Loss Mask
+# L30 · Multi-turn Chat Template 与 Loss Mask
 
-> 多轮 RL / SFT 训练里，一个看似 trivial 的需求会把你折磨到怀疑人生：**给定 messages 列表，
-> 返回 (token_ids, loss_mask, attention_mask)，且 assistant 内容被正确识别为 loss target**。
->
-> 难点是 chat template 的"条件渲染"：
-> - 当 messages 里没有 system 时，模板可能自动插入默认 system；
-> - 推理类模型（QwQ-32B / Qwen3）在 assistant 不是最后一条时**会把 `<think>...</think>` 删掉**；
-> - 单独 tokenize 每条 message 再拼接，会因为 token 边界融合而和整体 tokenize 结果不一致。
->
-> 本关教你 verl PR #1668（Yanbin Jiang）总结出的可靠解法：**Fixed Base Conversation + Delta**。
+本讲解决多轮 SFT/RL 数据处理中的 mask 对齐问题：给定一串 `messages`，使用模型自己的 chat template 得到 token 序列，并只让 assistant 内容进入 loss。
 
-## 真实事故
+## 学习路线
 
-参考 [从 tokenizer 视角来分析 Agentic 多轮训练的复杂性](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/fast_tokenization/multiturn_tokenization_and_masking_ZH.md)。
-verl 团队为这个看似简单的接口重构了两周，跑通了三种朴素方案后才落地"固定 base"。
-单独 tokenize 子串 / 用 messages 滑窗做 delta 都各自掉进了不同的坑。
+1. 读 [system_map.md](system_map.md)：确认 L30 接在 L29 SFT loss mask 之后，扩展到多轮模板条件渲染。
+2. 读 [lecture.md](lecture.md)：理解 Fixed Base Conversation + Delta。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 starter、reference、mock tokenizer 和 tests 阅读。
+4. 做 [quiz.yaml](quiz.yaml)：检查默认 system、think drop、tool role 和 mask 不变量。
+5. 做 patch：实现 `tokenize_with_loss_mask`。
+6. 跑 patch-test：用 CPU mock tokenizer 验证 8 个边界。
+7. 填 [outputs/multiturn_mask_template.md](outputs/multiturn_mask_template.md)：记录真实 tokenizer 复盘。
 
-## 闭环
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 前置 | L29 已讲单轮 SFT 的 prompt/assistant loss mask |
+| 新增复杂度 | 多轮 messages 会触发模板条件渲染和 BPE 边界变化 |
+| 核心算法 | Fixed Base Conversation + Delta |
+| 最小输出 | `token_ids`、`loss_mask`、`attention_mask` 三个等长列表 |
+| 关键边界 | default system injection、QwQ think drop、tool 消息 mask |
+
+## Patch 闭环
 
 ```bash
 cat labs/l28.5_multiturn_chat_mask/patch/task.md
@@ -24,31 +30,20 @@ $EDITOR labs/l28.5_multiturn_chat_mask/patch/starter/multiturn_tokenizer.py
 make patch-test M=l28.5_multiturn_chat_mask
 ```
 
-## 测试覆盖
+参考实现：
 
-| 测试 | 验证 |
+```bash
+IMPL=reference make patch-test M=l28.5_multiturn_chat_mask
+```
+
+## 课后产物
+
+| 产物 | 用途 |
 |---|---|
-| `test_returns_three_lists_of_equal_length` | 三个返回值长度一致，attention 全 1 |
-| `test_user_tokens_masked_to_neg_100` | user/system/tool 位置 loss = -100 |
-| `test_assistant_tokens_are_loss_targets` | assistant 内容 token 在 loss 位置可解码 |
-| `test_multi_turn_alignment` | [s,u,a,u,a]：两个 a 都正确进入 loss |
-| `test_handles_default_system_injection` | 当 tokenizer 默认补 system 时仍正确 |
-| `test_handles_qwq_think_drop` | QwQ 模式（非末尾 assistant 砍 think）下仍保留 think 进 loss |
-| `test_tool_message_treated_as_non_assistant` | tool 消息全 -100 |
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 排查多轮 loss mask、默认 system、think drop 和 tool 消息 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 快速回忆源码主路径 |
+| [outputs/multiturn_mask_template.md](outputs/multiturn_mask_template.md) | 记录真实 tokenizer 端到端验证 |
 
-## 卡住怎么办
+## 验收边界
 
-1. 跑 `notebooks/n23_chat_template_multiturn.ipynb` 把"chat template 在不同位置渲染不一致"的现象先眼见为实。
-2. `make patch-hint` 看 TODO；`make patch-show-solution` 看参考解。
-
-## 写完之后你能做什么
-
-- 解释 verl `BASE_CHATML_FORMAT` / `multiturn_tokenization_and_masking` 的全部分支。
-- 在多轮 Agentic SFT/RL 数据 pipeline 里给 tool / function-call 消息打正确 mask。
-- 看懂 `apply_chat_template(..., return_assistant_tokens_mask=True)` 为什么对 QwQ/Qwen3 不可用。
-- 和 RL 训练 / Rollout / 部署三阶段保持 tokenization 一致性。
-
-## 配套源码研读（可选）
-
-- `github_repo/verl/verl/workers/rollout/schemas.py` — verl 真实多轮 mask 实现
-- `github_repo/Awesome-ML-SYS-Tutorial/rlhf/verl/multi-turn/fast_tokenization/` — 整篇必读
+本讲 patch 使用 `_mock_tokenizer.py` 模拟两类真实模板行为：缺 system 时注入默认 system，非末尾 assistant 删除 `<think>...</think>`。Patch-test 证明算法对这些条件渲染保持稳定；真实 Qwen/QwQ/Qwen3 tokenizer 还要单独记录模型路径、tokenizer 版本、template 文件和 decoded loss 片段。

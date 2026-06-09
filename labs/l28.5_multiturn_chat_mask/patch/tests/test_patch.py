@@ -1,4 +1,4 @@
-"""L28.5 Patch tests · CPU OK."""
+"""L30 Patch tests · CPU OK."""
 
 from __future__ import annotations
 

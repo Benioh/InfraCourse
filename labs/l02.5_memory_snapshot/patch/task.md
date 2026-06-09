@@ -1,6 +1,8 @@
-# L02.5 Patch · Memory Snapshot · 按 Stack 定位泄露
+# L03 Patch · Memory Snapshot · 按 Stack 定位泄露
 
 ## 你要交付什么
+
+在 `patch/starter/memory_snapshot.py` 中实现一个 CPU 友好的 memory snapshot mock：
 
 ```python
 @dataclass
@@ -10,6 +12,8 @@ class AllocEvent:
     stack: tuple[str, ...]
     timestamp: float
 
+def get_caller_stack(depth: int = 4) -> tuple[str, ...]: ...
+
 class MemoryTracker:
     def start(self) -> None: ...
     def stop(self) -> None: ...
@@ -17,38 +21,42 @@ class MemoryTracker:
     def free(self, addr: int) -> None: ...
     def dump_snapshot(self) -> dict: ...
 
-def get_caller_stack(depth: int = 4) -> tuple[str, ...]: ...
-def find_top_leaks_by_stack(snapshot: dict, k: int = 3) -> list[tuple[tuple, int]]: ...
+def find_top_leaks_by_stack(snapshot: dict, k: int = 3) -> list[tuple[tuple[str, ...], int]]: ...
 ```
 
-**禁止** 用 `torch.cuda.memory._record_memory_history`（本关 CPU 模拟）。
-**允许** `inspect.stack()` / `dataclasses` / `time.monotonic()`。
+**禁止** 调用 `torch.cuda.memory._record_memory_history` 或真实 CUDA snapshot API。
+**允许** 使用 `inspect.stack()`、`dataclasses`、`time.monotonic()` 和标准容器。
 
-补丁规模目标：60–110 行 Python。
+补丁规模目标：60 到 110 行 Python。
 
 ## 接口契约
 
 ```python
-tr = MemoryTracker()
-tr.start()
-addr1 = tr.alloc(size=1024, stack=get_caller_stack())
-addr2 = tr.alloc(size=8192, stack=get_caller_stack())
-tr.free(addr1)
-snap = tr.dump_snapshot()
+tracker = MemoryTracker()
+tracker.start()
+stack = get_caller_stack()
+addr1 = tracker.alloc(size=1024, stack=stack)
+addr2 = tracker.alloc(size=8192, stack=stack)
+tracker.free(addr1)
+snapshot = tracker.dump_snapshot()
 
-assert snap["total_leaked_bytes"] == 8192
-assert len(snap["live_allocations"]) == 1
-top = find_top_leaks_by_stack(snap, k=3)  # [(stack_tuple, total_size), ...]
+assert snapshot["total_leaked_bytes"] == 8192
+assert len(snapshot["live_allocations"]) == 1
+assert find_top_leaks_by_stack(snapshot, k=3)[0][1] == 8192
 ```
 
 ## 不变量
 
-1. `start` / `stop` 控制是否记录；`stop` 后 `alloc` 返回 `-1` 且不修改内部状态。
-2. `alloc` 单调返回新 addr（每次至少加 size + 64 padding，避免地址相同）。
-3. `free` 在 addr 不存在时安静返回（双 free 安全），并把对应 AllocEvent 从 `_live` 移除、加入 `_events`。
-4. `dump_snapshot` 返回的 dict 必须有三个 key：`events`、`live_allocations`、`total_leaked_bytes`。
-5. `find_top_leaks_by_stack` 按 stack tuple 聚合 size，按 size 降序返回前 k 个 `(stack, total_bytes)`。
-6. `get_caller_stack(depth)` 返回 `tuple` of 字符串 `"file:line:func"`，长度等于 depth（或 stack 不够时取 max available）。
+1. `start()` 把 tracker 切到 enabled；`stop()` 把 tracker 切到 disabled。
+2. disabled 状态下 `alloc()` 返回 `-1`，并且不能修改 `_events`、`_live` 或 `_next_addr`。
+3. enabled 状态下 `alloc()` 返回单调递增的新 addr，每次至少推进 `size + 64`。
+4. `alloc()` 必须把 `AllocEvent` 同时写入 `_events` 和 `_live`。
+5. `free(addr)` 在 disabled、负地址、未知地址或 double free 时安静返回。
+6. 已知地址被 free 时，必须从 `_live` 移除，并向 `_events` 追加 `("free", ev)`。
+7. `dump_snapshot()` 返回三个 key：`events`、`live_allocations`、`total_leaked_bytes`。
+8. `total_leaked_bytes` 只统计当前 live allocations。
+9. `find_top_leaks_by_stack()` 按完整 stack tuple 聚合 size，并按累计 bytes 降序返回前 k 个。
+10. `get_caller_stack(depth)` 返回 tuple of string，元素格式为 `file:line:function`。
 
 ## 怎么验证
 
@@ -56,25 +64,29 @@ top = find_top_leaks_by_stack(snap, k=3)  # [(stack_tuple, total_size), ...]
 make patch-test M=l02.5_memory_snapshot
 ```
 
-7 个测试：
+8 个测试，全是 CPU 友好：
 
 | 测试 | 验证 |
 |---|---|
-| `test_disabled_tracker_returns_invalid_addr` | 未 start 时 alloc=-1 |
-| `test_basic_alloc_free_balance` | alloc+free → 0 leak |
-| `test_alloc_without_free_leaks` | 只 alloc 进 live_allocations |
-| `test_double_free_is_safe` | 双 free 不抛错 |
-| `test_dump_snapshot_shape` | 三键齐全 |
-| `test_find_top_leaks_groups_by_stack` | 同 stack 聚合，size 降序 |
-| `test_find_top_leaks_respects_k` | top k=2 只返 2 项 |
+| `test_disabled_tracker_returns_invalid_addr` | 未 start 时 `alloc()` 返回 `-1`，snapshot 为 0 leak |
+| `test_basic_alloc_free_balance` | alloc 后 free 不留下 live allocation |
+| `test_alloc_without_free_leaks` | 未释放 allocation 进入 live set |
+| `test_double_free_is_safe` | 重复 free 和未知 addr 不抛错 |
+| `test_dump_snapshot_shape` | snapshot 三键齐全，bytes 和 alloc event 正确 |
+| `test_find_top_leaks_groups_by_stack` | 同 stack 聚合，按 size 降序 |
+| `test_find_top_leaks_respects_k` | top-k 截断生效 |
+| `test_get_caller_stack_returns_tuple_of_strings` | caller stack 是字符串 tuple，第一帧指向调用者 |
 
-## 卡住怎么办
+## 实现提示
 
-1. 跑 `notebooks/n21_memory_snapshot_walk.ipynb` 看 torch 原生 snapshot JSON 结构。
-2. `make patch-hint` 看 TODO；`make patch-show-solution` 看参考解。
+- `inspect.stack()[1 : 1 + depth]` 可以跳过 `get_caller_stack` 自身。
+- `time.monotonic()` 适合记录相对时间戳。
+- `_events` 保存 `("alloc", ev)` 和 `("free", ev)`。
+- `_live` 用 addr 做 key，value 是对应 `AllocEvent`。
+- 聚合函数只读 snapshot，不应修改 tracker 状态。
 
 ## 写完之后你能做什么
 
-- 在 RL/LLM 训练 OOM 现场快速给出"top-3 泄露源代码位置"。
-- 解释为什么仅看 `nvidia-smi` 经常误判（CUDA caching allocator）。
-- 看懂 SGLang torch-memory-saver / Megatron CuMemAllocator 的 release/restore 流。
+- 解释 Memory Snapshot 为什么能把 OOM 从总量问题变成归因问题。
+- 在真实训练或 rollout 中把 top stack、bytes、rank 和 step 区间写进 incident report。
+- 看懂 PyTorch snapshot、hook 泄露、cache 未释放和 closure 捕获 tensor 的共同调试模式。

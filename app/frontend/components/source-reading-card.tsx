@@ -114,7 +114,7 @@ async function HighlightBlock({
   }
 
   return (
-    <div className="grid gap-3 rounded-2xl border border-quest-border/60 bg-white/70 p-4 lg:grid-cols-[minmax(0,1.6fr),minmax(0,1fr)]">
+    <div className="grid gap-2 rounded-xl border border-quest-border/60 bg-white/80 p-3 lg:grid-cols-[minmax(0,1.65fr),minmax(0,0.95fr)]">
       <div className="min-w-0">
         <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-quest-muted">
           {title ? <span className="font-medium text-quest-ink">{title}</span> : null}
@@ -126,13 +126,13 @@ async function HighlightBlock({
           </Link>
         </div>
         <div
-          className="source-viewer overflow-auto rounded-xl border border-quest-border/70 bg-[#fdfaf3] text-[12px] leading-6"
+          className="source-viewer overflow-auto rounded-lg border border-quest-border/70 bg-[#fdfaf3] text-[11px] leading-5"
           data-source-path={path}
           dangerouslySetInnerHTML={{ __html: snippetHtml }}
         />
       </div>
-      <div className="text-sm leading-7 text-quest-ink lg:pl-3 lg:border-l lg:border-quest-border/60">
-        <Markdown source={note} />
+      <div className="text-xs leading-5 text-quest-ink lg:pl-3 lg:border-l lg:border-quest-border/60">
+        <Markdown compact source={note} />
       </div>
     </div>
   );
@@ -144,7 +144,7 @@ export async function SourceReadingCard({ item }: { item: SourceReadingItem }) {
   const highlights = item.highlights ?? [];
 
   return (
-    <article className="rounded-3xl border border-quest-border/70 bg-white/80 p-5">
+    <article className="rounded-2xl border border-quest-border/70 bg-white/85 p-4">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h4 className="text-base font-semibold text-quest-ink">{item.title}</h4>
@@ -167,27 +167,26 @@ export async function SourceReadingCard({ item }: { item: SourceReadingItem }) {
       </header>
 
       {item.focus ? (
-        <p className="mt-3 rounded-2xl bg-quest-card-soft px-3 py-2 text-sm text-quest-muted">
+        <p className="mt-2 rounded-xl bg-quest-card-soft px-3 py-2 text-sm text-quest-muted">
           🎯 {item.focus}
         </p>
       ) : null}
 
       {item.walkthrough ? (
-        <div className="mt-4 rounded-2xl border border-quest-border/60 bg-quest-card-soft/60 p-4">
+        <div className="mt-3 rounded-xl border border-quest-border/60 bg-quest-card-soft/60 p-3">
           <p className="mb-2 text-[11px] uppercase tracking-eyebrow text-quest-muted">
             📖 详细讲解
           </p>
-          <Markdown source={item.walkthrough} />
+          <Markdown compact source={item.walkthrough} />
         </div>
       ) : null}
 
       {highlights.length > 0 ? (
-        <div className="mt-4 space-y-3">
+        <div className="mt-3 space-y-2">
           {highlights.map((h, i) => {
             const range = normaliseRange(h.lines);
             if (!range || !isRepoFile) return null;
             return (
-              /* @ts-expect-error async server component in a list */
               <HighlightBlock
                 key={`${item.repo_path}-${i}`}
                 path={item.repo_path}

@@ -1,4 +1,4 @@
-"""L05.7 Patch tests · CPU only."""
+"""L15 Patch tests · CPU only."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    return importlib.import_module(f"{os.environ.get('IMPL', 'starter')}.pp_schedule")
+    return importlib.import_module(f"{os.environ.get('IMPL') or 'starter'}.pp_schedule")
 
 
 def test_warmup_lengths():

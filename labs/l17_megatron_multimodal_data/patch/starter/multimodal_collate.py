@@ -1,5 +1,5 @@
 """
-L06 Patch · 多模态 collator (image + audio + text)
+L18 Patch · Multimodal collator (image + audio + text)
 
 填空规则：
 - TODO(student) 必须自己写
@@ -99,4 +99,4 @@ def multimodal_collate(
     #     "audio_mask": audio_mask,
     #     "audio_batch_indices": audio_batch_indices,
     # }
-    raise NotImplementedError("L06 Patch: implement multimodal_collate")
+    raise NotImplementedError("L18 Patch: implement multimodal_collate")

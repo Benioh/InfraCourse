@@ -9,8 +9,13 @@ export default async function CurriculumPage() {
 
   return (
     <div className="space-y-6">
-      <Panel title={curriculum.title} eyebrow="Self Study / 单人自学路线">
+      <Panel title={curriculum.title} eyebrow="Self Study / 先上课，再做题">
         <p className="max-w-4xl text-sm leading-6 text-quest-muted">{curriculum.principle}</p>
+        <div className="mt-4 grid gap-3 text-sm text-quest-ink lg:grid-cols-3">
+          <div className="rounded-2xl border border-quest-border/70 bg-white/70 p-4">不要先读源码。先读本关讲义。</div>
+          <div className="rounded-2xl border border-quest-border/70 bg-white/70 p-4">源码会在讲到对应概念时出现，你只需要看高亮部分。</div>
+          <div className="rounded-2xl border border-quest-border/70 bg-white/70 p-4">Quiz 和 Patch 都来自讲义，不会考没有讲过的东西。</div>
+        </div>
         <div className="mt-5 grid gap-4 md:grid-cols-5">
           <KeyValue
             label="关卡"
@@ -33,10 +38,10 @@ export default async function CurriculumPage() {
               {current.patch_description ? (
                 <p className="whitespace-pre-wrap">{current.patch_description}</p>
               ) : (
-                <p>本关 Patch 任务尚未配置描述。</p>
+                <p>本关从讲义开始：先理解背景，再做对应的验证或 Lab。</p>
               )}
               <p>
-                源码 {current.source_count} · Notebook {current.notebook_count} · Ticket{" "}
+                讲义 {current.lesson_section_count ?? 0} 小节 · 源码 {current.source_count} · Notebook {current.notebook_count} · Ticket{" "}
                 {current.ticket_count}
                 {current.patch_test_count
                   ? ` · ${current.patch_test_count} 个测试`
@@ -46,11 +51,14 @@ export default async function CurriculumPage() {
                 href={withPublicPrefix(`/missions/${current.id}`)}
                 className="inline-flex rounded-full border border-quest-accent px-4 py-2 font-medium text-quest-accent hover:bg-quest-accent hover:text-white"
               >
-                打开本关任务
+                进入本关讲义
               </Link>
             </div>
             {current.recommended_command ? (
-              <CommandBlock command={current.recommended_command} />
+              <div>
+                <p className="mb-2 text-[11px] uppercase tracking-eyebrow text-quest-muted">最后验证命令</p>
+                <CommandBlock command={current.recommended_command} />
+              </div>
             ) : null}
           </div>
         </Panel>
@@ -147,7 +155,7 @@ export default async function CurriculumPage() {
                       </p>
                     ) : null}
                     <p className="mt-2 text-xs text-quest-muted">
-                      源码 {mission.source_count} · Notebook {mission.notebook_count} ·
+                      讲义 {mission.lesson_section_count ?? 0} 小节 · 源码 {mission.source_count} · Notebook {mission.notebook_count} ·
                       Ticket {mission.ticket_count}
                       {mission.patch_test_count
                         ? ` · ${mission.patch_test_count} 测试`
@@ -161,7 +169,7 @@ export default async function CurriculumPage() {
         </div>
       </Panel>
 
-      <Panel title="自学文档入口" eyebrow="Docs / 先读这些">
+      <Panel title="自学文档入口" eyebrow="Docs / 卡住再查">
         <div className="grid gap-4 lg:grid-cols-2">
           {curriculum.docs.map((doc) => (
             <article

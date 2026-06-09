@@ -1,4 +1,4 @@
-"""Reference solution for L01.5 Patch · ManualDDP."""
+"""Reference solution for L04 Patch · ManualDDP."""
 
 from __future__ import annotations
 

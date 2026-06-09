@@ -1,49 +1,545 @@
 id: l09_long_context_cp
-title: Ring attention forward (online softmax)
-level: L04.5
-act: 第 1 章：训练框架
-role: 长上下文学徒
+title: L10 · 长上下文 Context Parallel：Online Softmax 与 Ring Attention
+level: L10
+act: 第 2 章：训练系统、并行与数据
+role: 长上下文系统学徒
 priority: 核心
 estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - FlashAttention (对照)
+  - Megatron-LM
+  - Transformer Engine
+  - MiniInfra
 
 patch:
   description: |
-    把 attention 拆成"分块 + online softmax"的形式：维护 running max + denom，
-    遍历 K/V chunk 边累加 softmax 边算输出。num_chunks=1 与 num_chunks=N 数学等价。
+    实现 `ring_attention_forward`：把 K/V 沿序列维切块，用 online softmax
+    维护 running max、denom 和未归一化输出，得到与 full attention 等价的结果。
   task_md: labs/l09_long_context_cp/patch/task.md
   starter_file: labs/l09_long_context_cp/patch/starter/ring_attention.py
   reference_file: labs/l09_long_context_cp/patch/reference/ring_attention.py
   test_command: make patch-test M=l09_long_context_cp
   status_file: labs/l09_long_context_cp/patch/.last_run.json
   test_count: 5
-  test_kind: 结果对比（与 F.scaled_dot_product_attention 等价）
+  test_kind: 与 PyTorch SDPA 对齐的数值验证
+
+lesson:
+  opening: |
+    L10 讲长上下文 attention 的系统问题。完整 attention 会构造 `(B,H,Sq,Sk)` 的 score 矩阵，序列变长时激活显存按 `Sq * Sk` 增长。
+
+    本关 patch 在 CPU 上实现分块 attention：K/V 沿序列维切成 chunk，Q 保持不动，每个 chunk 用 online softmax 合进同一个 running max、denom 和 output。真实 Context Parallel 会把这些 K/V chunk 放在不同 rank 上沿 ring 传递；本关先把 forward 数学写对。
+  sections:
+    - title: Score 激活与 shape
+      plain_explanation: |
+        Full attention 的 `scores` 形状是 `(B,H,Sq,Sk)`。当 `Sq` 和 `Sk` 都接近序列长度时，中间激活按二次方增长。分块 attention 每次只创建 `(B,H,Sq,chunk_len)` 的 score chunk，降低峰值中间张量。
+
+        本关使用 `q: (B,H,Sq,D)`、`k/v: (B,H,Sk,D)`。输出跟 query 长度一致，形状是 `(B,H,Sq,D)`。
+      mental_model: |
+        full attention 把整张 query-key 表摊开；分块版本每次只摊当前 K/V chunk。
+      why_it_matters: |
+        长上下文 OOM 通常要先估算 score 激活，再看 flash/ring 路径、micro batch、CP size 和 recompute。
+      source_refs:
+        - title: Starter shape contract
+          repo_path: labs/l09_long_context_cp/patch/starter/ring_attention.py
+          lines: [20, 32]
+          note: |
+            L20-L25: `ring_attention_forward` 接收 q、k、v 和 num_chunks。
+            L26-L32: docstring 固定 q/k/v 和输出 shape。
+        - title: Starter scale and chunk
+          repo_path: labs/l09_long_context_cp/patch/starter/ring_attention.py
+          lines: [34, 41]
+          note: |
+            L34-L36: 读取 B、H、Sq、D、Sk，并计算 attention scale。
+            L38-L41: TODO 要求沿序列维切 K/V chunk。
+        - title: MiniInfra memory estimate
+          repo_path: mini_infra/megatron/core/context_parallel/ring_attention.py
+          lines: [53, 56]
+          note: |
+            L53-L56: 教学函数用 QKV 与 logits 粗略估算 attention memory。
+      common_confusions:
+        - 把 `D` 当成总 hidden size，忘记这里已经按 head 拆开。
+        - 认为 `Sq` 必须等于 `Sk`。
+        - 只看参数显存，漏掉 attention score 和 backward 激活。
+      checkpoint_questions:
+        - Full attention 的 score shape 是什么？
+        - 本关输出长度跟 `Sq` 还是 `Sk` 对齐？
+        - 分块后峰值 score 激活和哪个变量相关？
+
+    - title: Online softmax 的 running 状态
+      plain_explanation: |
+        每个 chunk 单独 softmax 后相加会错，因为分母只覆盖了当前 chunk。Online softmax 维护 `running_max`、`running_denom` 和 `running_out`，让所有 chunk 贡献都换到同一个 max-shift 参考下。
+
+        新 chunk 让最大值上升时，旧的 denom 和 out 都要乘 `exp(old_max - new_max)`。最后用 `running_out / running_denom` 得到最终输出。
+      mental_model: |
+        每次新 chunk 改变标尺时，旧账本要先换算到新标尺，再把新账加进去。
+      why_it_matters: |
+        FlashAttention 和 ring attention 的核心等价性就在这一步。通信方式可以变，running 状态的数学合同不能变。
+      source_refs:
+        - title: Reference init state
+          repo_path: labs/l09_long_context_cp/patch/reference/ring_attention.py
+          lines: [16, 27]
+          note: |
+            L16-L18: 读取 shape 和 scale。
+            L20-L21: 沿序列维切 K/V。
+            L23-L27: 初始化 running_out、running_max 和 running_denom。
+        - title: Reference max and rescale
+          repo_path: labs/l09_long_context_cp/patch/reference/ring_attention.py
+          lines: [29, 39]
+          note: |
+            L29-L32: 计算当前 chunk scores、chunk_max 和 new_max。
+            L33-L39: 第一次循环旧状态为 0，其余循环用 old max 到 new max 的缩放。
+        - title: Reference update and normalize
+          repo_path: labs/l09_long_context_cp/patch/reference/ring_attention.py
+          lines: [40, 47]
+          note: |
+            L40: 当前 chunk 使用 `scores - new_max` 计算 exp。
+            L41-L45: 同步更新 denom、out 和 running_max。
+            L47: 返回归一化后的输出。
+      common_confusions:
+        - 每个 chunk 独立 softmax 后直接相加。
+        - 只缩放 `running_denom`，忘记 `running_out`。
+        - 漏掉第一次循环的 `-inf` 边界。
+      checkpoint_questions:
+        - Online softmax 维护哪三个状态？
+        - 为什么旧 out 和旧 denom 使用同一个缩放系数？
+        - 最终输出为什么要除以 `running_denom`？
+
+    - title: 从 chunk 到 Context Parallel ring
+      plain_explanation: |
+        Patch 的 `num_chunks` 是本地切块数量。真实 Context Parallel 的 CP size 是 process group 大小，K/V chunk 分布在不同 rank 上。每个 rank 保持自己的 Q 分片不动，K/V chunk 沿 ring 传递。
+
+        Megatron 的配置层给出 `context_parallel_size`，parallel_state 创建 CP group，Transformer Engine attention 接收 `cp_group`、global ranks、stream 和 `cp_comm_type`。
+      mental_model: |
+        Patch 在一个进程里循环读资料页；CP 把资料页放在不同 rank，上课时沿环传递。
+      why_it_matters: |
+        多 GPU CP 问题通常出在 group、rank 顺序、通信类型、mask 和 packed sequence，不能只用 CPU patch 结论覆盖。
+      source_refs:
+        - title: MiniInfra ring plan inputs
+          repo_path: mini_infra/megatron/core/context_parallel/ring_attention.py
+          lines: [59, 69]
+          note: |
+            L59-L64: ring plan 接收 seq_len、cp_size、hidden_size 和 dtype_bytes。
+            L65-L69: 校验 cp_size，计算 chunk 和每个 K/V chunk 的通信字节。
+        - title: MiniInfra ring steps
+          repo_path: mini_infra/megatron/core/context_parallel/ring_attention.py
+          lines: [70, 82]
+          note: |
+            L70-L72: 对每个 step 和 q_rank 计算 kv_rank。
+            L73-L82: 记录这次 K/V chunk 的序列范围和字节数。
+        - title: Megatron CP config
+          repo_path: github_repo/Megatron-LM/megatron/core/model_parallel_config.py
+          lines: [45, 53]
+          note: |
+            L45-L46: `context_parallel_size` 表示沿序列维切分输入的 CP rank 数。
+            L48-L53: hierarchical CP 用两层 group 描述 a2a+p2p 通信。
+        - title: Megatron CP group
+          repo_path: github_repo/Megatron-LM/megatron/core/parallel_state.py
+          lines: [953, 963]
+          note: |
+            L953-L956: 开始创建 context parallel groups，并确认未重复初始化。
+            L957-L963: 为每组 cp ranks 创建 process group。
+        - title: TE CP kwargs
+          repo_path: github_repo/Megatron-LM/megatron/core/extensions/transformer_engine.py
+          lines: [1437, 1449]
+          note: |
+            L1437-L1439: 只有配置启用 CP 时才传入 CP 参数。
+            L1440-L1449: 检查 TE 版本，创建 stream，并传入 cp_group、global ranks 和 stream。
+      common_confusions:
+        - 把 patch 的 `num_chunks` 直接当成 CP world size。
+        - 认为 CP 只需要切张量，不需要 process group。
+        - 忽略 `cp_comm_type` 和 TE 版本要求。
+      checkpoint_questions:
+        - CP size 控制什么维度的切分？
+        - 每个 rank 为什么需要收到其他 rank 的 K/V chunk？
+        - TE attention 从哪里拿到 CP group？
+
+    - title: RoPE、YaRN 与长上下文证据
+      plain_explanation: |
+        RoPE 和 YaRN 负责位置外推。RoPE 把位置编码写进 Q/K 的旋转角度；YaRN 对频率和 attention temperature 做缩放估算。它们不能降低 score 矩阵本身的显存峰值。
+
+        `run_seqlen.py` 用 MiniInfra 估算 ring plan，`eval_yarn.py` 用简化公式估算 YaRN scale。二者都属于教学证据，真实可用性仍要看 GPU profile、perplexity 或 needle 测试。
+      mental_model: |
+        ring attention 让长上下文算得下；RoPE/YaRN 让位置表示在更长距离上更稳。两件事要分别验证。
+      why_it_matters: |
+        长上下文方案常把显存、通信和位置外推混在一起讨论。拆开证据，才能知道问题落在哪一层。
+      source_refs:
+        - title: RoPE inverse frequency
+          repo_path: mini_infra/megatron/core/context_parallel/rope.py
+          lines: [27, 36]
+          note: |
+            L27-L33: 反频率公式说明不同维度的相位变化速度。
+            L34-L36: RoPE 维度必须为偶数。
+        - title: YaRN scale
+          repo_path: mini_infra/megatron/core/context_parallel/yarn.py
+          lines: [29, 40]
+          note: |
+            L29-L34: 简化版 YaRN scale 按 target/train ratio 的 log 增长。
+            L35-L40: 处理非法长度和目标长度不超过训练长度的边界。
+        - title: run_seqlen CLI
+          repo_path: labs/l09_long_context_cp/scripts/run_seqlen.py
+          lines: [12, 18]
+          note: |
+            L12-L15: CLI 接收 seq 和 cp。
+            L16-L18: 输出 ring_attention_plan 的 JSON。
+        - title: eval_yarn CLI
+          repo_path: labs/l09_long_context_cp/scripts/eval_yarn.py
+          lines: [12, 20]
+          note: |
+            L12-L16: CLI 接收训练上下文、评估上下文和请求 scale。
+            L17-L20: 输出 YaRN summary、请求 scale 和示例验证字段。
+      common_confusions:
+        - 用 YaRN scale 证明 attention 显存问题已经解决。
+        - 用 ring plan 证明长上下文质量已经可用。
+        - 忽略 serving 端 KV cache 与训练上下文配置的一致性。
+      checkpoint_questions:
+        - RoPE/YaRN 主要处理什么问题？
+        - run_seqlen 输出里哪个字段反映通信量？
+        - eval_yarn 的结果为什么还需要真实评估支撑？
+
+    - title: Patch 测试与生产边界
+      plain_explanation: |
+        Patch tests 用 PyTorch SDPA 作为参考，检查单块、多块、不均匀 chunk、长 K/V 和 autograd。通过这些测试可以说明 forward 数学主路径正确。
+
+        生产系统还需要 causal mask、dropout、packed sequence、custom backward、GPU kernel、通信 overlap 和 TE 版本验证。这些不在 patch 范围内。
+      mental_model: |
+        Patch 是数学单元测试；生产 CP 是数学、shape、通信、kernel 和评估一起闭环。
+      why_it_matters: |
+        如果把 CPU patch 结论扩展成多 GPU 性能结论，会漏掉最常见的 CP group、mask 和通信问题。
+      source_refs:
+        - title: Full attention reference
+          repo_path: labs/l09_long_context_cp/patch/tests/test_patch.py
+          lines: [24, 26]
+          note: |
+            L24-L26: 测试用 PyTorch SDPA 作为无 mask 的参考输出。
+        - title: Four chunks test
+          repo_path: labs/l09_long_context_cp/patch/tests/test_patch.py
+          lines: [41, 50]
+          note: |
+            L41-L48: 构造相同输入并用 4 个 chunks 调用实现。
+            L49-L50: 最大误差必须低于阈值。
+        - title: Uneven chunk test
+          repo_path: labs/l09_long_context_cp/patch/tests/test_patch.py
+          lines: [53, 63]
+          note: |
+            L53-L59: `Sk=7`、`num_chunks=2` 产生不均匀 chunk。
+            L60-L63: 与 SDPA 对齐，防止实现写死 chunk 长度。
+        - title: Backward test
+          repo_path: labs/l09_long_context_cp/patch/tests/test_patch.py
+          lines: [78, 89]
+          note: |
+            L78-L85: q、k、v 开启 requires_grad 并调用实现。
+            L86-L89: backward 后检查梯度存在且有限。
+      common_confusions:
+        - 通过 patch 后直接声明 CP 性能可用。
+        - 把无 mask 测试当成 causal attention 覆盖。
+        - 忽略 backward 重算和内存保存策略。
+      checkpoint_questions:
+        - 哪些测试证明 online softmax 等价？
+        - 本关没有覆盖哪些生产复杂度？
+        - 进入集群验证前还要补哪些观测指标？
 
 source_reading:
-  - title: FlashAttention paper Algorithm 1
-    repo_path: docs/术语表.md
-    focus: 论文 section 3 的 forward 算法与本关 patch 一一对应
-  - title: Megatron context parallel ring 实现
-    repo_path: github_repo/Megatron-LM/megatron/core/
+  - title: Patch starter
+    repo_path: labs/l09_long_context_cp/patch/starter/ring_attention.py
+    focus: 学生需要补齐的 chunk、running 状态和 online softmax 循环
+    highlights:
+      - title: Function signature
+        lines: [20, 25]
+        note: |
+          L20-L25: 函数接收 q、k、v 和 num_chunks，返回 attention 输出。
+      - title: Shape docstring
+        lines: [26, 33]
+        note: |
+          L26-L33: docstring 固定 q/k/v 和输出 shape。
+      - title: Scale and chunks
+        lines: [34, 41]
+        note: |
+          L34-L36: 读取 shape 并计算 scale。
+          L38-L41: TODO 要求用 `torch.chunk` 沿序列维切 K/V。
+      - title: Running state TODO
+        lines: [43, 48]
+        note: |
+          L43-L46: 注释列出 running_out、running_max 和 running_denom 的 shape。
+          L47-L48: TODO 要求按 q 的 dtype/device 初始化。
+      - title: Online loop TODO
+        lines: [49, 60]
+        note: |
+          L49-L57: TODO 列出 scores、max、rescale、denom 和 out 的 8 步更新。
+          L59-L60: 最后要返回 `running_out / running_denom`。
+
+  - title: Patch reference
+    repo_path: labs/l09_long_context_cp/patch/reference/ring_attention.py
+    focus: 参考实现中的 online softmax 等价更新
+    highlights:
+      - title: Setup
+        lines: [16, 27]
+        note: |
+          L16-L18: 读取 shape 和 scale。
+          L20-L21: 生成 K/V chunks。
+          L23-L27: 初始化 running 状态。
+      - title: Max and rescale
+        lines: [29, 39]
+        note: |
+          L29-L32: 当前 chunk 计算 scores、chunk_max 和 new_max。
+          L33-L39: 第一次旧状态为 0，其余循环用 old max 到 new max 的缩放。
+      - title: Accumulate and return
+        lines: [40, 47]
+        note: |
+          L40: 当前 chunk 的 exp 使用 new_max 参考。
+          L41-L45: 更新 denom、out 和 running_max。
+          L47: 用 running_denom 归一化输出。
+
+  - title: Patch tests
+    repo_path: labs/l09_long_context_cp/patch/tests/test_patch.py
+    focus: SDPA 对齐、不均匀 chunk、长 K/V 和 backward 合同
+    highlights:
+      - title: Implementation switch
+        lines: [19, 21]
+        note: |
+          L19-L21: `IMPL` 环境变量选择 starter 或 reference，空值回退到 starter。
+      - title: SDPA reference
+        lines: [24, 26]
+        note: |
+          L24-L26: 测试使用 PyTorch SDPA 作为参考输出。
+      - title: One chunk
+        lines: [29, 38]
+        note: |
+          L29-L36: 构造短序列输入并用 1 个 chunk 调用实现。
+          L37-L38: 与 SDPA 的最大误差必须低于阈值。
+      - title: Four chunks
+        lines: [41, 50]
+        note: |
+          L41-L48: 使用相同形状输入，用 4 个 chunks 调用实现。
+          L49-L50: 断言与 SDPA 对齐。
+      - title: Uneven chunks
+        lines: [53, 63]
+        note: |
+          L53-L59: `Sk=7` 和 `num_chunks=2` 覆盖不均匀切分。
+          L60-L63: 与 SDPA 比较最大误差。
+      - title: Long K/V
+        lines: [66, 75]
+        note: |
+          L66-L73: `Sq=256`、`Sk=1024`、`num_chunks=8` 覆盖长 K/V。
+          L74-L75: 容差放宽到 `1e-3`。
+      - title: Backward
+        lines: [78, 89]
+        note: |
+          L78-L85: q、k、v 都开启 requires_grad。
+          L86-L89: backward 后检查梯度存在且有限。
+
+  - title: MiniInfra ring_attention
+    repo_path: mini_infra/megatron/core/context_parallel/ring_attention.py
+    focus: 教学版 CP ring plan、通信字节和显存估算
+    highlights:
+      - title: RingStep fields
+        lines: [33, 41]
+        note: |
+          L33-L41: `RingStep` 记录 q rank、kv rank、序列范围和通信字节。
+      - title: RingStep data
+        lines: [42, 50]
+        note: |
+          L42-L47: dataclass 字段保存 step、rank、seq_start/end 和 bytes_sent。
+          L49-L50: `to_dict` 便于输出 JSON。
+      - title: Memory estimate
+        lines: [53, 56]
+        note: |
+          L53-L56: 粗略估算 QKV 与 logits 的 attention memory。
+      - title: Plan setup
+        lines: [59, 69]
+        note: |
+          L59-L64: ring plan 输入 seq_len、cp_size、hidden_size 和 dtype_bytes。
+          L65-L69: 校验 cp_size，计算 chunk 和 bytes_per_chunk。
+      - title: Plan steps
+        lines: [70, 82]
+        note: |
+          L70-L72: 按 step 和 q_rank 计算 kv_rank。
+          L73-L82: 记录每个 K/V chunk 对应的序列范围和通信字节。
+      - title: Plan summary
+        lines: [83, 94]
+        note: |
+          L83-L89: 返回 seq、cp、hidden、ring steps 和总通信字节。
+          L90-L94: 返回 CP 后峰值显存估算和 steps。
+      - title: Sweep head
+        lines: [97, 103]
+        note: |
+          L97-L101: sweep 遍历不同 seq_len 和 cp_size。
+          L102-L103: 在 plan 上追加估算指标。
+      - title: Sweep metrics
+        lines: [104, 110]
+        note: |
+          L104-L108: 估算 step_time_ms 和 tokens_per_sec。
+          L110: 返回所有 sweep 行。
+
+  - title: MiniInfra RoPE and YaRN
+    repo_path: mini_infra/megatron/core/context_parallel/rope.py
+    focus: RoPE 频率、旋转和长上下文位置外推边界
+    highlights:
+      - title: Inverse frequencies
+        lines: [27, 36]
+        note: |
+          L27-L33: 反频率公式说明不同维度的相位变化速度。
+          L34-L36: 维度必须为偶数。
+      - title: Angles and rotate
+        lines: [39, 47]
+        note: |
+          L39-L41: 根据位置和频率生成角度。
+          L44-L47: 二维 pair 按 sin/cos 旋转。
+      - title: Apply RoPE pairs
+        lines: [50, 58]
+        note: |
+          L50-L53: 校验输入长度并计算频率。
+          L54-L58: 对每个 pair 应用旋转。
+
+  - title: MiniInfra YaRN
+    repo_path: mini_infra/megatron/core/context_parallel/yarn.py
+    focus: YaRN 简化 scale、temperature 和 summary
+    highlights:
+      - title: YaRN scale
+        lines: [29, 40]
+        note: |
+          L29-L34: 简化版 scale 按 target/train ratio 的 log 增长。
+          L35-L40: 处理非法长度、无需扩展和扩展三种情况。
+      - title: Temperature
+        lines: [43, 44]
+        note: |
+          L43-L44: attention temperature 随 scale 增大做轻量补偿。
+      - title: Summary
+        lines: [47, 55]
+        note: |
+          L47-L53: summary 输出 train/target 上下文、scale 和 temperature。
+          L54-L55: 明确数学估算需要真实长上下文评估补充。
+
+  - title: Megatron CP config and groups
+    repo_path: github_repo/Megatron-LM/megatron/core/model_parallel_config.py
+    focus: Megatron CP 配置入口
+    highlights:
+      - title: Context parallel size
+        lines: [45, 53]
+        note: |
+          L45-L46: context parallel size 表示沿序列维切分输入。
+          L48-L53: hierarchical CP 配置服务 a2a+p2p 等通信形态。
+      - title: Max seqlen per rank
+        lines: [56, 63]
+        note: |
+          L56-L63: 每个 DPxCP rank 的最大序列长度用于 hybrid CP 分配。
+      - title: Hybrid CP
+        lines: [65, 70]
+        note: |
+          L65-L70: hybrid CP 用于 packed samples 下的负载平衡。
+
+  - title: Megatron parallel_state
+    repo_path: github_repo/Megatron-LM/megatron/core/parallel_state.py
+    focus: CP process group 创建、查询和 rank 信息
+    highlights:
+      - title: Build CP group
+        lines: [953, 963]
+        note: |
+          L953-L956: 创建 CP group 前检查未初始化。
+          L957-L963: 为每组 cp ranks 创建 process group。
+      - title: Store CP group
+        lines: [964, 970]
+        note: |
+          L964-L966: 当前 rank 属于该组时保存 group 和 global ranks。
+          L967-L970: hierarchical CP 还会创建分层 group。
+      - title: Store hierarchical groups
+        lines: [970, 980]
+        note: |
+          L970-L977: 创建 hierarchical context parallel groups。
+          L979-L980: 当前 rank 保存 hierarchical groups。
+      - title: Get CP group
+        lines: [1503, 1507]
+        note: |
+          L1503-L1506: getter 可检查 CP group 是否已初始化。
+          L1507: 返回 CP group。
+      - title: Get CP ranks
+        lines: [1510, 1516]
+        note: |
+          L1510-L1515: getter 可检查 global ranks 是否已初始化。
+          L1516: 返回 CP global ranks。
+      - title: CP world size
+        lines: [1823, 1828]
+        note: |
+          L1823-L1828: 分布式初始化后返回 CP group size，否则返回 0。
+      - title: CP rank
+        lines: [1831, 1836]
+        note: |
+          L1831-L1836: 分布式初始化后返回当前 CP rank，否则返回 0。
+
+  - title: Transformer Engine CP attention
+    repo_path: github_repo/Megatron-LM/megatron/core/extensions/transformer_engine.py
+    focus: TE attention 如何接收 CP group、global ranks、stream 和 comm type
+    highlights:
+      - title: ProcessGroupCollection
+        lines: [1411, 1416]
+        note: |
+          L1411-L1416: 默认 group collection 包含 TP、CP 和 hierarchical CP groups。
+      - title: CP kwargs
+        lines: [1437, 1449]
+        note: |
+          L1437-L1439: 仅在配置启用 CP 时传入 CP 参数。
+          L1440-L1449: 检查 TE 版本，创建 stream，并写入 cp_group、global ranks 和 stream。
+      - title: CP comm type
+        lines: [1450, 1458]
+        note: |
+          L1450-L1453: TE 版本支持时设置默认或显式 cp_comm_type。
+          L1454-L1458: hierarchical 通信需要更高 TE 版本。
+      - title: Hierarchical CP kwargs
+        lines: [1459, 1464]
+        note: |
+          L1459-L1461: a2a+p2p 使用 hierarchical context parallel groups。
+          L1462-L1464: 其他通信类型直接写入 cp_comm_type。
+      - title: RoPE with CP head
+        lines: [2633, 2640]
+        note: |
+          L2633-L2634: THD 格式 RoPE 接口支持 CP。
+          L2635-L2640: interleaved 检查后调用 TE RoPE。
+      - title: RoPE with CP args
+        lines: [2641, 2648]
+        note: |
+          L2641-L2647: 调用时传入 freqs、cu_seqlens、cp_size、cp_rank 和 interleaved。
+          L2648: 返回 TE RoPE 结果。
+
+  - title: L10 drill scripts
+    repo_path: labs/l09_long_context_cp/scripts/run_seqlen.py
+    focus: sequence length / CP size sweep 的教学输出
+    highlights:
+      - title: run_seqlen CLI
+        lines: [12, 18]
+        note: |
+          L12-L15: CLI 接收 seq 和 cp。
+          L16-L18: 输出 ring_attention_plan JSON。
+  - title: L10 YaRN drill
+    repo_path: labs/l09_long_context_cp/scripts/eval_yarn.py
+    focus: YaRN 简化估算输出
+    highlights:
+      - title: eval_yarn CLI
+        lines: [12, 20]
+        note: |
+          L12-L16: CLI 接收 train/eval context 和请求 scale。
+          L17-L20: 输出 YaRN summary、requested scale 和示例验证字段。
 
 mini_infra_targets:
-  - mini_infra/distributed/
-
+  - mini_infra/megatron/core/context_parallel/
 notebooks:
   - notebooks/n13_rope_yarn_math.ipynb
   - notebooks/n14_context_parallel_ringattn.ipynb
-
 tickets:
   - cp_shape_mismatch_001
   - long_ctx_oom_003
-
 prereq: l08_megatron_text_pretrain
 next_lab: l10_megatron_pretrain_lifecycle
-
 gpu_modes:
-  local: CPU 完整
-  cluster: CP=4 H200 验证（可选）
+  local: CPU OK，patch、run_seqlen 和 eval_yarn 可运行
+  cluster: CP > 1 的真实 Megatron/TE 训练需要多 GPU 验证
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l09_long_context_cp/system_map.md
+    description: L10 在长上下文路线中的位置、online softmax 局部系统图、CP ring 和易混点。
+  - title: 主讲义
+    path: labs/l09_long_context_cp/lecture.md
+    description: 从 score 激活显存、Q/K/V shape、online softmax 讲到 CP group、RoPE/YaRN 和生产排查。
+  - title: 源码带读讲义
+    path: labs/l09_long_context_cp/source_walkthrough.md
+    description: 按 patch、MiniInfra、Megatron/TE CP 和 drill 脚本组织的源码阅读路线。

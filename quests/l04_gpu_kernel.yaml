@@ -1,20 +1,18 @@
 id: l04_gpu_kernel
-title: Triton 行 softmax（数值稳定）
-level: L01.7
-act: 第 0 章：分布式系统基础
+title: L05 · Triton 行 softmax（数值稳定）
+level: L05
+act: 第 1 章：GPU Kernel 基础
 role: GPU kernel 学徒
 priority: 核心
 estimated_minutes: 120
-no_gpu_friendly: false  # 需要 GPU + Triton
-
+no_gpu_friendly: false
 frameworks:
   - Triton
   - CUDA / GPU memory hierarchy
-
 patch:
   description: |
     用 triton.jit 写一个行 softmax kernel，与 F.softmax(x, dim=-1) 在 fp32/fp16
-    上数值等价。必须减 max 再 exp（数值稳定）；用 mask + other=-inf 处理 padding。
+    上数值等价。必须减 max 再 exp；用 mask + other=-inf 处理 padding。
   task_md: labs/l04_gpu_kernel/patch/task.md
   starter_file: labs/l04_gpu_kernel/patch/starter/triton_softmax.py
   reference_file: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
@@ -22,30 +20,401 @@ patch:
   status_file: labs/l04_gpu_kernel/patch/.last_run.json
   test_count: 5
   test_kind: 结果对比（与 F.softmax 等价）
+lesson:
+  opening: |
+    这节课解决一个具体 GPU kernel 问题：给定二维 CUDA tensor，怎样用 Triton 写一个行 softmax，使输出在 fp32/fp16 上与 torch.nn.functional.softmax(x, dim=-1) 对齐。难点不在公式本身，而在工程边界：exp 溢出、非 2 的幂行长、padding mask、BLOCK_SIZE、store 越界和 memory-bound 判断。
 
-source_reading:
-  - title: Triton 官方 02-fused-softmax 教程
-    repo_path: docs/术语表.md
-    focus: 看官方教程的 BLOCK_SIZE 选择策略
-  - title: FlashAttention online softmax (paper section 3)
-    repo_path: docs/术语表.md
-    focus: 对照本关的"减 max"与 FA 的"分块累加 max/sum"
+    本关的 kernel 每个 Triton program 处理一行。程序加载一行 logits，mask 外填 -inf，减行最大值，计算 exp，求行内分母，除法归一化，再把真实列写回。它不实现 backward，不做 autotune，也不覆盖超长行分块；它保留了后续 fused attention 和 MoE router 会反复使用的最小 reduction 模式。
+  sections:
+    - title: 问题和验收边界
+      plain_explanation: |
+        本讲输入是一个 2D CUDA tensor，输出是同形 row-wise softmax。验收对象是 PyTorch F.softmax，指标是 max absolute error 和 row sum。patch-test 覆盖 fp32、fp16、row sum、短行和长行。
 
+        本关不支持 CPU tensor，不实现 backward，不处理 causal mask，不做生产级 autotune，也不要求处理一行长到无法放进单个 program 的情况。没有 CUDA 时测试会 skip；skip 只能说明当前环境缺少验证条件。
+      mental_model: |
+        把本关看成一条 GPU 行处理流水线：wrapper 负责发射，kernel 负责一行内的稳定 reduction。
+      why_it_matters: |
+        Attention、MoE router、采样 logits 和很多 fused kernel 都会用到类似的行内 reduction。先把 softmax 算对，后面才能讨论融合和带宽。
+      source_refs:
+        - title: Starter kernel signature
+          repo_path: labs/l04_gpu_kernel/patch/starter/triton_softmax.py
+          lines: [27, 35]
+          note: |
+            L27-L35: kernel 参数包含 input/output 指针、stride、n_cols 和 BLOCK_SIZE。
+        - title: Test skip boundary
+          repo_path: labs/l04_gpu_kernel/patch/tests/test_patch.py
+          lines: [26, 28]
+          note: |
+            L26-L28: 没有 CUDA 时 pytest skip，kernel 没有实际运行。
+      common_confusions:
+        - 把 skipped GPU test 当成通过；skip 是未验证状态。
+        - 把这个行 softmax 讲成完整 FlashAttention；本关只覆盖单行 forward reduction。
+        - 只追求速度，忽略 fp16/fp32 数值等价和 row sum。
+      checkpoint_questions:
+        - 本关输入 tensor 的 shape 和设备要求是什么？
+        - 没有 CUDA 时 patch-test skip 能否作为验收通过？
+        - 本关和完整 FlashAttention 差在哪里？
+    - title: 稳定 Softmax
+      plain_explanation: |
+        softmax 直接计算 exp(x) 时可能溢出。稳定写法先减去同一行最大值：exp(x_i - max(x)) / sum_j exp(x_j - max(x))。减同一个常数不会改变概率，因为分子和分母同时乘上同一个因子。
+
+        Triton reference 对应三步：tl.max 得到 row_max，tl.exp(row - row_max) 得到 numerator，tl.sum 得到 denominator。padding 位置要填 -inf，这样它不会成为虚假 max，后续 exp(-inf) 也不会污染分母。
+      mental_model: |
+        减 max 是把整行 logits 平移到安全区间。相对大小不变，概率不变，浮点路径更稳定。
+      why_it_matters: |
+        后续 online softmax 和 FlashAttention 也要维护分块 max 和 sum。本讲先把单行版本讲清。
+      source_refs:
+        - title: Stable softmax CPU
+          repo_path: mini_infra/gpu/triton_softmax.py
+          lines: [31, 40]
+          note: |
+            L31-L40: CPU 参考实现先求 row_max，再计算 exp、denom 和概率。
+        - title: Reference stable math
+          repo_path: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+          lines: [34, 37]
+          note: |
+            L34-L37: Triton reference 完成 row_max、numer、denom 和 out。
+      common_confusions:
+        - 认为减 max 会改变概率分布；它只改变浮点计算路径。
+        - 只在 fp16 下减 max；fp32 logits 足够大时也会溢出。
+        - padding 填 0；softmax 中 exp(0)=1，会污染分母。
+      checkpoint_questions:
+        - 为什么减同一行最大值不改变 softmax 结果？
+        - fp16 下直接 exp(x) 的风险是什么？
+        - row_max、numer、denom 分别对应 softmax 哪一步？
+    - title: Triton Program、BLOCK_SIZE 和 Mask
+      plain_explanation: |
+        本关设置 grid=(n_rows,)，每个 program 处理一行。program 通过 tl.program_id(0) 得到 row index，通过 tl.arange(0, BLOCK_SIZE) 生成列偏移，再用 row stride 计算地址。
+
+        BLOCK_SIZE 是单个 program 的向量宽度，任务要求用 triton.next_power_of_2(n_cols)。当 n_cols 不是 2 的幂时，BLOCK_SIZE 会覆盖额外 padding 位置，所以必须用 mask 区分真实列和 padding。load 和 store 都要带 mask。
+      mental_model: |
+        program 是处理一行的工人，BLOCK_SIZE 是固定长度托盘，mask 标出托盘里哪些格子有真实数据。
+      why_it_matters: |
+        GPU kernel 常把不规则输入放进规则 block。mask 和 reduction identity 是写安全 kernel 的基本功。
+      source_refs:
+        - title: Starter kernel TODO
+          repo_path: labs/l04_gpu_kernel/patch/starter/triton_softmax.py
+          lines: [37, 49]
+          note: |
+            L37-L49: TODO 按 row id、offset、mask、load、max、exp、sum、store 展开。
+        - title: Reference masked load
+          repo_path: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+          lines: [26, 33]
+          note: |
+            L26-L33: reference 计算 row_idx、col_offsets、mask，并用 other=-inf 读取。
+        - title: Reference masked store
+          repo_path: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+          lines: [38, 42]
+          note: |
+            L38-L42: store 复用 mask，避免 padding 列写越界。
+      common_confusions:
+        - 只在 load 上写 mask，忘记 store 也可能越界。
+        - 把 padding 位置填 0；这会影响 max 或 sum。
+        - 认为 BLOCK_SIZE 越大越好；过大可能触发资源限制。
+      checkpoint_questions:
+        - tl.program_id(0) 在本关表示什么？
+        - n_cols=300 时为什么 BLOCK_SIZE 可能是 512？
+        - softmax 的 mask 填充值为什么是 -inf？
+    - title: Wrapper 和测试闭环
+      plain_explanation: |
+        Python wrapper 负责检查输入、计算 shape、选择 BLOCK_SIZE、分配 output，并按 n_rows 启动 kernel。wrapper 不能用 PyTorch softmax 兜底，因为本关要验收 Triton 地址、mask 和 reduction 路径。
+
+        patch-test 的 5 个 case 分别检查 fp32、fp16、row sum、short rows 和 long rows。测试通过说明 forward row softmax 的最小合同成立；它不覆盖 backward、超长行分块、causal mask 或生产性能。
+      mental_model: |
+        wrapper 搭好发射架，kernel 处理每一行。patch-test 证明功能合同，不证明完整生产内核。
+      why_it_matters: |
+        GPU kernel 很容易在 CPU-only 环境里产生假安全感。pass、skip 和 failure 必须分开记录。
+      source_refs:
+        - title: Wrapper checks
+          repo_path: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+          lines: [45, 53]
+          note: |
+            L45-L53: wrapper 检查 Triton/CUDA/2D，读取 shape 并选择 BLOCK_SIZE。
+        - title: Wrapper launch
+          repo_path: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+          lines: [54, 60]
+          note: |
+            L54-L60: wrapper 按 n_rows 启动 grid 并返回 output。
+        - title: fp32 test
+          repo_path: labs/l04_gpu_kernel/patch/tests/test_patch.py
+          lines: [31, 39]
+          note: |
+            L31-L39: fp32 case 与 F.softmax 比较 max diff。
+        - title: fp16 test
+          repo_path: labs/l04_gpu_kernel/patch/tests/test_patch.py
+          lines: [42, 50]
+          note: |
+            L42-L50: fp16 case 使用较宽容忍度比较 max diff。
+        - title: row sum test
+          repo_path: labs/l04_gpu_kernel/patch/tests/test_patch.py
+          lines: [53, 59]
+          note: |
+            L53-L59: 检查每行 softmax 输出和接近 1。
+      common_confusions:
+        - 在 wrapper 里调用 F.softmax；这绕过了任务要求。
+        - 看到 tests skip 就以为完成；skip 没有跑 kernel。
+        - 把 row sum 通过当成完全正确；还要比较 PyTorch softmax 的 max diff。
+      checkpoint_questions:
+        - kernel 层和 wrapper 层分别负责什么？
+        - 5 个 patch tests 分别验证什么？
+        - skip、pass、failure 在报告里应怎样区分？
+    - title: Memory-Bound 与 Online Softmax
+      plain_explanation: |
+        softmax 每个元素计算量不大，但需要读 logits、写 probabilities。若 max、exp、sum、division 分成多个 kernel 或中间 tensor，HBM 往返会增加。fused softmax 的价值主要是减少中间读写和 launch，而不是改变数学。
+
+        当一行太长，单个 program 放不下时，需要 online softmax。它分块维护 running_max 和 running_sum；如果新 block 的最大值更大，旧 running_sum 要乘 exp(old_max - new_max) 重缩放。
+      mental_model: |
+        Softmax 算术不多，搬数据很多。online softmax 像边读边维护当前最大值和归一化分母。
+      why_it_matters: |
+        后续长上下文 attention 的核心之一就是把 softmax 中间状态留在更近的存储层，并分块维护稳定性。
+      source_refs:
+        - title: Online softmax invariant
+          repo_path: mini_infra/gpu/triton_softmax.py
+          lines: [43, 50]
+          note: |
+            L43-L50: docstring 说明 running_sum 必须随 new_max 重缩放。
+        - title: Online softmax loop
+          repo_path: mini_infra/gpu/triton_softmax.py
+          lines: [52, 63]
+          note: |
+            L52-L63: 分块更新 running_max、running_sum，并输出最终概率。
+        - title: Softmax bytes
+          repo_path: mini_infra/gpu/memory_model.py
+          lines: [83, 92]
+          note: |
+            L83-L92: 估算 fused 和 eager softmax 的读写字节。
+        - title: Roofline metrics
+          repo_path: mini_infra/gpu/memory_model.py
+          lines: [119, 124]
+          note: |
+            L119-L124: roofline 输出 device、shape、block size 和 warps。
+        - title: Roofline estimates
+          repo_path: mini_infra/gpu/memory_model.py
+          lines: [125, 132]
+          note: |
+            L125-L132: roofline 输出 bytes、bandwidth、occupancy 和 estimated_ms。
+      common_confusions:
+        - 认为 exp 贵就一定 compute-bound；softmax 的 FLOP/byte 通常很低。
+        - 认为 fused softmax 改了数学；它主要减少中间读写。
+        - 用单个大 block 处理所有长行；资源上限会阻止这种做法。
+      checkpoint_questions:
+        - 什么叫 memory-bound？
+        - fused softmax 减少了哪些 HBM 往返？
+        - online softmax 为什么要重缩放 running_sum？
+    - title: Bench、Smoke 和 Debug
+      plain_explanation: |
+        bench_softmax.py 调用 MiniInfra 的 CPU 模拟，输出 online softmax 误差和 roofline 估算。run_smoke.py 走课程通用 half-mission runner，默认 validation-only。这两条链路都不能替代 GPU patch-test。
+
+        Debug 时先分数值错误、越界错误和资源错误。数值看减 max、-inf padding、row sum；越界看 load/store mask 和地址；资源看 BLOCK_SIZE、num_warps、num_stages 和中间变量数量。性能结论必须列出比较对象、shape、dtype、GPU、warmup、重复次数和计时方式。
+      mental_model: |
+        patch-test 是功能验收，bench 是教学沙盘，smoke 是 artifact 链路，benchmark 才是性能证据。
+      why_it_matters: |
+        Kernel 课程最容易混淆“写了代码”“跑了模拟”“测试跳过”和“GPU 上通过”。清晰分级能避免把未验证状态带进下一讲。
+      source_refs:
+        - title: Bench CLI
+          repo_path: labs/l04_gpu_kernel/scripts/bench_softmax.py
+          lines: [12, 23]
+          note: |
+            L12-L23: bench 读取 seq/block/batch，并打印 simulate_softmax_kernel 的 JSON。
+        - title: Smoke runner
+          repo_path: labs/l04_gpu_kernel/scripts/run_smoke.py
+          lines: [13, 20]
+          note: |
+            L13-L20: smoke 解析 run-id 和 mode，调用 run_half_mission。
+      common_confusions:
+        - 把 bench_softmax 输出当成 patch-test 结果；它没有调用 starter kernel。
+        - 看到 illegal memory access 只看最后一行 traceback；CUDA 异步会让报错位置滞后。
+        - 只跑一次 timing 就下性能结论；GPU benchmark 需要 warmup 和重复测量。
+      checkpoint_questions:
+        - bench、smoke、patch-test 分别回答什么问题？
+        - 数值错误、越界和资源不足分别优先检查什么？
+        - 声称 Triton kernel 更快时，报告必须列出哪些条件？
 mini_infra_targets:
-  - mini_infra/gpu/
-
+  - mini_infra/gpu/triton_softmax.py
+  - mini_infra/gpu/memory_model.py
 notebooks:
   - notebooks/n11_gpu_memory_hierarchy.ipynb
   - notebooks/n12_triton_softmax_walkthrough.ipynb
-
-tickets:
-  - kernel_low_bw_003
-  - kernel_oom_smem_002
-  - kernel_shape_mismatch_001
-
-prereq: l03_nccl_ddp_smoke
-next_lab: l05_distributed_primitives
-
-gpu_modes:
-  local: 1×4090（必需）
-  cluster: 1×H200 跑 perf gate
+lesson_docs:
+  - title: 系统地图
+    path: labs/l04_gpu_kernel/system_map.md
+    description: 本讲在训练系统中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l04_gpu_kernel/lecture.md
+    description: 从稳定 softmax、Triton program、mask 到 memory-bound 和 debug。
+  - title: 源码带读讲义
+    path: labs/l04_gpu_kernel/source_walkthrough.md
+    description: 按数学骨架、patch reference、tests、roofline 和 smoke 边界组织源码阅读。
+source_reading:
+  - title: Starter Triton softmax
+    repo_path: labs/l04_gpu_kernel/patch/starter/triton_softmax.py
+    focus: 学生需要补齐的 kernel 和 wrapper。
+    highlights:
+      - title: Kernel signature
+        lines: [27, 35]
+        note: |
+          L27-L35: kernel 参数包含 input/output 指针、stride、n_cols 和 BLOCK_SIZE。
+      - title: Kernel TODO
+        lines: [37, 49]
+        note: |
+          L37-L49: TODO 列出 row id、offset、mask、load、max、exp、sum 和 store。
+      - title: Wrapper checks
+        lines: [52, 57]
+        note: |
+          L52-L57: wrapper 检查 Triton、CUDA tensor 和 2D 输入。
+      - title: Wrapper launch TODO
+        lines: [58, 70]
+        note: |
+          L58-L70: wrapper TODO 计算 shape、BLOCK_SIZE、output 并启动 kernel。
+  - title: Reference Triton softmax
+    repo_path: labs/l04_gpu_kernel/patch/reference/triton_softmax.py
+    focus: 最小可工作的 Triton row softmax。
+    highlights:
+      - title: Masked load
+        lines: [26, 33]
+        note: |
+          L26-L33: reference 用 row_idx、col_offsets 和 mask 读取一行，padding 填 -inf。
+      - title: Stable math
+        lines: [34, 37]
+        note: |
+          L34-L37: row_max、numer、denom 和 out 完成稳定 softmax。
+      - title: Masked store
+        lines: [38, 42]
+        note: |
+          L38-L42: store 使用同一个 mask，避免 padding 列写越界。
+      - title: Wrapper checks
+        lines: [45, 53]
+        note: |
+          L45-L53: wrapper 检查输入、读取 shape，并选择 BLOCK_SIZE。
+      - title: Wrapper launch
+        lines: [54, 60]
+        note: |
+          L54-L60: wrapper 按 n_rows 启动 grid 并返回 output。
+  - title: Patch tests
+    repo_path: labs/l04_gpu_kernel/patch/tests/test_patch.py
+    focus: 行 softmax 的行为合同。
+    highlights:
+      - title: Impl loader
+        lines: [18, 20]
+        note: |
+          L18-L20: 通过 IMPL 环境变量加载 starter 或 reference。
+      - title: CUDA skip
+        lines: [26, 28]
+        note: |
+          L26-L28: 没有 CUDA 时 skip，kernel 未运行。
+      - title: fp32 equivalence
+        lines: [31, 39]
+        note: |
+          L31-L39: fp32 case 与 F.softmax 比较 max diff。
+      - title: fp16 equivalence
+        lines: [42, 50]
+        note: |
+          L42-L50: fp16 case 与 F.softmax 比较 max diff。
+      - title: Row sum
+        lines: [53, 59]
+        note: |
+          L53-L59: 检查每行输出和接近 1。
+      - title: Short rows
+        lines: [62, 68]
+        note: |
+          L62-L68: n_cols=64 的短行 case。
+      - title: Long rows
+        lines: [71, 77]
+        note: |
+          L71-L77: n_cols=2048 的长行 case。
+  - title: MiniInfra softmax
+    repo_path: mini_infra/gpu/triton_softmax.py
+    focus: stable softmax、online softmax 和 CPU 模拟。
+    highlights:
+      - title: Stable softmax
+        lines: [31, 40]
+        note: |
+          L31-L40: 一次性减 max，计算 exp、denom 和概率。
+      - title: Online invariant
+        lines: [43, 50]
+        note: |
+          L43-L50: 解释 running_sum 在 max 变化时必须重缩放。
+      - title: Online loop
+        lines: [52, 63]
+        note: |
+          L52-L63: 分块更新 running_max 和 running_sum。
+      - title: Mask needed
+        lines: [71, 77]
+        note: |
+          L71-L77: 非整除 block 的 tail 需要 mask 防止越界和数值污染。
+      - title: Simulation setup
+        lines: [81, 90]
+        note: |
+          L81-L90: simulate_softmax_kernel 生成 sample、reference、candidate 和 roofline estimate。
+      - title: Simulation output
+        lines: [91, 99]
+        note: |
+          L91-L99: simulation 输出 kernel 名称、mask_needed、max_abs_err 和 mask 原因。
+  - title: MiniInfra memory model
+    repo_path: mini_infra/gpu/memory_model.py
+    focus: softmax 的 bytes、occupancy 和 roofline 估算。
+    highlights:
+      - title: GPUProfile fields
+        lines: [28, 38]
+        note: |
+          L28-L38: GPUProfile 记录 HBM、L2、SMEM、register 和 warp 上限。
+      - title: GPUProfile values
+        lines: [40, 48]
+        note: |
+          L40-L48: dataclass 保存 profile 字段，并提供 to_dict。
+      - title: CPU profile
+        lines: [51, 59]
+        note: |
+          L51-L59: cpu-validation profile 用于 validation 估算边界。
+      - title: RTX4090 profile
+        lines: [60, 67]
+        note: |
+          L60-L67: rtx4090 profile 记录 HBM、L2、SMEM、register 和 warp 上限。
+      - title: H200 profile
+        lines: [68, 76]
+        note: |
+          L68-L76: h200 profile 记录对应硬件资源和带宽上界。
+      - title: Softmax bytes
+        lines: [83, 92]
+        note: |
+          L83-L92: 估算 fused 和 eager softmax 的读写字节。
+      - title: Occupancy estimate
+        lines: [95, 100]
+        note: |
+          L95-L100: 用 block size、warps 和 profile 粗估 occupancy。
+      - title: Roofline inputs
+        lines: [103, 115]
+        note: |
+          L103-L115: roofline_softmax 读取 profile、bytes、occupancy 和效率系数。
+      - title: Roofline bandwidth
+        lines: [116, 124]
+        note: |
+          L116-L124: 计算 bandwidth、fused/eager estimated_ms，并开始组织输出。
+      - title: Roofline outputs
+        lines: [125, 132]
+        note: |
+          L125-L132: 返回 bytes、bandwidth、occupancy 和 estimated_ms。
+  - title: Bench softmax
+    repo_path: labs/l04_gpu_kernel/scripts/bench_softmax.py
+    focus: CPU 侧教学模拟入口。
+    highlights:
+      - title: CLI args
+        lines: [12, 16]
+        note: |
+          L12-L16: bench 接收 seq、block 和 batch。
+      - title: Simulation print
+        lines: [17, 23]
+        note: |
+          L17-L23: 调用 simulate_softmax_kernel 并打印 JSON。
+  - title: Smoke runner
+    repo_path: labs/l04_gpu_kernel/scripts/run_smoke.py
+    focus: validation-only smoke 的入口。
+    highlights:
+      - title: Import runner
+        lines: [6, 10]
+        note: |
+          L6-L10: 设置项目根路径并导入 run_half_mission。
+      - title: Main entry
+        lines: [13, 20]
+        note: |
+          L13-L20: 解析 run-id 和 mode，调用 run_half_mission。

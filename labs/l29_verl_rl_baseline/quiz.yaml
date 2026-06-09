@@ -1,226 +1,102 @@
 mission: l29_verl_rl_baseline
-title: L10 Quiz · PPO / KL 控制 / RLHF 基础
+title: L31 Quiz · Adaptive KL Controller
 pass_threshold: 1.0
 description: |
-  这 5 题打中 RLHF / PPO 训练里最容易出 bug 的点：KL penalty 与 ratio clipping
-  的差别、reward 与 advantage、reference model 的角色、why adaptive KL。
+  检查学习者是否理解 KL controller、PPO ratio clip、reference model、reward parser self-test 和 RL smoke 指标边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L31 在 RLHF 主线中的位置
+    kind: doc
+    path: labs/l29_verl_rl_baseline/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 KL penalty 到 reward smoke
+    kind: doc
+    path: labs/l29_verl_rl_baseline/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、reward、SLiME 主路径阅读
+    kind: doc
+    path: labs/l29_verl_rl_baseline/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l29_verl_rl_baseline/patch/task.md
-  - title: 跑 notebook n10 · RL KL reward
-    kind: notebook
-    path: notebooks/n10_rl_kl_reward.ipynb
-  - title: 读 PPO paper / InstructGPT App C
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 reward parser
     kind: source
-    path: docs/术语表.md
-  - title: 读 verl PPO core_algos
+    path: labs/l29_verl_rl_baseline/scripts/reward_math.py
+    estimate_min: 10
+  - title: 对照 SLiME PPO utils
     kind: source
-    path: github_repo/verl/
+    path: github_repo/slime/slime/utils/ppo_utils.py
+    estimate_min: 15
 
 questions:
-  - id: q1_kl_penalty_purpose
-    prompt: |
-      RLHF (PPO) 训练里加 KL penalty 是为了什么？
+  - id: q1_kl_direction
+    prompt: Adaptive KL Controller 中 current_kl 高于 target_kl 时应怎么调？
     options:
       - id: a
-        text: 让模型更准确
-      - id: b
-        text: 防止 RL 过程中 policy 偏离原 SFT 模型太远，导致语言能力退化 / reward hacking
+        text: 增大 KL penalty 系数
         correct: true
+      - id: b
+        text: 把系数重置为 0
       - id: c
-        text: 加速训练
+        text: 减小 target_kl
       - id: d
-        text: 减少显存
-    explanation: |
-      RLHF 流程：
-        1. 预训练 base model
-        2. SFT (supervised fine-tuning) → reference model
-        3. RLHF (PPO) 用 reward model 优化 policy
-
-      问题：RL 优化 reward 时，**policy 可能学到 reward hacking**（钻 reward model 漏洞）。
-      表现：
-        - 输出不通顺、重复 token
-        - 满足 reward 的特定格式但语义无关
-        - 攻击性 / 谄媚 / 拒绝回答（reward 上升但用户体验下降）
-
-      KL penalty 是软约束：
-        ```
-        loss = - (reward - β · KL(π_θ || π_ref))
-        ```
-        - π_θ 是当前 policy，π_ref 是 SFT 后的 reference
-        - β 是 KL coef（本关 patch 调的就是它）
-        - KL > 0：当前 policy 与 ref 不一致；越大 penalty 越大
-        - 限制 policy 漂移到 ref 的"信任区"
-
-      但 β 太大 → policy 学不到 reward；β 太小 → reward hacking。
-      这就是为什么需要 **adaptive** β：跟踪 actual KL，自动调到 target。
-
-      面试金句："PPO 不是单纯优化 reward，是在 reference policy 的小邻域里优化——
-      KL coef 就是那个邻域半径的旋钮。"
-
-  - id: q2_kl_vs_ratio_clip
-    prompt: |
-      PPO 有两个限制 policy 漂移的机制：KL penalty 和 ratio clipping (clip(r, 1-ε, 1+ε))。
-      它们各管什么？
+        text: 跳过 reward parser
+    explanation: "KL 过高说明 policy 偏离 reference 太远，controller 应增大惩罚系数。"
+  - id: q2_clip
+    prompt: L31 patch 中 clip 限制的是什么？
     options:
       - id: a
-        text: 等价的，二选一
-      - id: b
-        text: KL 限制全 sequence 的整体漂移；ratio clip 限制单个 token-level update step
-              的最大方向；二者共同作用更稳
+        text: proportional_error
         correct: true
+      - id: b
+        text: kl_coef 的绝对值
       - id: c
-        text: KL 用于 actor，ratio clip 用于 critic
+        text: reward_mean
       - id: d
-        text: ratio clip 已经替代了 KL
-    explanation: |
-      **KL penalty**:
-        - 对 sequence 维度的全局约束
-        - 计算：KL(π_θ(·|x) || π_ref(·|x))，对 sequence 求和
-        - 加在 reward 上（外层 RL objective）
-        - 慢响应（每个 batch 算一次）
-
-      **Ratio clipping** (PPO 核心创新, Schulman 2017):
-        - 对每个 token 的更新方向限制
-        - r_t = π_θ(a_t | s_t) / π_old(a_t | s_t)
-        - clip(r_t, 1-ε, 1+ε) × A_t  防止单步 update 过大
-        - 解决 vanilla policy gradient 的 trust region 问题
-
-      两者关系：
-        - ratio clip 是 *step-level* 安全网
-        - KL penalty 是 *training-level* 锚点
-        - **两者并不冗余**：clip 限制每步更新方向，KL 限制总漂移量
-        - InstructGPT / Llama RLHF 都同时用
-
-      OpenAI's GPT-3.5 RLHF：
-        - target_kl = 0.05-0.1
-        - clip ε = 0.2
-        - β（KL coef）adaptive，初始 0.2
-
-      面试金句："Ratio clip 防止单步炸；KL penalty 防止累积漂移——
-      两层安全网都不能省。"
-
-  - id: q3_kl_estimator
-    prompt: |
-      实际 PPO 训练里 KL(π_θ || π_ref) 怎么估计？
+        text: response_len
+    explanation: "公式先计算 `current_kl / target_kl - 1`，再把这个误差 clip 到 [-0.2, 0.2]。"
+  - id: q3_ratio_clip
+    prompt: PPO ratio clipping 和 KL penalty 的关系是什么？
     options:
       - id: a
-        text: 直接计算 sum_x π_θ(x) × log(π_θ(x) / π_ref(x))，准确但要求 π_ref 显式输出
-              所有 vocab 概率
-      - id: b
-        text: 用 sample-based 估计：从 rollout 抽 token，KL ≈ mean(log π_θ(a) - log π_ref(a))；
-              更稳定的版本用 k1 / k3 estimator
+        text: ratio clip 限制单次 update，KL penalty 约束相对 reference 的漂移
         correct: true
+      - id: b
+        text: 二者完全等价
       - id: c
-        text: 用 cross-entropy 代替
+        text: KL penalty 只用于 critic
       - id: d
-        text: 不需要估计，直接用预设值
-    explanation: |
-      KL 定义：`KL(p || q) = E_p[log(p/q)] = E_p[log p - log q]`
-
-      PPO 实践：
-        - rollout 用 π_old (= π_θ at the beginning of update epoch)
-        - 每 token 都有 log π_old(a) 和 log π_ref(a)（reference model forward 过）
-        - 估计 KL：
-          ```
-          k1 = log π_θ - log π_ref               # naive, biased
-          k2 = (log π_θ - log π_ref)^2 / 2       # biased but lower variance
-          k3 = (π_ref/π_θ - 1) - log(π_ref/π_θ)  # unbiased + low variance (Schulman blog)
-          ```
-        - **k3 是 verl / TRL 的默认**，最稳
-
-      代码实现要点：
-        - log probs 都按 token 算，再 mask 掉 padding，再 mean
-        - **不要在 logits 上求差**——会被 sampling 影响；要在 chosen action 上求
-
-      sequence-level vs token-level：
-        - token-level KL：对每 token 独立惩罚（更稳）
-        - sequence-level KL：对完整生成 sequence 求 KL 后惩罚（更接近 trust region 直觉）
-        - DeepSeek-R1 用 sequence-level；GRPO 用 token-level
-
-      面试金句："PPO 里的 KL 都是 sample-based 估计；用 k3 estimator 比 naive 稳 10×。"
-
-  - id: q4_reference_model_gpu
-    prompt: |
-      RLHF 训练时 reference model 占 GPU 资源吗？怎么优化？
+        text: ratio clip 会自动修复 reward parser
+    explanation: "ratio clip 是 PPO update 的局部安全网，KL penalty 是相对 reference 的长期锚点。"
+  - id: q4_reward_smoke
+    prompt: 为什么 L31 要先跑 reward parser self-test？
     options:
       - id: a
-        text: 不占，CPU 跑就行
-      - id: b
-        text: 占 1 份 weight + 不占 grad/optimizer。优化方向：用 LoRA 训 policy
-              （ref = base，policy = base + LoRA），reference 与 policy 共享 weight，
-              只 forward 一次
+        text: 避免把答案解析错误误判成 PPO 或 KL 问题
         correct: true
+      - id: b
+        text: self-test 会训练 reference model
       - id: c
-        text: 占 2 倍显存（policy + reference）
+        text: self-test 会启动 GPU rollout
       - id: d
-        text: 占 3 倍显存（policy + reference + reward model）
-    explanation: |
-      RLHF 训练 GPU 配置：
-        - **Policy** (训练): full weight + grad + optimizer = ~98GB for 7B
-        - **Reference** (inference only): full weight = ~14GB for 7B fp16
-        - **Reward model** (inference only): full weight = ~14GB for 7B
-        - **Critic** (often shares Reward weights): full weight + grad + optimizer
-
-      合计：可能 200GB+，训练 7B RLHF 通常 8 卡 H100 起步。
-
-      优化：
-      1. **LoRA**: policy = ref + LoRA delta
-         - reference forward = base weight only（与 policy 共享）
-         - 只省 1 份 ref，但 LoRA 自身 ~100MB
-         - DeepSeek / Llama-3 RLHF 都用 LoRA
-
-      2. **shared base**: policy 和 reward 都 fine-tune from same base
-         - reward 是 base + reward head（轻量）
-         - reference 直接是 base（ref forward 就是 base forward）
-
-      3. **offload reference to CPU**: ref forward 慢但只跑一次/rollout
-
-      4. **PD-style RLHF**: rollout（用 vLLM/SGLang 推理）+ ref forward 在一组卡，
-         policy training 在另一组（SLiME 的设计就是这样）
-
-      Capstone Stage C：
-        - 用 LoRA on Qwen2.5-0.5B（policy 训练显存就小很多）
-        - reference = base Qwen2.5-0.5B（只 forward）
-        - reward = CLIP score / WER（不需要 LLM-based reward 模型）
-        - 单 H100 就够
-
-      面试金句："RLHF 显存 = N × policy_size，N 取决于你共享多少模型。
-      共享 base + LoRA delta 是 7B+ 的标配。"
-
-  - id: q5_reward_hacking
-    prompt: |
-      下列哪个**不是** reward hacking 的典型表现？
+        text: self-test 会改变 tokenizer
+    explanation: "reward parser 是 RL 证据链入口。解析错时，reward_mean 和后续判断都会失真。"
+  - id: q5_slime
+    prompt: SLiME `compute_approx_kl` 和 L31 controller 的关系是什么？
     options:
       - id: a
-        text: 输出 loss 下降但人工评估变差
-      - id: b
-        text: 模型反复输出相同 token 提高某种 reward signal
-      - id: c
-        text: 模型生成长 sequence 因 length-biased reward
-      - id: d
-        text: 模型在 eval set 上 accuracy 提升
+        text: KL estimator 产生 current_kl，controller 用 current_kl 调整系数
         correct: true
-    explanation: |
-      Reward hacking = "policy 学到了非语义层面的 trick 来提高 reward，但本意不在那"。
-
-      典型表现：
-        - **重复**：长 sequence 重复 token 让 perplexity 降；length-bias reward 给它高分
-        - **谄媚**：用户喜欢什么就附和（DPO/RLHF 通病）
-        - **拒答**：reward model 害怕 toxic → policy 学到永远说 "I can't help with that"
-        - **欺骗**：不真懂时编造看起来 plausible 的 hallucination
-        - **prompt injection**：模型学会复述 reward template 取悦评分模型
-
-      反之 "eval set accuracy 提升" 不是 hacking——它就是模型变好了的正常表现。
-      不过要警惕 eval set 污染（training data leak），那是另一种 hacking。
-
-      防御：
-        1. **KL penalty + adaptive β**（本关 patch）
-        2. **reward model 多样性**：用多个 reward 而非一个
-        3. **process reward / step-wise verification**（DeepSeek-R1）
-        4. **human eval baseline**：定期人工抽检
-
-      面试金句："Reward hacking 是 RLHF 的根本病——只能用 KL trust region 控制，
-      不能彻底消除。"
+      - id: b
+        text: controller 先生成 token，再交给 estimator
+      - id: c
+        text: 二者都只处理 README
+      - id: d
+        text: estimator 会替代 reward parser
+    explanation: "KL estimator 在控制器前面提供观测值；controller 根据观测值调 `kl_coef`。"

@@ -1,5 +1,5 @@
 """
-L07 Patch · Typical_p sampling
+L20 Patch · Typical-p sampling
 
 填空规则：
 - TODO(student) 必须自己写
@@ -46,4 +46,4 @@ def typical_p_filter(
     #
     # 8. result = logits.masked_fill(mask_to_remove, filter_value)
     #    return result
-    raise NotImplementedError("L07 Patch: implement typical_p_filter")
+    raise NotImplementedError("L20 Patch: implement typical_p_filter")

@@ -1,70 +1,73 @@
-# L02 · 分布式原语：手写 Tensor Parallel Linear
+# L06 · 分布式原语：手写 Tensor Parallel Linear
 
-> 本关的目标只有一个：**用 `torch.distributed` + `autograd.Function` 自己实现 `ColumnParallelLinear` 和 `RowParallelLinear`，并通过 7 个测试。**
+这一讲解决层内并行的第一个核心问题：一个 `nn.Linear` 的矩阵太大时，怎样把权重切到多个 rank 上，同时保持 forward 输出、输入梯度和权重梯度与单卡 `nn.Linear` 等价。你会手写 `ColumnParallelLinear`、`RowParallelLinear` 和三个 autograd 通信 primitive。
 
-写完之后你能解释 Megatron 的 `tensor_parallel/layers.py` 每一行，并在 L05.5 (MoE) 和 Capstone (多模态 projector) 里复用。
+## 学习路线
 
-## 闭环（学完只需做这一件事）
+1. 读 [system_map.md](system_map.md)：确认 L06 如何把 L04 的 collective 和 L05 的单算子直觉合成 Tensor Parallel Linear。
+2. 读 [lecture.md](lecture.md)：理解 TP 与 DP 的边界、Column/Row 切分、bias 位置和 backward 通信。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 starter、reference、tests、MiniInfra 和 Megatron 映射读源码。
+4. 跑 notebook：[n03_ddp_collectives.ipynb](../../notebooks/n03_ddp_collectives.ipynb) 和 [n04_tensor_parallel_linear.ipynb](../../notebooks/n04_tensor_parallel_linear.ipynb)。
+5. 做 quiz：确认切分维度、collective 位置、bias 和 checkpoint 边界。
+6. 做 patch：实现 `patch/starter/tp_linear.py`。
+7. 跑 lab smoke：生成 collective、DDP、TP toy、pipeline toy 的 artifact。
+8. 填写 [outputs/training_step_template.md](outputs/training_step_template.md)。
+
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 它属于哪条主线 | Distributed training / tensor parallel |
+| 它解决什么问题 | 把一个 Linear 的 weight 和 matmul 切到多个 rank 上，并保持单卡数值语义 |
+| 它连接哪些指标 | world_size、rank、all_reduce/all_gather、forward max diff、grad_x diff、grad_W diff、bias 是否只加一次 |
+| 它连接哪些源码 | `patch/reference/tp_linear.py`、`patch/tests/worker_cases.py`、`mini_infra/megatron/core/tensor_parallel/layers.py`、Megatron `mappings.py` 和 `layers.py` |
+| lab 检验什么 | Column/Row forward 对齐单卡；Column/Row backward 对齐单卡；Row bias 只加一次 |
+
+## 你会学到什么
+
+- `nn.Linear` 的 weight shape 为什么是 `(out_features, in_features)`。
+- Column Parallel 为什么切输出维度，Row Parallel 为什么切输入维度。
+- `_CopyToParallelRegion`、`_ReduceFromParallelRegion`、`_GatherAlongLastDim` 的 forward/backward 规则。
+- Row bias 为什么必须在 all-reduce 之后加一次。
+- CPU/gloo patch-test 能证明什么，不能证明 GPU/NCCL 性能什么。
+- TP checkpoint 改 world size 时为什么需要 gather 后重新切分。
+
+## Patch 闭环
 
 ```bash
-# 1. 读任务说明
 cat labs/l05_distributed_primitives/patch/task.md
-
-# 2. 改 patch/starter/tp_linear.py（不许改其它文件）
-
-# 3. 跑测试（CPU gloo, world=2，不需要 GPU）
+$EDITOR labs/l05_distributed_primitives/patch/starter/tp_linear.py
 make patch-test M=l05_distributed_primitives
-
-# 4. 7 个 pytest 全过 → 本关 PASS。
 ```
 
-pytest 全绿代表 TP patch 的代码契约通过；之后还要对照 `source_reading` 和 AI 框架理解口试，确认能把它放回 Megatron TP/PP 主线。
+测试覆盖：
 
-## 你要改的文件
+| 测试 | 验证 |
+|---|---|
+| `test_column_parallel_matches_single_gpu` | Column forward 输出与单卡 `nn.Linear` 对齐 |
+| `test_row_parallel_matches_single_gpu` | Row forward 输出与单卡 `nn.Linear` 对齐 |
+| `test_column_grad_matches_single_gpu` | Column 的 `grad_x` 和本地 `grad_W` 切片对齐 |
+| `test_row_grad_matches_single_gpu` | Row 的输入梯度切片和本地 `grad_W` 对齐 |
+| `test_row_bias_added_once` | Row bias 在 reduce 后只加一次 |
 
+patch-test 默认使用 CPU/gloo 和 2 个 worker，不需要 GPU。它验证语义，不验证 NCCL throughput。
+
+## Lab Smoke
+
+```bash
+python labs/l05_distributed_primitives/scripts/run_lab.py --mode smoke
 ```
-labs/l05_distributed_primitives/patch/
-├── task.md                       # 任务详细说明（必读）
-├── starter/tp_linear.py          # ★ 唯一要改的文件
-├── reference/tp_linear.py        # 参考解（卡住再看）
-└── tests/                        # 自动测试（不要改）
-```
 
-## 测试覆盖
+smoke 会运行 collective demo、DDP toy train、Column TP toy 和 pipeline toy，并写出 `metrics.jsonl`、`train.log` 和 `report.md`。这些 toy 帮助建立系统位置，不能替代 patch-test 对 `ColumnParallelLinear` 和 `RowParallelLinear` 的验收。
 
-| 类别 | 测试 | 通过条件 |
-|---|---|---|
-| 结果 | `test_column_parallel_matches_single_gpu` | TP=2 forward 输出 `allclose(atol=1e-10)` 单卡 nn.Linear |
-| 结果 | `test_row_parallel_matches_single_gpu` | 同上 |
-| 结果 | `test_column_grad_matches_single_gpu` | backward 之后 grad_x / grad_W 都与单卡相等 |
-| 结果 | `test_row_grad_matches_single_gpu` | 同上 |
-| 结果 | `test_row_bias_added_once` | 输出等于单卡 nn.Linear（bias 加错位置时差 ≈ bias × ws）|
+## 课后产物
 
-5 个测试**全部按结果判定**——不规定你的实现方式，输出 / 梯度对就过。`make patch-test M=l05_distributed_primitives` 全部约 15–20 秒。
+| 产物 | 用途 |
+|---|---|
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 排查 collective hang、shape 错、grad 不等价、Row bias 重复加 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 复习 TP Linear 和 Megatron 映射主路径 |
+| [outputs/training_step_template.md](outputs/training_step_template.md) | 记录一次 TP Linear patch 或 smoke 复盘 |
 
-## 卡住怎么办
+## 进入下一讲
 
-1. 先打开 `notebooks/n04_tensor_parallel_linear.ipynb` 把矩阵切分图画一遍。
-2. `make patch-hint M=l05_distributed_primitives` —— 看 TODO 列表 + 通信路径速查表。
-3. 还卡住，`make patch-show-solution M=l05_distributed_primitives` —— 打开完整参考解。
-
-## 配套源码研读（可选，30min）
-
-写完 patch 之后，对照：
-
-- `github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py` —— 看 Megatron 的工程级实现（async tensor parallelism、weight 初始化与 ckpt 切片、sequence parallel）有哪些边界你没考虑。
-- `notebooks/n03_ddp_collectives.ipynb` —— 顺手把 DDP 的 collective 顺序也理清。
-
-读完你会发现：你已经掌握了 Megatron TP 的核心 90%，剩下 10% 是工程细节。
-
-## Debug Tickets（任选一个，可选）
-
-只有真的对死锁/形状错配感兴趣再做：
-
-- `tickets/dist_wrong_world_size_001.yaml`
-- `tickets/dist_rank_hang_002.yaml`
-- `tickets/dist_device_mismatch_003.yaml`
-
-## 进入下一关的前置
-
-`make patch-test M=l05_distributed_primitives` 全绿后，继续用 AI 框架理解口试检查源码主线。下一关 [L03 TorchTitan](../l06_torchtitan_training/README.md) 会让你给 TorchTitan 加一个 selective activation checkpoint policy。
+`make patch-test M=l05_distributed_primitives` 通过，并能解释 Column/Row 的 forward/backward 通信位置后，进入 [L07 TorchTitan 训练入口](../l06_torchtitan_training/README.md)。

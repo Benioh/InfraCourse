@@ -1,4 +1,4 @@
-"""L03.5 Patch tests · CPU only."""
+"""L08 Patch tests · CPU only."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    return importlib.import_module(f"{os.environ.get('IMPL', 'starter')}.megatron_bin")
+    name = os.environ.get("IMPL") or "starter"
+    return importlib.import_module(f"{name}.megatron_bin")
 
 
 def _toy_tokenizer(text: str) -> list[int]:

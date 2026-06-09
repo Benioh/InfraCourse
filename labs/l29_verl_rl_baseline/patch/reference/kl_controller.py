@@ -1,4 +1,4 @@
-"""Reference solution for L10 Patch · AdaptiveKLController."""
+"""Reference solution for L31 Patch · AdaptiveKLController."""
 
 from __future__ import annotations
 

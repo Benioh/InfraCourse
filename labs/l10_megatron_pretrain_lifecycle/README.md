@@ -1,67 +1,64 @@
-# L04.8 · Megatron Pretrain Lifecycle：把 train_step 接回真实预训练
+# L11 · Megatron 预训练生命周期：把 train_step 接回训练闭环
 
-> 本关补上 L04 的框架主线：在 `mini_infra/megatron/training/training.py` 里手写 `train_step`
-> 切片，并通过 `scripts/run_lifecycle.py` 把它驱动起来——你能第一次"看见"loss 真正下降。
+这一讲把 L09 的 scheduler 组件和 L10 的长上下文系统视角接回 Megatron-shaped 预训练生命周期。学生要写的 patch 是 `train_step`：清梯度、执行 forward/backward、调用 optimizer、按 update success 决定 scheduler 是否推进，并返回可写入日志的 metrics。
 
-L04 让你写了 `CosineWithRestartsLR`。L04.8 让你把 LR / optimizer / forward-backward / scheduler
-/ metrics 串起来，并在一个 125M Llama-style 模型上跑 200–1000 步真实预训练（或者在
-本地 fallback 模式下走通同构生命周期）。
+## 学习路线
 
-## 闭环
+1. 读 [system_map.md](system_map.md)：确认 L11 在 Megatron 预训练生命周期中的位置。
+2. 读 [lecture.md](lecture.md)：理解任务入口、通用训练循环、microbatch loss、optimizer skip、scheduler、metrics 和 checkpoint。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 patch、MiniInfra、run_lifecycle 和真实 Megatron `training.py` 读源码。
+4. 跑 notebook：`notebooks/n06_activation_recompute.ipynb`，观察 activation recompute 对训练 step 的影响。
+5. 做 quiz：确认调用顺序、loss 汇总、skip 语义、metrics 和 checkpoint 证据。
+6. 做 patch：实现 `train_step` 并通过 5 个 CPU 测试。
+7. 跑 drill：用 `scripts/run_lifecycle.py` 产出 `metrics.jsonl`、`acceptance.json`、checkpoint marker 和 report。
+8. 填写 [outputs/training_step_template.md](outputs/training_step_template.md)，沉淀一次生命周期复盘。
+
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 它属于哪条主线 | Training systems / Megatron lifecycle |
+| 它承接什么 | L09 的 LR scheduler 组件、L10 的训练系统证据意识 |
+| 它解决什么问题 | 把单步训练合同写成可测试边界，并让日志和 checkpoint 能解释训练行为 |
+| 它连接哪些指标或证据 | `iteration`、`loss`、`num_microbatches`、`skipped_iter`、`lr`、`grad_norm`、`tokens`、checkpoint marker |
+| 它连接哪些源码 | patch train_step、MiniInfra `training.py`、run_lifecycle、checkpointing、Megatron `training.py` |
+| lab 检验什么 | 调用顺序、microbatch loss 平均、optimizer skip、scheduler step、异常输入 |
+
+## Patch 闭环
 
 ```bash
-# 1. 读任务、写 patch
 cat labs/l10_megatron_pretrain_lifecycle/patch/task.md
 $EDITOR labs/l10_megatron_pretrain_lifecycle/patch/starter/train_step.py
 make patch-test M=l10_megatron_pretrain_lifecycle
-
-# 2. 用 patch 驱动一次完整 lifecycle（4090/CPU fallback 都能跑）
-bash labs/l10_megatron_pretrain_lifecycle/scripts/launch_pretrain.sh
-
-# 3. 看 runs/<mission>/<run-id>/ 下的 metrics.jsonl + report.md
 ```
 
-## 测试覆盖（patch 层）
+测试覆盖：
 
 | 测试 | 验证 |
 |---|---|
-| `test_train_step_call_order_and_metrics` | zero_grad → forward_backward → optimizer.step → scheduler.step 顺序，metrics 完整 |
-| `test_scheduler_not_stepped_when_optimizer_skips` | optimizer 返回 False 时 scheduler 不前进，`skipped_iter=1` |
-| `test_accepts_optimizer_step_none_as_success` | optimizer 返回 None 视为成功 |
-| `test_rejects_missing_loss` | 没有 loss/losses 抛 `TrainStepError` |
-| `test_rejects_empty_microbatch_losses` | 空 microbatch 列表抛错 |
+| `test_train_step_call_order_and_metrics` | `zero_grad -> forward_backward -> optimizer.step -> scheduler.step` 和 metrics |
+| `test_scheduler_not_stepped_when_optimizer_skips` | optimizer skip 时 scheduler 不推进 |
+| `test_accepts_optimizer_step_none_as_success` | optimizer 返回 `None` 视为成功 |
+| `test_rejects_missing_loss` | 缺少 loss 字段时抛错 |
+| `test_rejects_empty_microbatch_losses` | 空 microbatch loss 列表时抛错 |
 
-## Lifecycle 测试覆盖（scripts 层）
+## Drill 闭环
 
-`scripts/run_lifecycle.py` 在 mock 数据上驱动 200 步训练，并检查：
+```bash
+python labs/l10_megatron_pretrain_lifecycle/scripts/run_lifecycle.py \
+  --config configs/cpu_smoke.yaml --run-id l11_validation
+```
 
-- 训练 loss 在前 50 步内严格下降（≥ 0.3 的下降幅度）
-- LR 在指定 step 触发 warm restart 后回到 max_lr
-- checkpoint 写出后 latest_checkpointed_iteration.txt 与文件一致
-- metrics.jsonl 每行包含 `iteration / loss / lr / num_microbatches / skipped_iter`
+drill 会用 tiny decoder 和 synthetic token 跑一个 CPU lifecycle，写出 `metrics.jsonl`、`artifacts/acceptance.json`、checkpoint marker 和 `report.md`。如果配置带真实 Megatron 命令模板，脚本会把命令写入 `artifacts/real_megatron_command.sh`。
 
-`acceptance` 字段会写到 `runs/.../report.md` 里，作为口试证据。
+## 课后产物
 
-## Configs
+| 产物 | 用途 |
+|---|---|
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 排查 loss 不降、skip storm、LR 不动、checkpoint 缺失和 lifecycle 证据不足 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 复习 train_step、MiniInfra lifecycle、checkpoint 和 Megatron 源码主路径 |
+| [outputs/training_step_template.md](outputs/training_step_template.md) | 记录一次训练 step / lifecycle 的配置、指标、artifact 和判断 |
 
-| 配置 | 适用硬件 | 说明 |
-|---|---|---|
-| `configs/cpu_smoke.yaml` | CPU only | 4-layer 8M 参数，200 步，跑得通就行 |
-| `configs/4090_debug.yaml` | 单卡 4090 | 125M Llama-style，500 步，验证 loss 单调 |
-| `configs/h200_125m.yaml` | 8×H200 | 125M Llama-style + Megatron `pretrain_gpt.py` 真实路径，1000 步 acceptance loss < 6.5 |
+## 进入下一讲
 
-## 调试工单
-
-见 `tickets/INDEX.md`。建议至少做 `mgt_lifecycle_train_loss_nan` 和
-`mgt_lifecycle_skip_step_storm`。
-
-## 卡住怎么办
-
-1. `make patch-hint M=l10_megatron_pretrain_lifecycle` 看 TODO 列表。
-2. 看 `mini_infra/megatron/training/training.py` 同构骨架，对照 reference。
-3. `make patch-show-solution M=l10_megatron_pretrain_lifecycle`。
-
-## 进入下一关
-
-`make patch-test` 全绿 + `bash scripts/launch_pretrain.sh` 跑通后，
-进入 [L05 Megatron Scale Optimization](../l11_megatron_scale_optimization/README.md)。
+`make patch-test M=l10_megatron_pretrain_lifecycle` 通过，并完成一次 `run_lifecycle.py` 复盘后，进入 [L12 Megatron Scale Optimization](../l11_megatron_scale_optimization/README.md)。

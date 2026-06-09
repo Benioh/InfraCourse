@@ -1,5 +1,5 @@
 """
-L03 Patch · Selective Activation Checkpoint
+L07 Patch · Selective Activation Checkpoint
 
 填空规则：
 - TODO(student) 必须自己写
@@ -45,11 +45,11 @@ def selective_checkpoint_wrap(model: nn.Module, policy_fn: PolicyFn) -> nn.Modul
     #       wrapped = _CheckpointWrapper(child)
     #       setattr(model, name, wrapped)
     #   return model
-    raise NotImplementedError("L03 Patch: implement selective_checkpoint_wrap")
+    raise NotImplementedError("L07 Patch: implement selective_checkpoint_wrap")
 
 
 def attention_only_policy(name: str, module: nn.Module) -> bool:
     """只对名字含 'attn' / 'attention' 的子模块返回 True."""
     # TODO(student):
     #   return 'attn' in name.lower() or 'attention' in name.lower()
-    raise NotImplementedError("L03 Patch: implement attention_only_policy")
+    raise NotImplementedError("L07 Patch: implement attention_only_policy")

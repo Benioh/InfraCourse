@@ -1,8 +1,8 @@
-# L29.5 Patch · Train-Infer Mismatch 修正算子组
+# L32 Patch · Train-Infer Mismatch 修正算子
 
 ## 你要交付什么
 
-实现 6 个 RL 框架在线上真正用的 mismatch 修正算子：
+实现 6 个可独立测试的 PyTorch 算子：
 
 ```python
 def compute_k3_kl(logp_p, logp_q) -> Tensor: ...
@@ -13,81 +13,105 @@ def apply_veto(logp_rollout, threshold=1e-6) -> Tensor: ...
 def batch_normalize_weights(weights) -> Tensor: ...
 ```
 
-**禁止** 用 `torch.distributions.kl_divergence`（那是 closed-form，不是 RL 里能拿到的形式）。
-**允许** `torch.exp / log / clamp / mean / where` 等基础 op。
+禁止使用 `torch.distributions.kl_divergence`。本讲只有采样 token 的 logprob，不掌握完整类别分布。允许使用 `torch.exp`、`torch.clamp`、`torch.where`、`mean`、`sum` 和基础张量操作。
 
-补丁规模目标：80–130 行 Python（不算注释空行）。
+## 概念地图
 
-## 概念地图（写代码前先在脑子里建立）
-
-```
-       Rollout Engine (πSGLang)        Training Engine (πMegatron)
-                |                                |
-                ↓ generate                       ↓ forward
-          y_t, logp_old(y_t)                logp_new(y_t)
-                          \              /
-                           ↓            ↓
-                    ratio = exp(logp_new - logp_old)
-                                |
-        ┌───────────────────┬─┴─┬───────────────────┐
-        ↓                   ↓   ↓                   ↓
-    TIS：clamp 到 [lo,hi]   MIS：越界 mask 为 0   Geometric：序列级
-        ↓                   ↓                       ↓
-                  乘上 advantages，作为 loss 权重
-                                |
-                       Veto：极端低概率序列直接丢
-                                |
-                  Batch Normalize：均值 = 1，避免学习率震荡
+```text
+rollout logprob       training logprob
+       |                    |
+       '---- log_ratio -----'
+                |
+          ratio = exp(log_ratio)
+                |
+   +------------+-------------+
+   |            |             |
+ K3 KL       TIS/MIS     Geometric IS
+ monitor     token 修正   sequence 权重
+                |
+              Veto
+                |
+        Batch Normalize
+                |
+          policy loss 权重
 ```
 
 ## 接口契约
 
 ### 1. `compute_k3_kl(logp_p, logp_q) -> Tensor`
 
-K3 KL（[Schulman 估计器](http://joschu.net/blog/kl-approx.html)）：
+K3 KL 使用：
 
-$$k_3(x) = \frac{p(x)}{q(x)} - 1 - \log\frac{p(x)}{q(x)}$$
+```text
+log_ratio = logp_p - logp_q
+ratio = exp(log_ratio)
+k3 = ratio - 1 - log_ratio
+```
 
-输入是 log 形式（`logp_p, logp_q`），返回标量（mean over batch）。
-**为什么不用 k1 = log(p/q)？** k3 总是非负，且方差更小，是 RL 监控的工业标准。
+返回 `k3.mean()`。aligned 输入应返回 0，随机输入下结果应非负。
 
 ### 2. `tis_correct(logp_old, logp_new, advantages, lo, hi) -> Tensor`
 
-Truncated IS：`ratio = exp(logp_new - logp_old)`，`clamp(ratio, lo, hi) * advantages`。
-slime / verl 里 `lo, hi = 0.5, 2.0` 是 dense 模型的常用区间。
+Truncated IS：
+
+```text
+ratio = exp(logp_new - logp_old)
+output = clamp(ratio, lo, hi) * advantages
+```
+
+输出 shape 与 `advantages` 一致。ratio 超过上界时仍保留梯度贡献，但贡献被压到上界。
 
 ### 3. `mis_with_mask(logp_old, logp_new, advantages, lo, hi) -> Tensor`
 
-Masked IS：`ratio = exp(logp_new - logp_old)`，`mask = (lo <= ratio <= hi)`，`ratio * mask * advantages`。
-区别于 TIS：超界的 token 直接 **梯度归零** 而不是被截断到边界，避免越界点引入有偏更新。
+Masked IS：
+
+```text
+ratio = exp(logp_new - logp_old)
+mask = (lo <= ratio <= hi)
+output = ratio * mask * advantages
+```
+
+ratio 越界时输出为 0。它更适合切断不可信 token 的贡献。
 
 ### 4. `geometric_seq_is(logp_old, logp_new, seq_lens) -> Tensor`
 
-序列级几何均值：
+输入 `logp_old` 和 `logp_new` 是 `(B, T)`，`seq_lens` 是 `(B,)`，返回 `(B,)`：
 
-$$w_{\text{seq}} = \exp\left(\frac{1}{|y|}\sum_t \log\frac{\pi_{\text{new}}(y_t)}{\pi_{\text{old}}(y_t)}\right)$$
+```text
+weight = exp(mean_valid_tokens(logp_new - logp_old))
+```
 
-输入 shape：`logp_*` 是 `(B, T)`，`seq_lens` 是 `(B,)`，返回 `(B,)` 的序列权重。
-**长度归一化**：避免序列越长权重波动越大。
+必须用 `seq_lens` 生成 mask，padding 位置不能进入均值。`torch.arange(T)` 要放在同一 device 上。
 
 ### 5. `apply_veto(logp_rollout, threshold=1e-6) -> Tensor`
 
-如果 rollout 给某个 token 的概率 < `threshold`（即 `logp_rollout < log(threshold)`），返回 mask=0（drop）。
-**为什么需要它？** 极小概率的 token 让 ratio 爆炸到 1e6 量级，clip / mask 都来不及，必须直接 drop 整个序列。
+用 log 空间比较：
+
+```text
+keep = logp_rollout >= log(threshold)
+```
+
+保留返回 1，触发 veto 返回 0。不要先 `exp(logp_rollout)` 再比较。
 
 ### 6. `batch_normalize_weights(weights) -> Tensor`
 
-`weights / weights.mean()`，确保有效学习率稳定。SNIS（Self-Normalized IS）的核心。
+返回：
 
-## 不变量（写代码时心里要装着）
+```text
+weights / weights.mean().clamp(min=1e-12)
+```
 
-1. K3 KL 在 `logp_p == logp_q` 时严格为 0。
-2. K3 KL 永远 ≥ 0（数学性质，可以用作 sanity check）。
-3. TIS 输出绝对值 ≤ `hi * |advantages|`。
-4. MIS 在 `ratio` 越界时输出严格为 0。
-5. Geometric IS 是序列级的（输出 shape = `(B,)`），与 token-level 不同。
-6. Veto 用对数比较：`logp >= log(threshold)`，不要先 `exp` 再比，否则下溢。
-7. `batch_normalize_weights` 后 `weights.mean() == 1`（数值精度内）。
+归一化后均值应为 1，相对顺序保持不变。
+
+## 不变量
+
+1. `logp_p == logp_q` 时 K3 KL 为 0。
+2. K3 KL 对任意正 ratio 非负。
+3. TIS 的输出绝对值不会超过 `hi * abs(advantages)`。
+4. MIS 在 ratio 越界时输出为 0。
+5. Geometric IS 输出 shape 是 `(B,)`。
+6. Veto 使用 log 阈值比较。
+7. Batch Normalize 后的权重均值为 1。
 
 ## 怎么验证
 
@@ -95,28 +119,29 @@ $$w_{\text{seq}} = \exp\left(\frac{1}{|y|}\sum_t \log\frac{\pi_{\text{new}}(y_t)
 make patch-test M=l29.5_train_infer_mismatch
 ```
 
-7 个测试，全部 CPU：
+10 个 CPU 测试：
 
 | 测试 | 验证 |
 |---|---|
-| `test_k3_kl_zero_when_aligned` | `log_p == log_q` 时 K3 = 0 |
-| `test_k3_kl_formula` | logp=-1, logq=-2 → K3 = e − 1 − 1 ≈ 0.7183 |
-| `test_k3_kl_nonnegative` | 任意输入下 K3 ≥ 0 |
-| `test_tis_clips_high_ratio` | ratio = e² 在 hi=2.0 下被 clamp |
-| `test_mis_masks_outliers` | ratio = e⁵ 在 [0.5, 2.0] 外被 mask 为 0 |
-| `test_geometric_seq_is_matches_definition` | 直接对照公式验证 |
-| `test_veto_drops_extreme_low_prob` | log(1e-7) 触发 veto |
-| `test_batch_normalize_mean_one` | 归一化后 mean 严格等于 1 |
+| `test_k3_kl_zero_when_aligned` | logprob 一致时 K3 为 0 |
+| `test_k3_kl_formula` | `logp=-1, logq=-2` 时 K3 为 `e - 2` |
+| `test_k3_kl_nonnegative` | 随机输入下 K3 非负 |
+| `test_tis_clips_high_ratio` | 高 ratio 被 clamp 到上界 |
+| `test_tis_passes_through_in_range` | ratio 为 1 时 advantage 不变 |
+| `test_mis_masks_outliers` | 越界 token 被置零 |
+| `test_geometric_seq_is_matches_definition` | 只统计有效 token，输出 `(B,)` |
+| `test_veto_drops_extreme_low_prob` | 低于阈值的 logprob 被 veto |
+| `test_batch_normalize_mean_one` | 归一化后均值为 1 |
+| `test_batch_normalize_preserves_relative_order` | 相对顺序保持 |
 
 ## 卡住怎么办
 
-1. 跑 `notebooks/n19_train_infer_mismatch.ipynb`：可视化 K3 KL 在 PPL 下降阶段先降后升的真实曲线。
-2. `make patch-hint M=l29.5_train_infer_mismatch` —— 看 TODO 与公式提示。
-3. `make patch-show-solution M=l29.5_train_infer_mismatch` —— 看参考解。
+1. 先跑 `IMPL=reference make patch-test M=l29.5_train_infer_mismatch`，确认测试环境正常。
+2. 再对照 `labs/l29.5_train_infer_mismatch/source_walkthrough.md`，找到失败测试对应的函数。
+3. 最后用一两个小 tensor 手算公式方向，特别检查 `logp_new - logp_old`。
 
 ## 写完之后你能做什么
 
-- 一眼看出 RL 训练日志里 K3 KL 突然飙升 = 即将崩溃，并能给出 TIS / MIS 配置建议。
-- 解释为什么 MoE 模型的 train-infer mismatch 比 dense 模型严重 1–2 个数量级（提示：路由不一致 → 激活 expert 不一致）。
-- 给 SLiME / verl 框架的 RL 调试报告里加上 ratio 分布直方图与 veto 命中率。
-- 看懂 [slime examples/train_infer_mismatch_helper](https://github.com/THUDM/slime/tree/main/examples/train_infer_mismatch_helper) 的全部配置项。
+- 解释 K3 KL、ratio、TIS/MIS、Geometric IS、Veto 和 Batch Normalize 如何连接。
+- 看懂 SLiME `examples/train_infer_mismatch_helper/mis.py` 中的主要分支。
+- 在 RL debug 报告中补齐 ratio 分布、veto 命中率和 batch norm factor。

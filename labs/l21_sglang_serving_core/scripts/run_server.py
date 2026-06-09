@@ -50,8 +50,8 @@ def main() -> None:
         ),
     )
     write_text(
-        run_dir / "artifacts" / "server_validation / 服务配置验证.md",
-        "SGLang server launch was validated locally. Run the recorded command manually on a GPU-capable environment to perform a true serving test.\n",
+        run_dir / "artifacts" / "server_validation.md",
+        "SGLang server launch was validated locally. Run the recorded command on a GPU-capable environment to perform a true serving test.\n",
     )
     append_jsonl(
         run_dir / "metrics.jsonl",

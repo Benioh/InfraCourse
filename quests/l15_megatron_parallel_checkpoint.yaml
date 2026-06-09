@@ -1,20 +1,20 @@
 id: l15_megatron_parallel_checkpoint
-title: Megatron-shaped Distributed Checkpointing
-level: L05.8
-act: 第 1 章：训练框架
-role: Megatron 并行状态学徒
+title: L16 · Megatron Parallel Checkpoint
+level: L16
+act: 第 2 章：训练系统、并行与数据
+role: Checkpoint 恢复学徒
 priority: 核心
 estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - Megatron-LM
   - PyTorch Distributed
+  - MiniInfra
 
 patch:
   description: |
-    实现 Megatron-shaped checkpoint save/load，保存 scheduler_state 和 parallel_state，
-    并在 resume 时校验并行状态兼容性。
+    实现 Megatron-shaped checkpoint save/load：保存 model、optimizer、scheduler、
+    parallel_state 与 latest marker，load 时校验 format 和 parallel_state 兼容性。
   task_md: labs/l15_megatron_parallel_checkpoint/patch/task.md
   starter_file: labs/l15_megatron_parallel_checkpoint/patch/starter/checkpointing.py
   reference_file: labs/l15_megatron_parallel_checkpoint/patch/reference/checkpointing.py
@@ -24,32 +24,605 @@ patch:
   test_kind: checkpoint resume 语义验证
 
 source_reading:
-  - title: Megatron parallel_state
-    repo_path: github_repo/Megatron-LM/megatron/core/parallel_state.py
-    focus: TP/PP/DP/CP/EP group 创建与查询
-  - title: Megatron distributed optimizer
-    repo_path: github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
-    focus: optimizer state 切分、reduce-scatter、all-gather
-  - title: Megatron checkpointing
+  - title: Patch starter
+    repo_path: labs/l15_megatron_parallel_checkpoint/patch/starter/checkpointing.py
+    focus: 学生需要补齐的 save/load 合同
+    highlights:
+      - title: 读 save_checkpoint TODO
+        lines: [16, 28]
+        note: |
+          L16-L23: save 接收目录、iteration、model、optimizer、scheduler 和 parallel state。
+          L24-L27: TODO 要求写 JSON payload、checkpoint 文件和 latest marker。
+          L28: 未实现时抛出 L16 错误提示。
+      - title: 读 load_checkpoint TODO
+        lines: [31, 41]
+        note: |
+          L31-L35: load 接收 checkpoint 目录、expected parallel state 和 strict 标志。
+          L36-L40: TODO 要求读取 marker、校验 format、比较 parallel_state。
+          L41: 未实现时抛出 L16 错误提示。
+  - title: Patch reference
+    repo_path: labs/l15_megatron_parallel_checkpoint/patch/reference/checkpointing.py
+    focus: JSON payload、latest marker 和 topology 校验
+    highlights:
+      - title: 读 save 输入
+        lines: [17, 27]
+        note: |
+          L17-L24: save 的输入就是 checkpoint 最小恢复合同。
+          L25-L27: 负 iteration 会失败，输出目录会被创建。
+      - title: 读 payload
+        lines: [28, 35]
+        note: |
+          L28-L35: payload 保存 format、iteration、model、optimizer、scheduler 和 parallel state。
+      - title: 读文件与 marker
+        lines: [36, 45]
+        note: |
+          L36-L39: checkpoint 文件按 iteration 命名并写入 JSON。
+          L40-L45: latest marker 写入 iteration，并返回两个路径。
+      - title: 读 latest helper
+        lines: [48, 59]
+        note: |
+          L48-L51: 缺少 latest marker 时抛 `CheckpointError`。
+          L52-L56: marker 必须能解析为 integer iteration。
+          L57-L59: marker 指向的 checkpoint 文件必须存在。
+      - title: 读 load format
+        lines: [62, 70]
+        note: |
+          L62-L66: load 接收目录、expected state 和 strict。
+          L67-L70: 从 latest 路径读取 payload，并拒绝未知 format。
+      - title: 读 parallel_state 校验
+        lines: [72, 84]
+        note: |
+          L72-L76: 遍历 expected parallel state，并读取 actual 值。
+          L77-L80: mismatch 时 strict 抛错，non-strict 收集 warning。
+          L82-L84: 返回 payload 时补上 checkpoint_path 和 warnings。
+  - title: Patch tests
+    repo_path: labs/l15_megatron_parallel_checkpoint/patch/tests/test_patch.py
+    focus: 测试覆盖的 checkpoint 不变量
+    highlights:
+      - title: 读 save 测试
+        lines: [30, 42]
+        note: |
+          L30-L35: save 后检查返回的 checkpoint path 和 marker path。
+          L36-L41: 文件名、marker、format、iteration 和 scheduler state 都要正确。
+      - title: 读 roundtrip 测试
+        lines: [44, 51]
+        note: |
+          L44-L48: 同拓扑保存后按 expected parallel state 读取。
+          L49-L51: iteration、model_state 和 warnings 必须符合预期。
+      - title: 读 strict mismatch
+        lines: [54, 58]
+        note: |
+          L54-L56: 先保存原始 topology。
+          L57-L58: strict 下 TP mismatch 必须抛 `CheckpointError`。
+      - title: 读 non-strict mismatch
+        lines: [61, 66]
+        note: |
+          L61-L64: non-strict 下 TP mismatch 仍可读取 payload。
+          L65-L66: warnings 必须包含 TP 相关信息。
+      - title: 读 missing marker
+        lines: [69, 72]
+        note: |
+          L69-L72: 没有 latest marker 时 load 必须失败。
+  - title: Checkpoint drill
+    repo_path: labs/l15_megatron_parallel_checkpoint/scripts/run_checkpoint_drill.py
+    focus: same topology、TP mismatch 和 EP mismatch 的落盘证据
+    highlights:
+      - title: 读实现与配置
+        lines: [54, 62]
+        note: |
+          L54-L56: 选择实现、读取配置并准备 run 目录。
+          L57-L62: 写入命令快照、prediction 和 resolved config。
+      - title: 读保存步骤
+        lines: [64, 74]
+        note: |
+          L64-L65: checkpoint 写入 artifacts 下的 checkpoint 目录。
+          L66-L73: 按配置保存 model、optimizer、scheduler 和 parallel state。
+          L74: save_result 写入 artifact。
+      - title: 读 case 初始化
+        lines: [76, 86]
+        note: |
+          L76-L80: 遍历 expected topology case。
+          L81-L86: outcome 保存 expected state、strict 预期和 warning 预期。
+      - title: 读 strict 与 non-strict
+        lines: [87, 97]
+        note: |
+          L87-L94: strict load 记录是否抛错和错误类型。
+          L95-L97: non-strict load 记录 warnings。
+      - title: 读 case 判定
+        lines: [99, 111]
+        note: |
+          L99-L108: strict 预期和 warning 数共同决定 case 是否通过。
+          L109-L111: 更新整体通过状态并保存当前 case。
+      - title: 读 metrics
+        lines: [113, 123]
+        note: |
+          L113-L123: 每个 case 写入 metrics.jsonl，保留 strict 和 warning 证据。
+      - title: 读 drill summary
+        lines: [125, 128]
+        note: |
+          L125-L128: 将整体结果和所有 case 写入 `artifacts/drill.json`。
+  - title: MiniInfra checkpointing
+    repo_path: mini_infra/megatron/training/checkpointing.py
+    focus: 教学版完整 save/load 实现
+    highlights:
+      - title: 读 save 输入
+        lines: [17, 27]
+        note: |
+          L17-L24: MiniInfra save 接收同样的四类 state。
+          L25-L27: 负 iteration 抛错，并创建输出目录。
+      - title: 读 payload
+        lines: [28, 36]
+        note: |
+          L28-L31: payload 写入 format、iteration 和 created_at。
+          L32-L36: model、optimizer、scheduler 和 parallel state 都进入 payload。
+      - title: 读文件与 marker
+        lines: [37, 43]
+        note: |
+          L37-L40: 写入 `iter_XXXXXXX.json`。
+          L41-L43: 写入 latest marker 并返回路径。
+      - title: 读 latest helper
+        lines: [46, 57]
+        note: |
+          L46-L49: marker 缺失直接抛错。
+          L50-L57: 解析 iteration，并确认 checkpoint 文件存在。
+      - title: 读 load format
+        lines: [60, 68]
+        note: |
+          L60-L65: load 先拿到 latest checkpoint path。
+          L66-L68: 读取 JSON 并校验 format。
+      - title: 读 strict 校验
+        lines: [70, 78]
+        note: |
+          L70-L74: 准备 warnings，并遍历 expected parallel state。
+          L75-L78: 构造 mismatch warning 文本。
+      - title: 读 load 返回
+        lines: [79, 85]
+        note: |
+          L79-L81: strict mismatch 抛 `CheckpointError`，non-strict 收集 warning。
+          L83-L85: 返回 payload、checkpoint_path 和 warnings。
+  - title: MiniInfra distributed optimizer
+    repo_path: mini_infra/megatron/core/optimizer/distrib_optimizer.py
+    focus: optimizer state 为什么也属于 checkpoint 语义
+    highlights:
+      - title: 读 optimizer shard
+        lines: [6, 12]
+        note: |
+          L6-L11: `OptimizerShard` 记录 rank、参数区间和 optimizer state 归属。
+      - title: 读 shard 构造
+        lines: [17, 23]
+        note: |
+          L17-L21: optimizer 保存参数总量、DP size、param group 和 step。
+          L22-L23: 按 DP size 计算每个 shard 的参数区间。
+      - title: 读 checkpoint layout
+        lines: [46, 54]
+        note: |
+          L46-L51: state_dict 保存 step、distributed 标志和 shard 布局。
+          L53-L54: checkpoint_layout 返回每个 shard 的元数据。
+  - title: Megatron checkpoint path
     repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
-    focus: checkpoint metadata 与并行切片
+    focus: 真实 checkpoint 路径、rank 坐标和 latest marker
+    highlights:
+      - title: 读 checkpoint name
+        lines: [197, 206]
+        note: |
+          L197-L201: `get_checkpoint_name` 接收 iteration、TP/PP/EP rank 和 basename。
+          L203-L206: release 和普通 iteration 使用不同目录名。
+      - title: 读 rank 默认值
+        lines: [211, 221]
+        note: |
+          L211-L217: 未传 TP/PP rank 时从 parallel state 查询。
+          L218-L221: EP 是否启用和 EP rank 也来自 parallel state。
+      - title: 读 TP/PP 路径
+        lines: [223, 231]
+        note: |
+          L223-L225: 注释说明 optimizer 路径还可能带 DP rank。
+          L226-L231: 路径包含 tensor rank 和 pipeline rank。
+      - title: 读 EP 路径
+        lines: [233, 236]
+        note: |
+          L233-L236: expert parallel 启用时路径追加 expert rank。
+      - title: 读 latest tracker
+        lines: [312, 317]
+        note: |
+          L312-L317: tracker 文件固定为 `latest_checkpointed_iteration.txt`。
+      - title: 读 metadata parse
+        lines: [326, 338]
+        note: |
+          L326-L333: 读取 tracker 文本。
+          L334-L338: 文本可解析为 iteration，或进入 release 判断。
+      - title: 读 metadata fallback
+        lines: [339, 348]
+        note: |
+          L339-L345: 非整数且不是 release 时退出。
+          L348: 分布式初始化时准备跨 rank 对齐 iteration。
+      - title: 读 metadata all-reduce
+        lines: [348, 360]
+        note: |
+          L348-L352: 用 all-reduce 取各 rank 的最大 iteration。
+          L354-L360: 某个 rank iteration 不一致时打印 warning。
+      - title: 读 metadata offline
+        lines: [363, 368]
+        note: |
+          L363-L367: 离线编辑 checkpoint 时直接使用本地 iteration。
+          L368: 返回 iteration 和 release 标志。
+  - title: Megatron save state dict
+    repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+    focus: 真实 save_checkpoint 如何收集状态和写 marker
+    highlights:
+      - title: 读 sharded metadata
+        lines: [417, 427]
+        note: |
+          L417-L423: metadata 传给 model 和 optimizer 的 sharded_state_dict。
+          L424-L427: 注释强调 metadata 应该语义化，避免单纯版本号。
+      - title: 读 metadata 内容
+        lines: [432, 443]
+        note: |
+          L432-L443: 根据 checkpoint format 和 distributed optimizer 配置写入 sharding type。
+      - title: 读 metadata group
+        lines: [444, 450]
+        note: |
+          L444-L450: metadata 还带上 DP/CP group。
+      - title: 读 save state collection
+        lines: [598, 609]
+        note: |
+          L598-L604: save 阶段准备 state_dict 和 sharded metadata。
+          L605-L609: legacy 路径不使用 sharded metadata。
+      - title: 读 generate_state_dict 调用
+        lines: [610, 619]
+        note: |
+          L610-L619: model、optimizer、scheduler、RNG 和 rerun state 一起进入 state_dict。
+      - title: 读 marker 更新
+        lines: [770, 782]
+        note: |
+          L770-L774: checkpoint 保存后准备更新 latest iteration。
+          L775-L782: local checkpoint 使用 finalize callback。
+      - title: 读 marker 写入
+        lines: [783, 792]
+        note: |
+          L783-L791: 非 local checkpoint 写入 release 或 iteration。
+          L792: 打印时使用 tensor rank。
+      - title: 读 save finalize
+        lines: [830, 835]
+        note: |
+          L830-L835: async 保存把 marker 写入放进 finalize，sync 保存直接执行。
+  - title: Megatron generate_state_dict
+    repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+    focus: 真实 resume state 包含哪些字段
+    highlights:
+      - title: 读函数入口
+        lines: [980, 991]
+        note: |
+          L980-L989: 函数接收 args、model、optimizer、scheduler、RNG 和 rerun state。
+          L991: docstring 明确这是从这些对象生成 state dict。
+      - title: 读 args 与 iteration
+        lines: [993, 999]
+        note: |
+          L993-L999: state_dict 写入 args、checkpoint_version 和 iteration。
+      - title: 读 model sharded state
+        lines: [1000, 1012]
+        note: |
+          L1000-L1004: 多 model chunk 会使用不同 key。
+          L1005-L1012: torch_dist 格式调用 model 的 sharded_state_dict。
+      - title: 读 model normal state
+        lines: [1013, 1016]
+        note: |
+          L1013-L1016: 非 torch_dist 路径使用模型自己的 save checkpoint state。
+      - title: 读 optimizer sharded state
+        lines: [1018, 1030]
+        note: |
+          L1018-L1021: 未禁止保存 optimizer 时进入 optimizer 分支。
+          L1022-L1030: torch_dist 格式调用 optimizer.sharded_state_dict。
+      - title: 读 optimizer 其他格式
+        lines: [1031, 1039]
+        note: |
+          L1031-L1037: fsdp_dtensor 路径补充 metadata 后保存 optimizer。
+          L1038-L1039: 其他格式使用普通 optimizer state_dict。
+      - title: 读 scheduler
+        lines: [1041, 1045]
+        note: |
+          L1041-L1045: optimizer state 和 opt_param_scheduler state 都进入 state_dict。
+      - title: 读 RNG state
+        lines: [1051, 1054]
+        note: |
+          L1051-L1054: 未禁用 RNG 保存时，rng_state 进入 state_dict。
+  - title: Megatron load compatibility
+    repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+    focus: 真实 load_checkpoint 如何处理 TP/PP 和 optimizer metadata
+    highlights:
+      - title: 读 load 入口
+        lines: [1613, 1623]
+        note: |
+          L1613-L1614: load_checkpoint 接收模型、optimizer、scheduler、strict 和 process groups。
+          L1615-L1623: docstring 说明 strict 和 skip_load_to_model_and_opt 的含义。
+      - title: 读 format 判定
+        lines: [1640, 1652]
+        note: |
+          L1640-L1647: 自动探测或 torch_dist 时先加载 base checkpoint。
+          L1649-L1652: 根据 checkpoint type 反推 ckpt_format。
+      - title: 读 ckpt args
+        lines: [1663, 1675]
+        note: |
+          L1663-L1669: 初始化 load kwargs，并从 state_dict 读取 checkpoint args。
+          L1671-L1675: 缺少 TP/PP 信息时打印 warning。
+      - title: 读 TP/PP 对比
+        lines: [1676, 1683]
+        note: |
+          L1676-L1683: checkpoint 与当前运行的 TP/PP 都进入比较。
+      - title: 读 world size 与 mismatch message
+        lines: [1685, 1690]
+        note: |
+          L1685-L1690: world size、DP 和 mismatch message 也被准备好。
+      - title: 读 RNG 兼容
+        lines: [1693, 1705]
+        note: |
+          L1693-L1699: TP/PP 一致且不是 finetune 时才准备加载 RNG。
+          L1700-L1705: TP/PP mismatch 时忽略 RNG 并打印信息。
+      - title: 读 optimizer metadata
+        lines: [1712, 1724]
+        note: |
+          L1712-L1718: 未禁用 optimizer load 时准备生成 optimizer sharded state。
+          L1719-L1724: 旧 checkpoint 缺 metadata 时构造兼容 metadata。
+      - title: 读 optimizer mismatch
+        lines: [1725, 1735]
+        note: |
+          L1725-L1727: 根据旧参数推断 optimizer sharding type。
+          L1728-L1735: TP/PP mismatch 且格式不可 reshard 时直接报错。
+      - title: 读 rerun state 兼容
+        lines: [1757, 1769]
+        note: |
+          L1757-L1766: world size、TP/PP、DP 都一致时才考虑加载 rerun state。
+          L1767-L1769: rerun state 还要通过自身 validate。
+      - title: 读 sharding change warning
+        lines: [1773, 1778]
+        note: |
+          L1773-L1778: world size、TP/PP 或 DP 改变时忽略 rerun state。
+  - title: Megatron DistributedOptimizer
+    repo_path: github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
+    focus: optimizer sharded state dict 的 metadata 语义
+    highlights:
+      - title: 读入口
+        lines: [1336, 1342]
+        note: |
+          L1336-L1342: sharded_state_dict 接收 model sharded state、loading 标记、sharding type 和 metadata。
+      - title: 读 sharding 类型
+        lines: [1343, 1352]
+        note: |
+          L1343-L1346: 具体实现由 metadata 中的 sharding type 选择。
+          L1347-L1352: dp_reshardable 只允许 DP 维度 reshard。
+      - title: 读 fully_reshardable
+        lines: [1353, 1361]
+        note: |
+          L1353-L1358: fully_reshardable 保存为更通用的 optimizer state 表示。
+          L1359-L1361: fsdp_dtensor 是 Megatron FSDP 推荐路径。
+      - title: 读 metadata 默认值
+        lines: [1374, 1383]
+        note: |
+          L1374-L1375: 普通 state dict 参数在 DP rank 0 保存并加载到所有 rank。
+          L1376-L1383: 直接传 sharding_type 时打印弃用 warning。
+      - title: 读 metadata sharding type
+        lines: [1384, 1387]
+        note: |
+          L1384-L1387: 未显式传入时从 metadata 读取 sharding type。
+      - title: 读 state_dict 包装
+        lines: [1408, 1420]
+        note: |
+          L1408-L1410: 先取普通 optimizer state。
+          L1411-L1420: 部分格式把 state 包装成 `ShardedObject`。
+      - title: 读 param_state 选择
+        lines: [1431, 1443]
+        note: |
+          L1431-L1434: dp_reshardable 调用对应 param_state 构造。
+          L1435-L1443: 其他 sharding type 走各自实现。
+      - title: 读 state_dict 返回
+        lines: [1446, 1456]
+        note: |
+          L1446-L1452: 未知 sharding type 抛错。
+          L1454-L1456: param_state 和 sharding type 写回 optimizer state dict。
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l15_megatron_parallel_checkpoint/system_map.md
+    description: L16 在训练可靠性主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l15_megatron_parallel_checkpoint/lecture.md
+    description: 从 checkpoint resume 合同、latest marker、parallel_state 讲到 Megatron metadata。
+  - title: 源码带读讲义
+    path: labs/l15_megatron_parallel_checkpoint/source_walkthrough.md
+    description: 按 patch、MiniInfra、Megatron checkpointing 和 DistributedOptimizer 组织源码阅读路线。
 
 mini_infra_targets:
-  - mini_infra/megatron/core/optimizer/distrib_optimizer.py
   - mini_infra/megatron/training/checkpointing.py
-
-notebooks:
-  - notebooks/n04_tensor_parallel_linear.ipynb
-  - notebooks/n05_pipeline_parallel_bubble.ipynb
-
+  - mini_infra/megatron/core/optimizer/distrib_optimizer.py
+notebooks: []
 tickets:
-  - mgt_tp_mismatch_004
-  - mgt_checkpoint_slow_006
-  - mgt_recompute_tradeoff_007
-
-prereq: l13_moe_ep
-next_lab: l17_megatron_multimodal_data
-
+  - ckpt_missing_marker
+  - ckpt_tp_mismatch
+  - ckpt_ep_introduced
+  - ckpt_resume_lr_jump
+prereq: l14_pipeline_1f1b
+next_lab: l16_resume_after_crash
 gpu_modes:
-  local: CPU 即可
-  cluster: 多卡 checkpoint 转换验证
+  local: CPU patch 和 checkpoint drill
+  cluster: Megatron distributed checkpoint save/load smoke
+
+lesson:
+  opening: |
+    # 第 16 讲：Megatron Parallel Checkpoint
+
+    L16 解决分布式训练恢复的状态合同问题。checkpoint 文件存在，不等于训练可以无缝 resume；TP/PP/DP/EP 拓扑、optimizer shard、scheduler step、RNG 和数据进度都会影响恢复语义。
+
+    Patch 实现一个教学版 Megatron-shaped checkpoint：保存 model、optimizer、scheduler、parallel_state 和 latest marker；加载时校验 format 和 expected parallel_state。它不实现真实 sharded tensor，也不做跨拓扑转换。
+  sections:
+    - title: 课程定位：checkpoint 是训练恢复合同
+      plain_explanation: |
+        L16 属于训练可靠性主线。前面课程讲了训练 step、FSDP2、MoE/EP 和 PP，这些并行配置都会影响 checkpoint 中 shard 的坐标系。一次安全 resume 必须同时恢复模型、优化器、调度器和并行拓扑。
+
+        本讲先把 save/load 的最小合同写清楚，再读 Megatron 如何把 rank 坐标写进 path、如何保存 state_dict、如何用 metadata 选择 distributed optimizer sharding。
+      mental_model: |
+        checkpoint 像训练状态的合同。payload 写明状态内容，latest marker 指向合同版本，parallel_state 写明 shard 坐标系。
+      why_it_matters: |
+        错误 resume 可能不会立刻崩溃，却会让 LR、optimizer 动量、RNG 或 shard 语义错位。训练损失和时间成本都会受影响。
+      source_refs:
+        - title: Megatron checkpoint path
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [197, 206]
+          note: |
+            L197-L201: `get_checkpoint_name` 接收 iteration、TP/PP/EP rank 和 basename。
+            L203-L206: release 和普通 iteration 使用不同目录名。
+        - title: Megatron rank 默认值
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [211, 221]
+          note: |
+            L211-L217: 未传 TP/PP rank 时从 parallel state 查询。
+            L218-L221: EP 是否启用和 EP rank 也来自 parallel state。
+      common_confusions:
+        - 能加载权重就认为完整 resume 成功。
+        - 只比较 world size，不比较 TP/PP/EP/DP 组合。
+        - 忽略 scheduler step 和 optimizer state。
+      checkpoint_questions:
+        - L16 patch 保存了哪些状态？
+        - 为什么 checkpoint path 需要带 rank 坐标？
+
+    - title: Payload 与 latest marker
+      plain_explanation: |
+        Payload 是落盘的训练状态。本关要求保存 format、iteration、model_state、optimizer_state、scheduler_state 和 parallel_state。format 用来拒绝未知版本；iteration 用来恢复训练步；四类 state 对应权重、优化器、学习率调度和并行拓扑。
+
+        Latest marker 是恢复入口。loader 先读 `latest_checkpointed_iteration.txt`，再找到对应 checkpoint 文件。这样可以避免用目录排序猜最新文件，也能在 marker 缺失时明确失败。
+      mental_model: |
+        payload 是箱子里的训练状态，marker 是仓库入口的标签。标签缺失时，不应该凭肉眼猜哪只箱子最新。
+      why_it_matters: |
+        训练目录里可能有多个 iteration 或半成品文件。marker 和 format 让恢复入口和 payload 版本都可验证。
+      source_refs:
+        - title: Reference payload
+          repo_path: labs/l15_megatron_parallel_checkpoint/patch/reference/checkpointing.py
+          lines: [28, 35]
+          note: |
+            L28-L35: payload 保存 format、iteration、model、optimizer、scheduler 和 parallel state。
+        - title: Reference marker
+          repo_path: labs/l15_megatron_parallel_checkpoint/patch/reference/checkpointing.py
+          lines: [36, 45]
+          note: |
+            L36-L39: checkpoint 文件按 iteration 命名并写入 JSON。
+            L40-L45: latest marker 写入 iteration，并返回两个路径。
+        - title: Megatron latest tracker
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [312, 317]
+          note: |
+            L312-L317: tracker 文件固定为 `latest_checkpointed_iteration.txt`。
+      common_confusions:
+        - 用 glob 找最大文件名代替 latest marker。
+        - 忽略 format 字段。
+        - marker 指向的 checkpoint 不存在时继续尝试其他文件。
+      checkpoint_questions:
+        - 本关 payload 必须包含哪些 key？
+        - latest marker 缺失时 loader 应该怎么做？
+
+    - title: Parallel state 兼容性
+      plain_explanation: |
+        parallel_state 描述 checkpoint 的 shard 坐标系。TP 改变会改变权重切分，PP 改变会改变 layer 所属 stage，EP 改变会改变 expert shard，DP 改变会影响 optimizer state 归属。
+
+        L16 的校验方式是逐个比较 expected parallel state。strict 模式下 mismatch 立即抛 `CheckpointError`；non-strict 模式返回 warnings，供转换工具、诊断脚本或 finetune 流程继续读取 payload。
+      mental_model: |
+        parallel_state 是 checkpoint 的坐标系标签。坐标系不一致时，strict resume 应该停下来。
+      why_it_matters: |
+        TP/PP/EP mismatch 常见表现是 tensor shape mismatch、rank 目录缺失、optimizer shard 不兼容或训练继续后数值异常。
+      source_refs:
+        - title: Reference parallel_state 校验
+          repo_path: labs/l15_megatron_parallel_checkpoint/patch/reference/checkpointing.py
+          lines: [72, 84]
+          note: |
+            L72-L76: 遍历 expected parallel state，并读取 actual 值。
+            L77-L80: mismatch 时 strict 抛错，non-strict 收集 warning。
+            L82-L84: 返回 payload 时补上 checkpoint_path 和 warnings。
+        - title: Megatron TP/PP 对比
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [1676, 1683]
+          note: |
+            L1676-L1683: checkpoint 与当前运行的 TP/PP 都进入比较。
+        - title: Megatron mismatch message
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [1685, 1690]
+          note: |
+            L1685-L1690: world size、DP 和 mismatch message 也被准备好。
+        - title: Megatron optimizer mismatch
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [1725, 1735]
+          note: |
+            L1725-L1727: 根据旧参数推断 optimizer sharding type。
+            L1728-L1735: TP/PP mismatch 且格式不可 reshard 时直接报错。
+      common_confusions:
+        - non-strict 时吞掉 mismatch，不返回 warning。
+        - 只检查 TP/PP，忘记 EP/CP 等新并行轴。
+        - 把 checkpoint 转换和直接 resume 混成同一流程。
+      checkpoint_questions:
+        - strict 和 non-strict 的适用场景分别是什么？
+        - 为什么 world size 相同仍可能不兼容？
+
+    - title: Optimizer 与 scheduler 也属于 checkpoint
+      plain_explanation: |
+        model_state 决定当前位置，optimizer_state 决定下一步更新方向和尺度，scheduler_state 决定下一步学习率。缺少 optimizer 或 scheduler 时，训练能继续跑，但已经不再延续同一条优化轨迹。
+
+        Megatron 的 `generate_state_dict` 会把 model、optimizer、opt_param_scheduler、RNG 和 rerun state 都纳入保存逻辑。distributed optimizer 还会根据 metadata 选择 sharding type，决定 optimizer state 是否支持某些 reshard 场景。
+      mental_model: |
+        model 是位置，optimizer 是速度和惯性，scheduler 是油门曲线。resume 需要三者对齐。
+      why_it_matters: |
+        resume 后 LR 跳变、loss 抖动或 optimizer shape mismatch，常常来自 scheduler_state 或 distributed optimizer metadata 不完整。
+      source_refs:
+        - title: Megatron generate_state_dict 入口
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [980, 991]
+          note: |
+            L980-L989: 函数接收 args、model、optimizer、scheduler、RNG 和 rerun state。
+            L991: docstring 明确这是从这些对象生成 state dict。
+        - title: Megatron scheduler
+          repo_path: github_repo/Megatron-LM/megatron/training/checkpointing.py
+          lines: [1041, 1045]
+          note: |
+            L1041-L1045: optimizer state 和 opt_param_scheduler state 都进入 state_dict。
+        - title: DistributedOptimizer sharding
+          repo_path: github_repo/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py
+          lines: [1336, 1342]
+          note: |
+            L1336-L1342: sharded_state_dict 接收 model sharded state、loading 标记、sharding type 和 metadata。
+      common_confusions:
+        - scheduler 可以完全从配置重建。
+        - "`--no-load-optim` 成功就证明完整 resume 安全。"
+        - optimizer state 的 sharding 和 model state 一样简单。
+      checkpoint_questions:
+        - scheduler_state 丢失会导致什么现象？
+        - optimizer sharding metadata 为什么会影响 load 行为？
+
+    - title: Lab 和 drill：把兼容性证据落盘
+      plain_explanation: |
+        Patch-test 验证最小 save/load 合同。drill 在 run 目录中保存 checkpoint，分别测试同拓扑、TP 改变和 EP 改变。每个 case 都记录 strict 是否抛错、non-strict warning 数和 case 是否通过。
+
+        CPU drill 可以证明 JSON 合同和 topology 校验逻辑正确，不能证明真实 sharded tensor 已经能跨拓扑转换。进入 Megatron 集群验证时，还要记录 checkpoint format、rank 路径、distributed optimizer sharding type、RNG 和数据进度。
+      mental_model: |
+        patch 是合同测试，drill 是小型事故演练，真实 Megatron resume 才包含 rank 目录、tensor shard 和通信。
+      why_it_matters: |
+        没有落盘证据，checkpoint 问题很难复盘。L16 要求把 marker、payload、warnings 和 strict 错误都保留下来。
+      source_refs:
+        - title: Patch strict/non-strict 测试
+          repo_path: labs/l15_megatron_parallel_checkpoint/patch/tests/test_patch.py
+          lines: [54, 66]
+          note: |
+            L54-L58: strict 下 TP mismatch 必须抛 `CheckpointError`。
+            L61-L66: non-strict 下 TP mismatch 必须返回 warning。
+        - title: Drill case 判定
+          repo_path: labs/l15_megatron_parallel_checkpoint/scripts/run_checkpoint_drill.py
+          lines: [99, 111]
+          note: |
+            L99-L108: strict 预期和 warning 数共同决定 case 是否通过。
+            L109-L111: 更新整体通过状态并保存当前 case。
+        - title: Drill summary
+          repo_path: labs/l15_megatron_parallel_checkpoint/scripts/run_checkpoint_drill.py
+          lines: [125, 128]
+          note: |
+            L125-L128: 将整体结果和所有 case 写入 `artifacts/drill.json`。
+      common_confusions:
+        - 只跑 patch-test，不跑 topology mismatch drill。
+        - 看见 non-strict 读到 payload，就忽略 warnings。
+        - 用 CPU JSON drill 证明真实 Megatron reshard 已经可用。
+      checkpoint_questions:
+        - drill 的 `all_passed=true` 能证明什么？
+        - 真实 Megatron resume 还需要补哪些证据？

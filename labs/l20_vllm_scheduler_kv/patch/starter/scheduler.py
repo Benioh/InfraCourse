@@ -1,4 +1,4 @@
-"""L07.5 Patch · vLLM-shaped scheduler and KV cache manager."""
+"""L21 Patch · vLLM-shaped scheduler and KV cache manager."""
 
 from __future__ import annotations
 
@@ -26,15 +26,15 @@ class KVCacheManager:
     def allocate_slots(self, request_id: str, num_blocks: int) -> list[int]:
         # TODO(student): allocate the first num_blocks free blocks and mark ownership.
         # Raise RuntimeError("KV cache exhausted") if there are not enough free blocks.
-        raise NotImplementedError("L07.5: implement allocate_slots")
+        raise NotImplementedError("L21: implement allocate_slots")
 
     def free(self, request_id: str) -> None:
         # TODO(student): clear owner_request_id for all blocks owned by request_id.
-        raise NotImplementedError("L07.5: implement free")
+        raise NotImplementedError("L21: implement free")
 
     def snapshot(self) -> dict:
         # TODO(student): return total_blocks, usage, free_blocks, used_blocks.
-        raise NotImplementedError("L07.5: implement snapshot")
+        raise NotImplementedError("L21: implement snapshot")
 
 
 @dataclass
@@ -72,4 +72,4 @@ class Scheduler:
         # TODO(student): admit waiting requests while running capacity and KV blocks allow.
         # TODO(student): finished running requests free their KV blocks.
         # TODO(student): unfinished running requests are scheduled for one decode step.
-        raise NotImplementedError("L07.5: implement Scheduler.schedule")
+        raise NotImplementedError("L21: implement Scheduler.schedule")

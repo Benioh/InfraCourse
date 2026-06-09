@@ -1,4 +1,4 @@
-"""L01.7 Patch tests · GPU-only. Auto-skip on CPU."""
+"""L05 Patch tests · GPU-only. Auto-skip on CPU."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.gpu
 
 def _skip_if_no_cuda():
     if not torch.cuda.is_available():
-        pytest.skip("no CUDA available — L01.7 needs GPU")
+        pytest.skip("no CUDA available — L05 needs GPU")
 
 
 def test_matches_torch_softmax_fp32():

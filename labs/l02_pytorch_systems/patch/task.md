@@ -1,4 +1,4 @@
-# L01 Patch · 显存账本（Memory Accounting）
+# L02 Patch · 显存账本（Memory Accounting）
 
 ## 你要交付什么
 
@@ -60,5 +60,5 @@ make patch-test M=l02_pytorch_systems
 ## 写完之后你能做什么
 
 - 面试遇到"7B 模型用 Adam 训练需要多少显存？" 你能立刻拆分出 params + grads + optimizer + activations 四项。
-- L05 Megatron 优化、L05.5 MoE、L11 SLiME 权重同步都会复用这套账本。
+- 后续 Megatron 优化、MoE 和 SLiME 权重同步都会复用这套账本。
 - Capstone Stage A 训练 projector 时直接用这套函数算显存预算。

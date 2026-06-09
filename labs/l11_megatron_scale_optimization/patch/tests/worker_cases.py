@@ -1,4 +1,4 @@
-"""Per-rank assertions for L05 BucketedManualDDP."""
+"""Per-rank assertions for L12 BucketedManualDDP."""
 
 from __future__ import annotations
 

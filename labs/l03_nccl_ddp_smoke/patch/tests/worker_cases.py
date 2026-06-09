@@ -1,4 +1,4 @@
-"""Per-rank assertions for L01.5 ManualDDP tests."""
+"""Per-rank assertions for L04 ManualDDP tests."""
 
 from __future__ import annotations
 

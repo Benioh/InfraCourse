@@ -1,0 +1,377 @@
+id: l12_fsdp2_llama
+title: L13 · FSDP2 与 Llama Block 分片训练
+level: L13
+act: 第 2 章：训练系统、并行与数据
+role: FSDP2 训练学徒
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+frameworks:
+  - PyTorch Distributed
+  - TorchTitan
+  - MiniInfra
+
+patch:
+  description: |
+    实现 `wrap_transformer_blocks_fsdp2`：遍历 Llama-style 模型中的 transformer block，
+    先对每个 block 调用 `fully_shard`，再对 root model 调用 `fully_shard`，并原样传递
+    `MixedPrecisionPolicy`、`reshard_after_forward` 和 `skip` 过滤规则。
+  task_md: labs/l12_fsdp2_llama/patch/task.md
+  starter_file: labs/l12_fsdp2_llama/patch/starter/fsdp2_wrap.py
+  reference_file: labs/l12_fsdp2_llama/patch/reference/fsdp2_wrap.py
+  test_command: make patch-test M=l12_fsdp2_llama
+  status_file: labs/l12_fsdp2_llama/patch/.last_run.json
+  test_count: 7
+  test_kind: FSDP2 wrap 行为合同验证
+
+source_reading:
+  - title: Patch starter
+    repo_path: labs/l12_fsdp2_llama/patch/starter/fsdp2_wrap.py
+    focus: 学生需要补齐的 wrap 合同
+    highlights:
+      - title: 读 WrapReport
+        lines: [21, 27]
+        note: |
+          L21-L27: `WrapReport` 定义 wrapped blocks、root 状态、policy 摘要和 reshard 配置。
+      - title: 读 policy 摘要
+        lines: [29, 37]
+        note: |
+          L29-L37: `_summarize_policy` 把 dtype policy 转成可写入 report 的字典。
+      - title: 读 wrap TODO
+        lines: [40, 52]
+        note: |
+          L40-L48: 函数签名给出 model、block_cls、policy、reshard、skip 和测试注入入口。
+          L49-L52: TODO 要求按 block class 和 skip 规则筛选模块。
+  - title: Patch reference
+    repo_path: labs/l12_fsdp2_llama/patch/reference/fsdp2_wrap.py
+    focus: 参考实现中的 block-first/root-last 顺序
+    highlights:
+      - title: 读 fully_shard 解析
+        lines: [31, 36]
+        note: |
+          L31-L36: `_resolve_fully_shard` 支持测试注入 spy，也支持生产导入 PyTorch API。
+      - title: 读 block wrap
+        lines: [48, 60]
+        note: |
+          L48-L50: 准备 `fully_shard` 并按 `named_modules()` 遍历模型。
+          L51-L56: 跳过 root、非 block 模块和 skip 命中的模块。
+          L57-L60: 把 reshard 和 policy 透传给 block 的 `fully_shard`。
+      - title: 读 root wrap 和 report
+        lines: [61, 71]
+        note: |
+          L61: 记录被 wrap 的 block 名称。
+          L62-L65: root 使用同样 kwargs，并在 block 之后 wrap。
+          L66-L71: 返回可检查的 `WrapReport`。
+  - title: Patch tests
+    repo_path: labs/l12_fsdp2_llama/patch/tests/test_patch.py
+    focus: 测试如何约束 wrap 行为
+    highlights:
+      - title: 读 spy fully_shard
+        lines: [53, 58]
+        note: |
+          L53-L58: spy 只记录模块类名和 kwargs，不触发真实 FSDP2 runtime。
+      - title: 读 block 数量测试
+        lines: [61, 69]
+        note: |
+          L61-L67: 测试构造 TinyLlama，并注入 spy。
+          L68-L69: 验证 block 名称顺序和 block wrap 次数。
+      - title: 读 root 顺序测试
+        lines: [72, 80]
+        note: |
+          L72-L78: 调用 wrap 后检查 spy 记录。
+          L79-L80: root 必须是最后一次调用，前面都应该是 block。
+      - title: 读 policy 透传测试
+        lines: [83, 93]
+        note: |
+          L83-L90: 传入 mock policy 并调用 wrap。
+          L91-L93: 每次 `fully_shard` 都必须收到同一个 policy 对象。
+  - title: FSDP2 smoke script
+    repo_path: labs/l12_fsdp2_llama/scripts/run_fsdp2_smoke.py
+    focus: dryrun 和 train smoke 的 artifact 生成路径
+    highlights:
+      - title: 读实现选择
+        lines: [38, 50]
+        note: |
+          L38-L46: `_impl` 根据 `IMPL` 选择 starter 或 reference。
+          L47-L50: 导入失败或未实现时回退到 reference。
+      - title: 读教学模型
+        lines: [53, 65]
+        note: |
+          L53-L57: `_build_model` 内部定义教学版 transformer block。
+          L58-L65: block 包含 attention、norm、MLP 和第二个 norm。
+      - title: 读 dryrun artifact
+        lines: [140, 152]
+        note: |
+          L140-L147: `wrap_only` 模式用 spy 调用 wrap。
+          L148-L152: acceptance 检查 wrapped block 数量，并准备写 report。
+      - title: 读 GPU policy 和 wrap
+        lines: [192, 203]
+        note: |
+          L192-L196: GPU smoke 创建 `MixedPrecisionPolicy`。
+          L197-L203: 真实 `fully_shard` 进入 wrap 函数。
+  - title: TorchTitan Llama parallelize
+    repo_path: github_repo/torchtitan/torchtitan/models/llama3/parallelize.py
+    focus: 生产 Llama 模型如何应用 TP、AC、compile 和 FSDP2
+    highlights:
+      - title: 读 parallelize_llama 入口
+        lines: [35, 47]
+        note: |
+          L35-L44: `parallelize_llama` 接收模型、并行维度、训练配置和输出目录。
+          L45-L47: docstring 说明它会应用 TP、activation checkpoint、compile 和 data parallelism。
+      - title: 读 FSDP 调用入口
+        lines: [92, 102]
+        note: |
+          L92-L93: 选择 data parallel mesh。
+          L94-L102: 把 dtype、PP 状态、CPU offload 和 reshard policy 传给 `apply_fsdp`。
+      - title: 读 policy 和 config
+        lines: [141, 146]
+        note: |
+          L141-L145: `apply_fsdp` 创建 `MixedPrecisionPolicy`。
+          L146: `fsdp_config` 把 mesh 和 policy 放进统一 kwargs。
+      - title: 读 block-first/root-last
+        lines: [187, 194]
+        note: |
+          L187-L192: TorchTitan 对每个 transformer block 调用 `fully_shard`。
+          L194: block 处理完后再 wrap root model。
+  - title: TorchTitan FSDP helper
+    repo_path: github_repo/torchtitan/torchtitan/distributed/fsdp.py
+    focus: reshard_after_forward policy
+    highlights:
+      - title: 读 policy 函数
+        lines: [28, 39]
+        note: |
+          L28-L30: 函数接收 policy 字符串和 PP 是否启用。
+          L31-L39: docstring 明确返回值是 reshard 布尔开关。
+      - title: 读 default 分支
+        lines: [40, 48]
+        note: |
+          L40-L45: `"always"` 和 `"never"` 直接映射成 True/False。
+          L46-L48: `"default"` 在 PP 启用时关闭 reshard，避免每个 microbatch 重复 all-gather。
+  - title: TorchTitan checkpoint manager
+    repo_path: github_repo/torchtitan/torchtitan/components/checkpoint.py
+    focus: FSDP2 训练恢复的 state dict 边界
+    highlights:
+      - title: 读 ModelWrapper state dict
+        lines: [62, 71]
+        note: |
+          L62-L65: `ModelWrapper` 包装单个或多个 model part。
+          L67-L71: `_get_state_dict` 通过 `get_model_state_dict` 收集模型状态。
+      - title: 读 load_state_dict
+        lines: [76, 85]
+        note: |
+          L76-L82: `set_model_state_dict` 把传入 state dict 写回模型。
+          L83-L85: 写回后刷新缓存，避免旧 state dict 继续被使用。
+      - title: 读 PP checkpoint 边界
+        lines: [122, 134]
+        note: |
+          L122-L126: checkpoint manager 负责训练 checkpoint 管理。
+          L127-L134: docstring 说明 PP optimizer state 可能因 rank/chunk layout 发生冲突。
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l12_fsdp2_llama/system_map.md
+    description: L13 在训练系统分片主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l12_fsdp2_llama/lecture.md
+    description: 从 Data Parallel 显存重复、FSDP2 wrap 粒度、reshard、mixed precision 讲到 TorchTitan 对照。
+  - title: 源码带读讲义
+    path: labs/l12_fsdp2_llama/source_walkthrough.md
+    description: 按 patch、测试、smoke、TorchTitan parallelize、FSDP helper 和 checkpoint 组织源码阅读路线。
+
+mini_infra_targets: []
+notebooks: []
+tickets:
+  - fsdp2_uneven_shard
+  - fsdp2_mp_policy_dtype_mismatch
+prereq: l11_megatron_scale_optimization
+next_lab: l13_moe_ep
+gpu_modes:
+  local: CPU dryrun
+  cluster: 多 GPU FSDP2 train smoke
+
+lesson:
+  opening: |
+    # 第 13 讲：FSDP2 与 Llama Block 分片训练
+
+    L13 解决训练扩展里的参数状态显存问题。Data Parallel 会在每个 rank 上复制完整模型、梯度和 optimizer state；模型变大后，单卡显存可能先于算力成为瓶颈。FSDP2 用 `fully_shard` 把模块参数按 data parallel rank 分片，需要完整参数时再 all-gather，用通信和 reshard 策略换显存。
+
+    本关 patch 只做一个最小编排：先 wrap 每个 transformer block，再 wrap root model，并原样传递 mixed precision 和 `reshard_after_forward`。完整讲义会把这个最小合同放回 TorchTitan Llama 训练路径里，说明 CPU dryrun、GPU smoke 和 checkpoint 分别能证明什么。
+  sections:
+    - title: 课程定位：FSDP2 解决参数状态重复
+      plain_explanation: |
+        Data Parallel 增加 rank 数可以提高数据吞吐，但每张卡仍持有完整参数、完整梯度和完整 optimizer state。AdamW 训练还会保存一阶动量、二阶动量，有时还有 fp32 master weight。模型到 1B 或 7B 后，这些状态会占掉大量显存。
+
+        FSDP2 的做法是把模块状态按 data parallel rank 分片。计算某个模块时临时 all-gather 完整参数，计算结束后按配置 reshard。它降低单卡参数状态显存，代价是增加通信和 runtime 编排复杂度。
+      mental_model: |
+        DDP 像每张卡都背完整工具箱；FSDP2 像每张卡只背一部分工具，需要某个工具时临时拼齐，用完再拆回去。
+      why_it_matters: |
+        训练大模型时，显存瓶颈常常来自参数、梯度和 optimizer state 的重复。理解 FSDP2 后，学生才能判断 OOM 来自模型状态、激活还是 checkpoint layout。
+      source_refs:
+        - title: TorchTitan parallelize 入口
+          repo_path: github_repo/torchtitan/torchtitan/models/llama3/parallelize.py
+          lines: [35, 47]
+          note: |
+            L35-L44: `parallelize_llama` 接收模型、并行配置、训练配置和输出目录。
+            L45-L47: docstring 说明它会应用 TP、activation checkpoint、compile 和 data parallelism。
+        - title: Patch task signature
+          repo_path: labs/l12_fsdp2_llama/patch/starter/fsdp2_wrap.py
+          lines: [40, 48]
+          note: |
+            L40-L48: patch 的输入只包含模型、block 类型、policy、reshard、skip 和测试注入入口。
+      common_confusions:
+        - 把 FSDP2 当成 DDP 的别名，忽略参数状态分片。
+        - 只看参数显存，漏看 activation 和 optimizer state。
+        - 用 CPU dryrun 结论判断真实 GPU 显存收益。
+      checkpoint_questions:
+        - FSDP2 降低的是哪类显存重复？
+        - 它为什么会引入 all-gather？
+        - L13 和 L12 的 data parallel 通信问题有什么关系？
+
+    - title: 核心机制：block-first/root-last 的 wrap 粒度
+      plain_explanation: |
+        `fully_shard(module)` 把一个模块变成 FSDP2 分片单元。这个单元内部的参数按 rank 分片，需要执行该模块时再临时拼齐。wrap 粒度决定 unshard/reshard 的边界，因此直接影响显存峰值和通信次数。
+
+        对 Llama-style 模型，常见做法是先 wrap 每个 transformer block，再 wrap root model。block 是主要计算单元，按 block wrap 可以让 runtime 在 block 粒度上管理参数生命周期；root wrap 负责 embedding、norm、head 等剩余参数。本关测试专门检查 root 是最后一次 wrap。
+      mental_model: |
+        block wrap 像按楼层分区供电；root wrap 像最后接总闸，确保没有剩余模块漏掉。
+      why_it_matters: |
+        wrap 顺序错会改变 FSDP2 单元边界。边界错了，显存、通信、checkpoint key 和调试证据都会偏离预期。
+      source_refs:
+        - title: Reference block 遍历
+          repo_path: labs/l12_fsdp2_llama/patch/reference/fsdp2_wrap.py
+          lines: [48, 60]
+          note: |
+            L48-L50: 解析 `fully_shard` 并遍历 `named_modules()`。
+            L51-L56: 跳过 root、非 block 和 skip 命中的模块。
+            L57-L60: 对每个 block 调用 `fully_shard`。
+        - title: Reference root wrap
+          repo_path: labs/l12_fsdp2_llama/patch/reference/fsdp2_wrap.py
+          lines: [61, 71]
+          note: |
+            L61: 记录 block 名称。
+            L62-L65: root 使用同样 kwargs，并在 block 之后 wrap。
+            L66-L71: 返回 report，供测试和 drill 检查。
+        - title: TorchTitan block/root 顺序
+          repo_path: github_repo/torchtitan/torchtitan/models/llama3/parallelize.py
+          lines: [187, 194]
+          note: |
+            L187-L192: TorchTitan 循环对每个 transformer block 调用 `fully_shard`。
+            L194: block 处理完后再 wrap root model。
+      common_confusions:
+        - 认为 wrap 顺序不影响 FSDP2 runtime。
+        - 只 wrap root，导致 block 粒度的参数生命周期消失。
+        - 过度切碎模块，增加小单元通信和调度开销。
+      checkpoint_questions:
+        - 为什么 root 要最后 wrap？
+        - block 粒度太粗或太细分别有什么问题？
+        - "`skip` callback 会改变哪些 report 字段？"
+
+    - title: Reshard 与 MixedPrecisionPolicy
+      plain_explanation: |
+        FSDP2 执行模块时需要完整参数。`reshard_after_forward=True` 表示 forward 后把完整参数释放回 shard 状态，这能降低显存峰值；代价是 backward 需要参数时可能再次 all-gather。TorchTitan 把这个选择抽成 policy，因为 pipeline parallel 下频繁 reshard 可能造成额外 microbatch 通信。
+
+        `MixedPrecisionPolicy` 控制 FSDP2 单元内部的 dtype 规则。`param_dtype` 影响参数参与计算的精度，`reduce_dtype` 影响梯度通信或规约精度，`output_dtype` 影响模块输出。patch 必须把 policy 对象原样传给每个 `fully_shard` 调用。
+      mental_model: |
+        reshard 是“用完就拆”的显存策略；mixed precision 是“用什么 dtype 计算和通信”的数值策略。
+      why_it_matters: |
+        这两个配置经常决定训练是否 OOM、loss 是否稳定、通信是否符合预期。它们必须出现在配置和 report 里。
+      source_refs:
+        - title: TorchTitan policy 创建
+          repo_path: github_repo/torchtitan/torchtitan/models/llama3/parallelize.py
+          lines: [141, 146]
+          note: |
+            L141-L145: `apply_fsdp` 用训练配置创建 `MixedPrecisionPolicy`。
+            L146: `fsdp_config` 把 mesh 和 policy 统一传入 FSDP2。
+        - title: Reshard policy helper
+          repo_path: github_repo/torchtitan/torchtitan/distributed/fsdp.py
+          lines: [40, 48]
+          note: |
+            L40-L45: `"always"` 和 `"never"` 直接映射为 True/False。
+            L46-L48: `"default"` 在 PP 启用时关闭 forward 后 reshard。
+        - title: Policy 透传测试
+          repo_path: labs/l12_fsdp2_llama/patch/tests/test_patch.py
+          lines: [83, 93]
+          note: |
+            L83-L90: 测试传入 mock mixed precision policy。
+            L91-L93: 每次 spy 调用都必须收到同一个 policy 对象。
+      common_confusions:
+        - 把 `reshard_after_forward=True` 当成无代价优化。
+        - 只记录 bf16，不记录 `reduce_dtype` 和 `output_dtype`。
+        - 在 wrapper 里重新创建 policy，导致模块间配置不一致。
+      checkpoint_questions:
+        - reshard 的显存收益和通信代价分别是什么？
+        - "`param_dtype` 和 `reduce_dtype` 分别影响什么？"
+        - 为什么 PP 场景会改变默认 reshard 选择？
+
+    - title: 工程验证：patch-test、dryrun 和 GPU smoke
+      plain_explanation: |
+        本关 patch-test 的 CPU 部分使用 spy `fully_shard`，检查调用顺序、block 名称、policy 透传、skip 过滤和 reshard 默认值。它不初始化真实 process group，因此不能证明参数已经被实际分片。
+
+        `run_fsdp2_smoke.py` 的 CPU dryrun 会生成 `wrap_report.json` 和 `metrics.jsonl`，证明配置、wrapped block 数量和 report 格式正确。有 CUDA 时，train smoke 会使用真实 `fully_shard`，跑 forward、backward、optimizer step，并记录 loss 和 peak memory。
+      mental_model: |
+        patch-test 检查编排，dryrun 检查 artifact，GPU smoke 才开始检查真实 runtime。
+      why_it_matters: |
+        把这三类证据混在一起，会把“函数调用顺序正确”误写成“显存收益已验证”。
+      source_refs:
+        - title: Spy fully_shard
+          repo_path: labs/l12_fsdp2_llama/patch/tests/test_patch.py
+          lines: [53, 58]
+          note: |
+            L53-L58: spy 只记录类名和 kwargs，不触发真实 FSDP2 runtime。
+        - title: Dryrun wrap report
+          repo_path: labs/l12_fsdp2_llama/scripts/run_fsdp2_smoke.py
+          lines: [140, 152]
+          note: |
+            L140-L147: `wrap_only` 模式使用 spy 调用 wrap。
+            L148-L152: acceptance 检查 wrapped block 数量。
+        - title: Train metrics
+          repo_path: labs/l12_fsdp2_llama/scripts/run_fsdp2_smoke.py
+          lines: [213, 224]
+          note: |
+            L213-L219: 每步生成 synthetic token、计算 loss 并 backward。
+            L220-L224: optimizer step 后记录 loss 和 peak memory。
+      common_confusions:
+        - 把 CPU dryrun 当成真实 FSDP2 显存测试。
+        - 只看测试通过，没有查看 `wrap_report.json`。
+        - 比较 peak memory 时不记录模型规模、seq length、micro batch 和 dtype。
+      checkpoint_questions:
+        - CPU patch-test 和 GPU smoke 分别证明什么？
+        - "`wrap_report.json` 应包含哪些字段？"
+        - 讨论显存时必须记录哪些条件？
+
+    - title: Checkpoint 与恢复边界
+      plain_explanation: |
+        FSDP2 训练恢复不能只看 model weights。真实训练 checkpoint 还包含 optimizer、lr scheduler、dataloader 和 train state；如果叠加 pipeline parallel，不同 pp rank 和 model chunk 的 optimizer state 还可能出现 layout 和 key 关系。
+
+        TorchTitan 用 `ModelWrapper` 调用 `get_model_state_dict` 和 `set_model_state_dict` 处理模型状态，checkpoint manager 负责把多类 state 放进统一恢复路径。本关 GPU 测试只做小模型 state dict 往返，不能覆盖所有分布式恢复场景。
+      mental_model: |
+        model state dict 是恢复拼图的一块；optimizer、scheduler、数据进度和并行 layout 是其他拼图。
+      why_it_matters: |
+        分片训练中，world size、PP chunk、optimizer flatten 和 dtype 都可能影响恢复。缺少 checkpoint 证据时，训练中断后的恢复风险很高。
+      source_refs:
+        - title: ModelWrapper state dict
+          repo_path: github_repo/torchtitan/torchtitan/components/checkpoint.py
+          lines: [62, 71]
+          note: |
+            L62-L65: `ModelWrapper` 统一包装一个或多个 model part。
+            L67-L71: `_get_state_dict` 通过 `get_model_state_dict` 收集模型状态。
+        - title: ModelWrapper load
+          repo_path: github_repo/torchtitan/torchtitan/components/checkpoint.py
+          lines: [76, 85]
+          note: |
+            L76-L82: `set_model_state_dict` 把 state dict 写回模型。
+            L83-L85: 写回后刷新缓存 state dict。
+        - title: PP checkpoint 边界
+          repo_path: github_repo/torchtitan/torchtitan/components/checkpoint.py
+          lines: [122, 134]
+          note: |
+            L122-L126: checkpoint manager 管理训练 checkpoint。
+            L127-L134: docstring 说明 PP optimizer state 会出现 rank/chunk layout 问题。
+      common_confusions:
+        - 认为保存模型参数就等于训练可恢复。
+        - 忽略 optimizer state 与 world size、PP chunk 的关系。
+        - 用小模型 state dict 往返替代真实分布式 checkpoint 验证。
+      checkpoint_questions:
+        - FSDP2 恢复为什么要检查 optimizer state？
+        - PP 会给 checkpoint layout 带来什么额外问题？
+        - 本关 GPU state dict 测试没有覆盖哪些生产边界？

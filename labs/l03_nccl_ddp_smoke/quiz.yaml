@@ -1,5 +1,5 @@
 mission: l03_nccl_ddp_smoke
-title: L01.5 Quiz · DDP 数据并行核心概念
+title: L04 Quiz · DDP 数据并行核心概念
 pass_threshold: 1.0
 description: |
   这 5 题打中"PyTorch DDP 怎么工作、为什么这么工作"最容易混淆的点。
@@ -7,18 +7,34 @@ description: |
   还没建立起 mental model。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L04 在分布式训练主线中的位置
+    kind: doc
+    path: labs/l03_nccl_ddp_smoke/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从梯度同步问题讲到 ManualDDP
+    kind: doc
+    path: labs/l03_nccl_ddp_smoke/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、worker 和 collectives 阅读
+    kind: doc
+    path: labs/l03_nccl_ddp_smoke/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l03_nccl_ddp_smoke/patch/task.md
-  - title: 跑 notebook n03 · DDP collectives
-    kind: notebook
-    path: notebooks/n03_ddp_collectives.ipynb
-  - title: 读 PyTorch DDP 源码 reducer.cpp 注释
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 TorchTitan parallel dims
     kind: source
     path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
-  - title: 读 mini_infra distributed/collectives 实现
+    estimate_min: 10
+  - title: 对照 MiniInfra collectives
     kind: source
     path: mini_infra/distributed/collectives.py
+    estimate_min: 10
 
 questions:
   - id: q1_what_ddp_syncs
@@ -46,7 +62,7 @@ questions:
       optimizer.step() 是各 rank 自己跑，不需要再同步。
 
       这就是为什么 DDP 训练时 optimizer state 在每个 rank 都有完整一份——
-      ZeRO/Distributed Optimizer (L05) 的核心 insight 就是"既然 optimizer state 重复，
+      ZeRO/Distributed Optimizer (L06) 的核心 insight 就是"既然 optimizer state 重复，
       何不把它切到不同 rank？"
 
   - id: q2_divide_by_world_size

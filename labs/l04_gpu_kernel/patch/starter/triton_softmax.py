@@ -1,5 +1,5 @@
 """
-L01.7 Patch · Triton 行 softmax
+L05 Patch · Triton 行 softmax
 
 填空规则：
 - TODO(student) 必须自己写
@@ -67,4 +67,4 @@ def triton_softmax(x: torch.Tensor) -> torch.Tensor:
     #        BLOCK_SIZE=BLOCK_SIZE,
     #      )
     #   5. return output
-    raise NotImplementedError("L01.7 Patch: implement triton_softmax")
+    raise NotImplementedError("L05 Patch: implement triton_softmax")

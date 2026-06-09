@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.backend.ai_client import build_system_prompt, stream_response
 from app.backend.ai_config import all_providers
@@ -30,6 +30,7 @@ from app.backend.repository import (
     quiz_status,
     report_payload,
     source_map_payload,
+    source_asset_path,
     source_payload,
     source_tree_payload,
     starter_payload,
@@ -329,6 +330,19 @@ def source(path: str) -> dict[str, Any]:
             status_code=400,
             detail=f"path is a directory; use /api/source/tree?dir={path}",
         ) from exc
+
+
+@app.get("/api/assets")
+def source_asset(path: str) -> FileResponse:
+    try:
+        asset_path, media_type = source_asset_path(path)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IsADirectoryError as exc:
+        raise HTTPException(status_code=400, detail=f"path is a directory: {path}") from exc
+    return FileResponse(asset_path, media_type=media_type)
 
 
 @app.get("/api/source/tree")

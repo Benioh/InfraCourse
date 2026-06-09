@@ -1,0 +1,871 @@
+id: l25_serve_eval_lm_eval
+title: L26 · Serving Eval：OpenAI-Compatible GSM8K Harness
+level: L26
+act: 第 3 章：推理服务
+role: Serving 质量评测学员
+priority: 核心
+estimated_minutes: 120
+no_gpu_friendly: true
+frameworks:
+- PyTorch
+- MiniInfra
+- vLLM
+- SGLang
+patch:
+  description: |
+    实现最小 evaluation harness：抽取数字、计算 exact/numeric 指标、构造 few-shot prompt、
+    调用 `client.complete()`，并返回每样本记录和聚合指标。
+  task_md: labs/l25_serve_eval_lm_eval/patch/task.md
+  starter_file: labs/l25_serve_eval_lm_eval/patch/starter/eval_harness.py
+  reference_file: labs/l25_serve_eval_lm_eval/patch/reference/eval_harness.py
+  test_command: make patch-test M=l25_serve_eval_lm_eval
+  status_file: labs/l25_serve_eval_lm_eval/patch/.last_run.json
+  test_count: 7
+  test_kind: Evaluation harness 行为合同验证
+source_reading:
+- title: Patch starter
+  repo_path: labs/l25_serve_eval_lm_eval/patch/starter/eval_harness.py
+  focus: 五个待实现函数的输入输出合同
+  highlights:
+  - title: number extraction
+    lines:
+    - 9
+    - 13
+    note: |
+      L9-L10: `extract_first_number` 要返回第一个格式化数字。
+      L11-L13: TODO 指定正则、清理符号和未实现错误。
+  - title: scorers
+    lines:
+    - 16
+    - 23
+    note: |
+      L16-L18: exact scorer 只做 strip/lower 后比较。
+      L21-L23: numeric scorer 要处理任一边没有数字的边界。
+  - title: prompt builder
+    lines:
+    - 26
+    - 33
+    note: |
+      L26-L30: prompt builder 接收当前 question、shots 和 system。
+      L31-L33: TODO 要求 shots 顺序稳定，并以 `Answer:` 结尾。
+  - title: run evaluation
+    lines:
+    - 36
+    - 46
+    note: |
+      L36-L41: `run_evaluation` 接收 items、client、shot 数和 max tokens。
+      L42-L46: TODO 要求切分 shots/eval items、调用 client、聚合指标和 samples。
+- title: Patch reference
+  repo_path: labs/l25_serve_eval_lm_eval/patch/reference/eval_harness.py
+  focus: 最小正确 harness 的行为和边界
+  highlights:
+  - title: number regex
+    lines:
+    - 8
+    - 14
+    note: |
+      L8: 正则允许符号、货币符号、千分位、小数和百分号。
+      L11-L14: 空字符串或无匹配时返回 None。
+  - title: number cleaning
+    lines:
+    - 15
+    - 22
+    note: |
+      L15-L18: 取第一个匹配并清理 `$`、`,`、`%`。
+      L19-L22: 转 float 失败时返回 None。
+  - title: scorers
+    lines:
+    - 25
+    - 34
+    note: |
+      L25-L26: exact scorer 做 strip/lower 比较。
+      L29-L34: numeric scorer 抽取两边数字，并按容差比较。
+  - title: few-shot prompt
+    lines:
+    - 37
+    - 49
+    note: |
+      L37-L42: prompt 从 system 和空行开始。
+      L43-L49: shots 按顺序写入，最后追加当前 question 和 `Answer:`。
+  - title: evaluation setup
+    lines:
+    - 52
+    - 64
+    note: |
+      L52-L59: 样本数不足时抛错。
+      L60-L64: shots、eval_items、samples 和计数器初始化。
+  - title: sample scoring
+    lines:
+    - 65
+    - 69
+    note: |
+      L65-L69: 每条 eval item 构造 prompt、调用 client、计算两个指标。
+  - title: sample record
+    lines:
+    - 70
+    - 78
+    note: |
+      L70-L78: 每样本记录 question、reference、prediction 和命中标记。
+  - title: aggregate
+    lines:
+    - 79
+    - 87
+    note: |
+      L79-L81: 两个计数器累加，`n` 是 eval_items 数量。
+      L82-L87: 返回 exact、first_number、n_total 和 samples。
+- title: Patch tests
+  repo_path: labs/l25_serve_eval_lm_eval/patch/tests/test_patch.py
+  focus: 数字格式、scorer、prompt 顺序和 stub 聚合
+  highlights:
+  - title: impl selector
+    lines:
+    - 16
+    - 17
+    note: |
+      L16-L17: `IMPL` 选择 starter 或 reference 包。
+  - title: number tests
+    lines:
+    - 20
+    - 31
+    note: |
+      L20-L24: 测试普通整数、小数和无数字。
+      L27-L31: 测试负数、千分位和百分号。
+  - title: scorer tests
+    lines:
+    - 34
+    - 45
+    note: |
+      L34-L38: exact match 覆盖空格、大小写和错误答案。
+      L41-L45: numeric match 覆盖格式差异、无数字和容差。
+  - title: prompt order
+    lines:
+    - 48
+    - 57
+    note: |
+      L48-L54: 构造两条 shots 和当前 question。
+      L55-L57: 断言 Q1、Q2、Q3 顺序、结尾和 system。
+  - title: stub all correct client
+    lines:
+    - 60
+    - 69
+    note: |
+      L60-L69: Stub 每次返回 `Answer: 42`。
+  - title: stub all correct assertions
+    lines:
+    - 71
+    - 78
+    note: |
+      L71-L78: n_shots=2 时应评测 4 条，numeric match 为 1.0。
+  - title: partial correct client
+    lines:
+    - 81
+    - 89
+    note: |
+      L81-L89: Stub 依次返回 41、42、43、42。
+  - title: partial correct assertions
+    lines:
+    - 91
+    - 98
+    note: |
+      L91-L98: n_total 为 4，numeric match 为 0.5。
+- title: L26 run_eval script
+  repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+  focus: 配置、client、artifact 和 acceptance gate
+  highlights:
+  - title: implementation selector
+    lines:
+    - 38
+    - 46
+    note: |
+      L38-L46: 脚本通过 `IMPL` 选择 starter 或 reference，导入失败时 fallback 到 reference。
+  - title: toy dataset
+    lines:
+    - 49
+    - 60
+    note: |
+      L49-L54: toy GSM8K-style 数据由确定性加法生成。
+      L55-L60: 每条 item 保持 question/answer 字段。
+  - title: stub client
+    lines:
+    - 63
+    - 72
+    note: |
+      L63-L68: StubClient 从 prompt 找最后一道加法题。
+      L69-L72: 找到题目时返回正确和，否则返回 0。
+  - title: OpenAI payload
+    lines:
+    - 75
+    - 87
+    note: |
+      L75-L80: OpenAIClient 保存 endpoint、model 和 api key。
+      L81-L87: completion payload 固定 model、prompt、max_tokens 和 temperature 0。
+  - title: OpenAI request
+    lines:
+    - 88
+    - 100
+    note: |
+      L88-L97: stop 存在时写入 payload，并构造 HTTP request。
+      L98-L100: 读取响应并返回 `choices[0].text`。
+  - title: run setup
+    lines:
+    - 103
+    - 113
+    note: |
+      L103-L110: CLI 读取 config，选择实现。
+      L111-L113: 准备 run dir，写 command 和 prediction。
+  - title: resolved config
+    lines:
+    - 114
+    - 117
+    note: |
+      L114-L117: resolved config 写入运行目录。
+  - title: data and prerequisite
+    lines:
+    - 119
+    - 129
+    note: |
+      L119-L125: config 中有 prerequisite command 时写入 artifact。
+      L127-L129: 用 `n_eval+n_shots` 生成 items。
+  - title: execution
+    lines:
+    - 131
+    - 139
+    note: |
+      L131-L139: 根据 mode 选择 stub 或 OpenAI client 并调用 harness。
+  - title: execution fallback
+    lines:
+    - 140
+    - 144
+    note: |
+      L140-L144: 异常时写 fallback，并返回空指标。
+  - title: acceptance
+    lines:
+    - 146
+    - 155
+    note: |
+      L146-L149: 从 config 读取 completion 和指标阈值。
+      L150-L155: accept 同时检查运行成功、n_total 和指标下限。
+  - title: sample metrics
+    lines:
+    - 157
+    - 165
+    note: |
+      L157-L165: 每条 sample 写入 metrics.jsonl。
+  - title: summary artifact
+    lines:
+    - 166
+    - 176
+    note: |
+      L166-L176: 聚合指标、样本数、耗时和 accept 写入 eval_summary.json。
+  - title: report config
+    lines:
+    - 177
+    - 188
+    note: |
+      L177-L188: report 写 mission、目标和配置。
+  - title: report result
+    lines:
+    - 190
+    - 195
+    note: |
+      L190-L195: report 写聚合结果和 accept 状态。
+  - title: report command
+    lines:
+    - 197
+    - 204
+    note: |
+      L197-L204: report 写命令位置、真实评测下一步，并打印 run dir。
+- title: SGLang GSM8K eval
+  repo_path: github_repo/sglang/python/sglang/test/simple_eval_gsm8k.py
+  focus: 真实 GSM8K eval 的 prompt、parser、样本切分和聚合
+  highlights:
+  - title: prompt helpers
+    lines:
+    - 21
+    - 29
+    note: |
+      L21-L25: 单题 prompt 由 Question 和 Answer 组成。
+      L28-L29: few-shot examples 由前 k 条拼接得到。
+  - title: answer parser
+    lines:
+    - 32
+    - 40
+    note: |
+      L32-L36: parser 去掉逗号并抽取数字，失败返回 INVALID。
+      L37-L40: literal_eval 失败时同样返回 INVALID。
+  - title: eval init
+    lines:
+    - 43
+    - 53
+    note: |
+      L43-L50: `GSM8KEval` 保存线程数、shot 数和数据路径。
+      L51-L53: 线程数和 shot 数写入对象状态。
+  - title: eval data
+    lines:
+    - 54
+    - 60
+    note: |
+      L54-L60: 读取数据并构造 few-shot prompt。
+  - title: leakage boundary
+    lines:
+    - 62
+    - 65
+    note: |
+      L62-L65: eval 数据跳过 few-shot examples，避免泄漏。
+  - title: sample prompt
+    lines:
+    - 67
+    - 75
+    note: |
+      L67-L75: 每条样本构造 question、correct answer 和 prompt message。
+  - title: sample scoring
+    lines:
+    - 77
+    - 83
+    note: |
+      L77-L80: sampler 出错时 response_text 为空。
+      L82-L83: 抽取答案并和 correct answer 比较。
+  - title: sample artifact
+    lines:
+    - 85
+    - 94
+    note: |
+      L85-L94: 保存 HTML、convo 和单样本 score。
+  - title: aggregate
+    lines:
+    - 96
+    - 99
+    note: |
+      L96-L99: map_with_progress 并聚合 mean/std。
+- title: SGLang eval sampler
+  repo_path: github_repo/sglang/python/sglang/test/simple_eval_common.py
+  focus: OpenAI-compatible completion sampler 和错误处理
+  highlights:
+  - title: sampler config
+    lines:
+    - 181
+    - 190
+    note: |
+      L181-L190: CompletionSampler 接收 base_url、model、temperature、top_p、max_tokens 和 stop。
+  - title: sampler state
+    lines:
+    - 192
+    - 200
+    note: |
+      L192-L200: model 可从 endpoint 拉取，采样参数和 completion token 计数保存到对象。
+  - title: prompt packing
+    lines:
+    - 208
+    - 215
+    note: |
+      L208-L215: message list 被拼成 raw prompt。
+  - title: completion request
+    lines:
+    - 216
+    - 225
+    note: |
+      L216-L225: completion API 请求写入 model、prompt、temperature、top_p、max_tokens 和 stop。
+  - title: response
+    lines:
+    - 226
+    - 228
+    note: |
+      L226-L228: 有 usage 时记录 completion tokens，并返回 text。
+  - title: retry
+    lines:
+    - 229
+    - 241
+    note: |
+      L229-L241: bad request 返回空字符串，其他异常重试后仍可能空答。
+- title: SGLang unified run_eval
+  repo_path: github_repo/sglang/python/sglang/test/run_eval.py
+  focus: 按任务选择 eval、运行 sampler、写统一 metric
+  highlights:
+  - title: common kwargs
+    lines:
+    - 64
+    - 70
+    note: |
+      L64-L70: common kwargs 固定 model、max_tokens、top_p、base_url 和 temperature。
+  - title: completion mode
+    lines:
+    - 72
+    - 79
+    note: |
+      L72-L79: completion mode 使用 stop tokens 构造 CompletionSampler。
+  - title: chat mode
+    lines:
+    - 80
+    - 85
+    note: |
+      L80-L85: chat mode 构造 ChatCompletionSampler。
+  - title: run setup
+    lines:
+    - 95
+    - 106
+    note: |
+      L95-L103: run_eval 设置环境和 API key。
+      L104-L106: base_url 统一加 `/v1`。
+  - title: gsm8k task
+    lines:
+    - 172
+    - 180
+    note: |
+      L172-L180: `eval_name=gsm8k` 时构造 GSM8KEval。
+  - title: result metrics
+    lines:
+    - 184
+    - 195
+    note: |
+      L184-L190: 一次 eval 返回 result、latency 和 sampler，并打印 score。
+      L191-L195: completion tokens 可换算 output throughput。
+  - title: metric dump
+    lines:
+    - 197
+    - 205
+    note: |
+      L197-L205: score 和 latency 进入统一 metric 收集。
+- title: vLLM completion serving
+  repo_path: github_repo/vllm/vllm/entrypoints/openai/completion/serving.py
+  focus: OpenAI completion request 到 engine 和 response 的主路径
+  highlights:
+  - title: completion entry
+    lines:
+    - 107
+    - 119
+    note: |
+      L107-L115: `create_completion` 是 OpenAI Completion API 入口。
+      L117-L119: 注释列出当前不支持的 suffix。
+  - title: max tokens
+    lines:
+    - 144
+    - 155
+    note: |
+      L144-L155: 根据模型长度、request 和 prompt 长度计算 max_tokens。
+  - title: sampling params
+    lines:
+    - 156
+    - 165
+    note: |
+      L156-L165: request 被转换成 beam search 或 sampling params。
+  - title: engine generate
+    lines:
+    - 190
+    - 201
+    note: |
+      L190-L201: 非 beam 路径把 engine input、sampling params 和 request id 送入 engine。
+  - title: non-streaming collect
+    lines:
+    - 224
+    - 236
+    note: |
+      L224-L236: 非 streaming 路径初始化并收集每个 prompt 的最终结果。
+  - title: completion response
+    lines:
+    - 237
+    - 249
+    note: |
+      L237-L239: 缺少 prompt text 时从 engine input 补回。
+      L241-L249: final result 转换成 completion response。
+- title: SGLang OpenAI HTTP endpoints
+  repo_path: github_repo/sglang/python/sglang/srt/entrypoints/http_server.py
+  focus: completion 和 chat completion endpoint 入口
+  highlights:
+  - title: completions endpoint
+    lines:
+    - 1479
+    - 1487
+    note: |
+      L1479-L1484: SGLang 注册 OpenAI-compatible `/v1/completions`。
+      L1485-L1487: 请求交给 completion handler。
+  - title: chat completions endpoint
+    lines:
+    - 1490
+    - 1497
+    note: |
+      L1490-L1494: SGLang 注册 `/v1/chat/completions`。
+      L1495-L1497: 请求交给 chat handler。
+lesson_docs:
+- title: 系统地图
+  path: labs/l25_serve_eval_lm_eval/system_map.md
+  description: L26 在 Serving 质量闭环中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l25_serve_eval_lm_eval/lecture.md
+  description: 从质量评测动机、prompt/stop/temperature 边界讲到 artifact 复盘。
+- title: 源码带读讲义
+  path: labs/l25_serve_eval_lm_eval/source_walkthrough.md
+  description: 按 patch、run_eval、SGLang eval 和 OpenAI-compatible endpoint 主路径组织的源码阅读路线。
+mini_infra_targets:
+- labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+notebooks: []
+tickets:
+- eval_stop_missing_continues_self_qa
+- eval_temperature_drift
+- eval_format_only_metric
+- eval_few_shot_recency_bias
+- eval_endpoint_timeout_silent
+prereq: l24_spec_decode
+next_lab: l26_sglang_pd_observability
+gpu_modes:
+  local: CPU stub eval 可完成 harness、artifact 和指标字段验证
+  cluster: 真实模型质量、latency 和 endpoint 稳定性需要 vLLM/SGLang 服务与固定数据集
+lesson:
+  opening: |
+    # 第 26 讲：Serving Eval · OpenAI-Compatible GSM8K Harness
+
+    本讲处理推理服务的质量评测闭环。Serving 优化只看吞吐和延迟时，容易漏掉格式漂移、数值错误、stop 缺失、timeout 和 prompt 泄漏。L26 先用 CPU-safe patch 写清最小 evaluation harness：切分 few-shot examples 和 eval items，构造 prompt，调用 completion client，计算 exact 与 first-number 指标，并保存每样本记录。
+
+    课程按“系统地图 -> 主讲义 -> 源码带读 -> quiz -> patch -> stub eval -> 课后产物”的顺序组织。lab 只检查最小 harness，真实评测还要结合模型、endpoint、生成参数、完成率、服务日志和硬件条件。
+  sections:
+  - title: 课程定位：服务优化之后要证明质量没有回退
+    plain_explanation: |
+      L26 属于 Serving systems 的质量闭环。前面的量化、spec decode、调度和 cache 优化都会改变服务行为；评测 harness 的作用是把“服务是否仍答对”写成可执行证据。这个证据要包含配置、样本、prompt、prediction、打分函数、聚合指标和命令。
+
+      本讲 patch 使用 stub client，保证 CPU 上也能验证 harness 行为。真实服务评测需要切换到 vLLM 或 SGLang 的 OpenAI-compatible endpoint，并保留服务端配置。
+    mental_model: |
+      把 serving eval 看成一条账本：输入样本进入 prompt builder，completion endpoint 产出 prediction，scorer 写入每样本记录，runner 汇总指标和 artifact。
+    why_it_matters: |
+      没有质量闭环时，性能优化无法上线；任何速度数字都要和质量、完成率和复现条件一起看。
+    source_refs:
+    - title: run evaluation
+      repo_path: labs/l25_serve_eval_lm_eval/patch/starter/eval_harness.py
+      lines:
+      - 36
+      - 46
+      note: |
+        L36-L41: `run_evaluation` 的输入足以连接本地 stub 或真实 endpoint。
+        L42-L46: TODO 明确要求输出聚合指标和 samples。
+    - title: run setup
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 103
+      - 113
+      note: |
+        L103-L110: CLI 和 config 决定本次评测条件。
+        L111-L113: command 和 prediction 写入运行目录。
+    - title: resolved config
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 114
+      - 117
+      note: |
+        L114-L117: resolved config 写入运行目录。
+    common_confusions:
+    - 只写一个最终分数，不保留样本级证据。
+    - 把 stub eval 的通过结果当成真实模型质量结论。
+    checkpoint_questions:
+    - serving eval 报告为什么必须包含 command 和 config？
+    - stub eval 能证明什么，不能证明什么？
+  - title: Patch 合同：shots、prompt、client 和 samples
+    plain_explanation: |
+      `items[:n_shots]` 是 few-shot examples，`items[n_shots:]` 才是 eval items。`format_few_shot_prompt` 要保持 shots 顺序，最后以待评测 question 的 `Answer:` 结束。`run_evaluation` 对每个 eval item 构造 prompt，调用 `client.complete(prompt, max_tokens=max_tokens, stop=["Question:"])`，再把 prediction 和两个指标写入 samples。
+
+      `n_total` 必须等于 eval items 数量，不包含 shots。这个字段既影响完成率，也能防止少跑样本时只看分数。
+    mental_model: |
+      few-shot examples 是上下文，不是评测对象；eval items 才进入分母。
+    why_it_matters: |
+      shot 泄漏、样本数错误和 prompt 顺序错误都会让评测分数失真。
+    source_refs:
+    - title: few-shot prompt
+      repo_path: labs/l25_serve_eval_lm_eval/patch/reference/eval_harness.py
+      lines:
+      - 37
+      - 49
+      note: |
+        L37-L42: prompt 从 system 和空行开始。
+        L43-L49: shots 按顺序写入，最后以 `Answer:` 结尾。
+    - title: sample scoring
+      repo_path: labs/l25_serve_eval_lm_eval/patch/reference/eval_harness.py
+      lines:
+      - 65
+      - 69
+      note: |
+        L65-L69: 每条 eval item 构造 prompt、调用 client 并评分。
+    - title: sample record
+      repo_path: labs/l25_serve_eval_lm_eval/patch/reference/eval_harness.py
+      lines:
+      - 70
+      - 78
+      note: |
+        L70-L78: samples 保留 question、reference、prediction 和命中标记。
+    - title: prompt order
+      repo_path: labs/l25_serve_eval_lm_eval/patch/tests/test_patch.py
+      lines:
+      - 48
+      - 57
+      note: |
+        L48-L54: 测试构造 Q1、Q2、Q3 的 prompt。
+        L55-L57: 断言顺序、结尾和 system。
+    common_confusions:
+    - 把 few-shot examples 也算进 `n_total`。
+    - 不保存 per-sample prediction，导致无法排查错误类型。
+    checkpoint_questions:
+    - '`items` 有 6 条、`n_shots=2` 时，`n_total` 应该是多少？'
+    - samples 至少要包含哪些字段？
+  - title: Scoring：exact 和 numeric 指标解释不同问题
+    plain_explanation: |
+      exact match 对格式敏感，适合检查模型是否严格按要求输出。first-number match 抽取 prediction 和 reference 的第一个数字，适合隔离“数值对但格式不同”的场景。两者都低时，要查 prompt、模型能力、endpoint、timeout 和生成参数。
+
+      本讲 patch 使用 first number，是为了让最小测试可手算。真实 GSM8K 常见做法是用 final answer delimiter 或 last number extraction，因为推理文本中间可能有多个数字。
+    mental_model: |
+      exact 是格式尺，numeric 是数值尺；两把尺一起看，才能判断错误来自格式还是答案本身。
+    why_it_matters: |
+      只看 exact 可能误判格式问题，单看 numeric 又可能放过任务格式错误。
+    source_refs:
+    - title: number cleaning
+      repo_path: labs/l25_serve_eval_lm_eval/patch/reference/eval_harness.py
+      lines:
+      - 15
+      - 22
+      note: |
+        L15-L18: 匹配后清理货币符号、千分位和百分号。
+        L19-L22: float 转换失败时返回 None。
+    - title: scorers
+      repo_path: labs/l25_serve_eval_lm_eval/patch/reference/eval_harness.py
+      lines:
+      - 25
+      - 34
+      note: |
+        L25-L26: exact scorer 做 strip/lower。
+        L29-L34: numeric scorer 抽取两边数字并按容差比较。
+    - title: answer parser
+      repo_path: github_repo/sglang/python/sglang/test/simple_eval_gsm8k.py
+      lines:
+      - 32
+      - 40
+      note: |
+        L32-L36: parser 去逗号并抽取数字。
+        L37-L40: literal_eval 失败时返回 INVALID。
+    common_confusions:
+    - exact 为 0 就断定模型完全不会。
+    - numeric 高就忽略输出格式要求。
+    checkpoint_questions:
+    - exact 低、numeric 高时，优先抽查什么？
+    - 为什么真实 GSM8K 可能不用 first number？
+  - title: Prompt、stop 和 deterministic eval
+    plain_explanation: |
+      Deterministic serving eval 要固定 temperature、top_p、max_tokens、stop sequence、模型版本和题目顺序。对于 completion API，stop sequence 常用 `Question:`，用于阻止模型继续生成下一题。缺少 stop 会污染 parser，尤其是 first-number 或 exact 这种依赖输出文本形状的指标。
+
+      本讲 `OpenAIClient` 固定 temperature 为 0，并把 stop 写入 payload。真实服务中，completion 和 chat endpoint 的 prompt 形状不同，必须保证 harness 和 endpoint 匹配。
+    mental_model: |
+      Prompt 规定输入形状，stop 规定输出边界，temperature 规定随机性；三者共同决定评测是否可复现。
+    why_it_matters: |
+      很多评测波动来自生成设置，而非模型能力变化。
+    source_refs:
+    - title: OpenAI payload
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 75
+      - 87
+      note: |
+        L75-L80: client 保存 endpoint、model 和 api key。
+        L81-L87: payload 固定 max_tokens 和 temperature 0。
+    - title: OpenAI request
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 88
+      - 100
+      note: |
+        L88-L97: stop 存在时加入 payload，并构造 HTTP request。
+        L98-L100: 响应读取 `choices[0].text`。
+    - title: prompt packing
+      repo_path: github_repo/sglang/python/sglang/test/simple_eval_common.py
+      lines:
+      - 208
+      - 215
+      note: |
+        L208-L215: message list 被拼成 raw prompt。
+    - title: completion request
+      repo_path: github_repo/sglang/python/sglang/test/simple_eval_common.py
+      lines:
+      - 216
+      - 225
+      note: |
+        L216-L225: completion 请求写入 stop、max_tokens 和 temperature。
+    common_confusions:
+    - completion prompt 直接打 chat endpoint。
+    - 没有 stop 时仍然把长输出当成当前题答案。
+    checkpoint_questions:
+    - '`stop=["Question:"]` 防止什么问题？'
+    - 为什么 temperature 要写入评测配置？
+  - title: Artifact：评测结论必须能追溯到样本
+    plain_explanation: |
+      `run_eval.py` 会写 `command.sh`、`config.resolved.yaml`、`metrics.jsonl`、`artifacts/eval_summary.json` 和 `report.md`。这些文件让评测结论可以被复查：命令和配置说明条件，metrics 保存每样本结果，summary 给出聚合分数和完成情况，report 给人读。
+
+      如果评测失败，脚本会写 fallback artifact。真实服务评测还应该保留服务端日志、服务启动命令和模型版本。
+    mental_model: |
+      Artifact 是评测的审计日志。没有 artifact 的分数无法定位错误，也难以比较两次实验。
+    why_it_matters: |
+      质量回退排查需要看具体样本，而不是只看聚合分数。
+    source_refs:
+    - title: sample metrics
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 157
+      - 165
+      note: |
+        L157-L165: 每条样本写入 metrics.jsonl。
+    - title: summary artifact
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 166
+      - 176
+      note: |
+        L166-L176: 聚合指标、n_total、duration 和 accept 写入 JSON。
+    - title: report config
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 177
+      - 188
+      note: |
+        L177-L188: report 写任务和配置。
+    - title: report result
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 190
+      - 195
+      note: |
+        L190-L195: report 写结果和 accept 状态。
+    - title: report command
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 197
+      - 204
+      note: |
+        L197-L204: report 写命令和下一步。
+    common_confusions:
+    - 只保存最终 accuracy，不保存样本级输出。
+    - 评测失败时不记录 exception 或 fallback。
+    checkpoint_questions:
+    - L26 stub eval 应生成哪些文件？
+    - '`eval_summary.json` 和 `metrics.jsonl` 分别解决什么问题？'
+  - title: 真实 eval 对照：SGLang 任务和 sampler
+    plain_explanation: |
+      SGLang 的 GSM8K eval 展示了生产评测常见结构：任务类负责数据、prompt、答案抽取和聚合；sampler 负责 OpenAI-compatible API 调用；统一 run_eval 负责选择任务、记录 latency、throughput 和统一 metric。
+
+      L26 patch 是这个结构的缩小版。它保留了数据切分、prompt、client、parser 和 metric，省略了并发、retry、任务 registry、HTML report 和多任务 parser。
+    mental_model: |
+      真实 eval 把任务逻辑和模型调用拆开；patch 把两者压缩成一个可测试的最小环。
+    why_it_matters: |
+      读懂这种拆分后，学生可以把 L26 harness 扩展到 MMLU、HumanEval 或业务数据集。
+    source_refs:
+    - title: leakage boundary
+      repo_path: github_repo/sglang/python/sglang/test/simple_eval_gsm8k.py
+      lines:
+      - 62
+      - 65
+      note: |
+        L62-L65: eval 数据跳过 few-shot examples，避免泄漏。
+    - title: sample scoring
+      repo_path: github_repo/sglang/python/sglang/test/simple_eval_gsm8k.py
+      lines:
+      - 77
+      - 83
+      note: |
+        L77-L80: sampler 出错时 response 为空。
+        L82-L83: 抽取 answer 并与 correct answer 比较。
+    - title: gsm8k task
+      repo_path: github_repo/sglang/python/sglang/test/run_eval.py
+      lines:
+      - 172
+      - 180
+      note: |
+        L172-L180: `eval_name=gsm8k` 时构造 GSM8KEval。
+    - title: result metrics
+      repo_path: github_repo/sglang/python/sglang/test/run_eval.py
+      lines:
+      - 184
+      - 195
+      note: |
+        L184-L190: runner 打印 score 和 latency。
+        L191-L195: completion tokens 可换算 throughput。
+    common_confusions:
+    - 把 task parser、sampler 和 runner 混成一个不可测试函数。
+    - 忽略 completion API 与 chat API 的差异。
+    checkpoint_questions:
+    - SGLang eval 为什么要把 few-shot examples 从 eval 数据里跳过？
+    - sampler 和 eval task 的职责怎么分？
+  - title: Endpoint 对照：vLLM 和 SGLang 都支持 OpenAI 形状
+    plain_explanation: |
+      本讲的 client 使用 `/v1/completions`，因为 patch prompt 是 raw text completion 形状。vLLM 的 completion serving 会校验 request，计算 max_tokens，把 request 转成 sampling params，并把结果转换回 OpenAI completion response。SGLang 的 HTTP server 也暴露 `/v1/completions` 和 `/v1/chat/completions`。
+
+      真实评测时，如果模型需要 chat template，就应使用 chat endpoint 或在 harness 中显式包装 chat prompt。endpoint 形状错时，质量问题可能来自 prompt wrapper，而非模型本身。
+    mental_model: |
+      OpenAI-compatible API 是 harness 和 serving backend 之间的插座；插头形状不匹配，评测结果就失真。
+    why_it_matters: |
+      同一个模型在 completion 和 chat prompt 下可能表现不同，报告必须写清 endpoint 和 prompt 形状。
+    source_refs:
+    - title: sampling params
+      repo_path: github_repo/vllm/vllm/entrypoints/openai/completion/serving.py
+      lines:
+      - 156
+      - 165
+      note: |
+        L156-L165: request 转成 beam search 或 sampling params。
+    - title: non-streaming collect
+      repo_path: github_repo/vllm/vllm/entrypoints/openai/completion/serving.py
+      lines:
+      - 224
+      - 236
+      note: |
+        L224-L236: 非 streaming 路径收集最终结果。
+    - title: completion response
+      repo_path: github_repo/vllm/vllm/entrypoints/openai/completion/serving.py
+      lines:
+      - 237
+      - 249
+      note: |
+        L237-L239: prompt text 缺失时补回。
+        L241-L249: final result 转换成 completion response。
+    - title: completions endpoint
+      repo_path: github_repo/sglang/python/sglang/srt/entrypoints/http_server.py
+      lines:
+      - 1479
+      - 1487
+      note: |
+        L1479-L1484: SGLang 注册 `/v1/completions`。
+        L1485-L1487: 请求交给 completion handler。
+    common_confusions:
+    - 用 completion prompt 评测 chat-only 模型，却不说明 chat template。
+    - 不记录 base_url、model id 和服务启动命令。
+    checkpoint_questions:
+    - L26 OpenAIClient 默认读取响应的哪个字段？
+    - endpoint 形状错误会怎样影响评测？
+  - title: Lab 验收和 debug 路线
+    plain_explanation: |
+      patch-test 覆盖数字抽取、exact scorer、numeric scorer、prompt 顺序、stub 完整评测和部分正确聚合。通过后跑本地 stub eval，检查 `metrics.jsonl`、`eval_summary.json` 和 `report.md` 是否完整。
+
+      Debug 时先看完成率，再看 exact/numeric 的组合，再抽查样本。exact 低、numeric 高通常是格式问题；两个指标都低时查 prompt、stop、temperature、endpoint、模型和 timeout。
+    mental_model: |
+      先验收 harness，再验证 artifact，最后才把真实服务质量结论写进报告。
+    why_it_matters: |
+      这样能把 patch 错误、harness 错误和真实服务错误分开定位。
+    source_refs:
+    - title: partial correct client
+      repo_path: labs/l25_serve_eval_lm_eval/patch/tests/test_patch.py
+      lines:
+      - 81
+      - 89
+      note: |
+        L81-L89: Stub 依次返回两个错和两个对。
+    - title: partial correct assertions
+      repo_path: labs/l25_serve_eval_lm_eval/patch/tests/test_patch.py
+      lines:
+      - 91
+      - 98
+      note: |
+        L91-L98: first_number_match 应聚合为 0.5。
+    - title: acceptance
+      repo_path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+      lines:
+      - 146
+      - 155
+      note: |
+        L146-L149: config 中声明完成率和指标阈值。
+        L150-L155: accept 同时检查运行成功、样本数和指标下限。
+    common_confusions:
+    - patch-test 通过后不跑 stub eval。
+    - 真实服务失败时只改 scorer，不查 endpoint 和 stop。
+    checkpoint_questions:
+    - L26 patch-test 覆盖了哪些边界？
+    - 完成率异常时应该先查哪些 artifact？

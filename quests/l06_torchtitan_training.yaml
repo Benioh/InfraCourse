@@ -1,21 +1,19 @@
 id: l06_torchtitan_training
-title: Selective activation checkpoint wrapper
-level: L03
+title: L07 · Selective activation checkpoint wrapper
+level: L07
 act: 第 1 章：训练框架
 role: TorchTitan 学徒
 priority: 核心
 estimated_minutes: 90
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
   - TorchTitan (对照)
-
 patch:
   description: |
-    实现一个 selective_checkpoint_wrap(model, policy_fn)：让 policy 决定哪些
-    子模块用 torch.utils.checkpoint，哪些不用。再实现 attention_only_policy
-    展示典型用法（只 ckpt attention 层）。
+    实现 selective_checkpoint_wrap(model, policy_fn)：让 policy 决定哪些
+    直接子模块用 torch.utils.checkpoint，哪些保持普通 autograd。
+    再实现 attention_only_policy，展示只包 attention-like child 的用法。
   task_md: labs/l06_torchtitan_training/patch/task.md
   starter_file: labs/l06_torchtitan_training/patch/starter/selective_ckpt.py
   reference_file: labs/l06_torchtitan_training/patch/reference/selective_ckpt.py
@@ -23,29 +21,356 @@ patch:
   status_file: labs/l06_torchtitan_training/patch/.last_run.json
   test_count: 5
   test_kind: 结果对比 + 行为契约
+lesson:
+  opening: |
+    这节课解决 activation 显存问题：Transformer forward 会保存大量中间 activation 给 backward 使用，当 micro_batch_size、seq_len、hidden 或层数增加时，峰值显存可能先由 activation 撑爆。activation checkpoint 的交换关系是 forward 少保存一部分中间状态，backward 需要时重跑被包模块。
 
-source_reading:
-  - title: TorchTitan parallelize_llama / apply_ac
-    repo_path: github_repo/torchtitan/torchtitan/distributed/parallel_dims.py
-    focus: 看 TorchTitan 真实 ckpt policy 接口（ParallelDims 与 apply_ac 的位置）
-  - title: PyTorch torch.utils.checkpoint 实现
-    repo_path: docs/术语表.md
-    focus: 理解 use_reentrant=True/False 的差别
+    本关实现 child-level selective checkpoint wrapper。policy 返回 True 的直接子模块会被 _CheckpointWrapper 包住，forward 仍返回同样输出，backward 通过 recompute 恢复中间状态。它不实现完整 TorchTitan，也不处理 FSDP2、compile、memory budget 或 per-op selective checkpoint。
+  sections:
+    - title: 问题和边界
+      plain_explanation: |
+        本讲目标是把 activation checkpoint 的机制讲清并实现最小 wrapper。输入是一个 nn.Module 和 policy 函数；中间状态是直接 child 被原地替换成 wrapper；输出仍是同一个 model 对象。
 
+        本关只遍历 model.named_children() 一层，不递归；不复制参数；不修改 optimizer；不实现真实 TorchTitan 集群训练。GPU memory test skip 表示未验证显存收益。
+      mental_model: |
+        policy 勾中的子模块 forward 少存草稿，backward 再重算草稿；没勾中的模块保持普通 autograd。
+      why_it_matters: |
+        大模型训练常在 activation 上 OOM。选择性 checkpoint 让显存收益和重算代价可以按模块评估。
+      source_refs:
+        - title: Starter policy type
+          repo_path: labs/l06_torchtitan_training/patch/starter/selective_ckpt.py
+          lines: [21, 33]
+          note: |
+            L21-L33: starter 定义 policy 类型和 checkpoint wrapper 的 forward。
+      common_confusions:
+        - 把 activation checkpoint 和磁盘训练 checkpoint 混成一件事。
+        - 只写省显存，不说明被包模块会多执行 forward。
+        - 以为本关要改 TorchTitan 源码；patch 只改教学 starter。
+      checkpoint_questions:
+        - activation checkpoint 省的是哪类显存？
+        - policy 函数输入和输出分别是什么？
+        - GPU memory test skip 时应该怎样报告？
+    - title: Wrapper 和 Policy
+      plain_explanation: |
+        _CheckpointWrapper 保存原 child 到 self.module，并在 forward 中调用 torch.utils.checkpoint。selective_checkpoint_wrap 根据 policy 的返回值对直接 child 做 in-place setattr。attention_only_policy 把名字转小写后匹配 attn 或 attention。
+
+        wrapper 不应该复制参数。参数仍由原 child 持有，只是模块树多了一层外壳。policy 全 False 时，直接 child 类型应保持不变。
+      mental_model: |
+        wrapper 是执行器，policy 是选择规则。规则可以换，执行器不能改变参数对象。
+      why_it_matters: |
+        训练框架里的 optimizer、FSDP、state_dict 和 resume 都依赖参数对象和模块树。复制参数会制造隐藏状态错误。
+      source_refs:
+        - title: Reference wrapper
+          repo_path: labs/l06_torchtitan_training/patch/reference/selective_ckpt.py
+          lines: [13, 19]
+          note: |
+            L13-L19: wrapper 保存原 module，并用 use_reentrant=False 调 checkpoint。
+        - title: Reference wrap
+          repo_path: labs/l06_torchtitan_training/patch/reference/selective_ckpt.py
+          lines: [22, 26]
+          note: |
+            L22-L26: 遍历 named_children，policy True 时原地替换 child。
+        - title: Reference policy
+          repo_path: labs/l06_torchtitan_training/patch/reference/selective_ckpt.py
+          lines: [29, 31]
+          note: |
+            L29-L31: attention_only_policy 匹配 attn 或 attention。
+      common_confusions:
+        - 用 named_modules 递归包所有层，破坏本关一层 child 合同。
+        - 在 wrapper 里新建同结构模块，造成参数复制。
+        - 只匹配 attention，漏掉 attn 缩写。
+      checkpoint_questions:
+        - selective_checkpoint_wrap 为什么返回原 model？
+        - wrapper 内部为什么要保存原 child module？
+        - policy 全 False 时模型应保持什么不变？
+    - title: 输出与梯度等价
+      plain_explanation: |
+        checkpoint 改变的是 autograd 保存策略，不应改变数学输出。forward 仍执行被包模块并传出相同张量；backward 到被包模块时，PyTorch 重算 forward，再计算梯度。
+
+        如果参数相同、输入相同、模块行为确定，wrapped 模型的输出、输入梯度和参数梯度应与裸模型 allclose。测试允许参数名因为多一层 wrapper 而变化，但会比较梯度值。
+      mental_model: |
+        forward 少留中间草稿，backward 回到检查点重算；答案和批改结果应保持一致。
+      why_it_matters: |
+        显存优化不能以训练语义错误为代价。先验证输出和梯度，再谈 peak memory。
+      source_refs:
+        - title: Output equivalence
+          repo_path: labs/l06_torchtitan_training/patch/tests/test_patch.py
+          lines: [65, 75]
+          note: |
+            L65-L75: 测试 wrapped 输出与 base 输出 allclose。
+        - title: Grad setup
+          repo_path: labs/l06_torchtitan_training/patch/tests/test_patch.py
+          lines: [78, 88]
+          note: |
+            L78-L93: 测试 base 和 wrapped 的输入梯度是否对齐。
+        - title: Param grads
+          repo_path: labs/l06_torchtitan_training/patch/tests/test_patch.py
+          lines: [94, 99]
+          note: |
+            L94-L99: 参数名可变化，但参数梯度值必须 allclose。
+      common_confusions:
+        - 只看 forward 输出，不检查 backward 梯度。
+        - 把参数名变化误判为参数复制。
+        - 忽略 dropout 或随机逻辑导致 recompute 不等价。
+      checkpoint_questions:
+        - checkpoint 后为什么输出仍应与裸模型一致？
+        - 参数名变化和参数复制有什么区别？
+        - 有随机性的模块为什么要特别小心？
+    - title: Tests 和 GPU Peak Memory
+      plain_explanation: |
+        patch-test 前四个测试 CPU 友好：输出等价、梯度等价、attention-only policy 计数、all-false no-op。第五个测试需要 CUDA，比较 wrapped peak memory 是否小于 base peak。
+
+        GPU memory test 的比较对象、模型尺寸和输入 shape 都由测试固定。skip 只说明没有 CUDA 条件。真实训练报告还需要同时记录 step time，因为 recompute 会增加计算。
+      mental_model: |
+        CPU 测语义，GPU 测这个小模型的 peak memory。二者回答的问题不同。
+      why_it_matters: |
+        activation checkpoint 的目标是显存，但正确性和显存收益必须分开验证。
+      source_refs:
+        - title: Policy count
+          repo_path: labs/l06_torchtitan_training/patch/tests/test_patch.py
+          lines: [102, 114]
+          note: |
+            L102-L114: 测试 attn child 被包，MLP child 未被包。
+        - title: No-op policy
+          repo_path: labs/l06_torchtitan_training/patch/tests/test_patch.py
+          lines: [117, 123]
+          note: |
+            L117-L123: 全 False policy 不应改变直接 child 类型。
+        - title: Memory test
+          repo_path: labs/l06_torchtitan_training/patch/tests/test_patch.py
+          lines: [126, 136]
+          note: |
+            L126-L148: CUDA 可用时比较 base_peak 和 wrap_peak。
+      common_confusions:
+        - GPU 测试 skip 后写成显存下降已证明。
+        - 只报告 peak memory，不报告 step time。
+        - 认为 attention-only policy 永远最佳；真实策略要看模型和 profiler。
+      checkpoint_questions:
+        - 前四个 CPU 测试分别证明什么？
+        - GPU memory test skip 代表什么？
+        - 为什么显存收益要和 step time 一起看？
+    - title: TorchTitan 系统位置
+      plain_explanation: |
+        TorchTitan 的 Llama parallelize 路径会先处理 CP/TP，再应用 activation checkpoint，然后进入 compile 和 FSDP。这个顺序影响模块树、编译图、参数分片和 state_dict。
+
+        TorchTitan 的 apply_ac 支持 full、selective 和 memory_budget 等模式。生产 selective AC 可以按 op policy 决定保存或重算；本关只实现 child-level policy，用来理解最小机制。
+      mental_model: |
+        本关是玩具 wrapper，TorchTitan 是训练框架中的有序变换流水线。
+      why_it_matters: |
+        真实训练中 activation checkpoint 会与 compile、FSDP、RNG 和 checkpoint save/load 交互，不能只当成训练 loop 里的一个函数调用。
+      source_refs:
+        - title: TorchTitan apply_ac mode
+          repo_path: github_repo/torchtitan/torchtitan/distributed/activation_checkpoint.py
+          lines: [186, 198]
+          note: |
+            L186-L202: TorchTitan 在 full/selective 模式之间分发。
+        - title: apply_ac loop
+          repo_path: github_repo/torchtitan/torchtitan/distributed/activation_checkpoint.py
+          lines: [204, 216]
+          note: |
+            L204-L255: apply_ac 遍历 transformer block 并注册 activation checkpoint。
+        - title: parallelize order
+          repo_path: github_repo/torchtitan/torchtitan/models/llama3/parallelize.py
+          lines: [76, 88]
+          note: |
+            L76-L102: AC 在 compile 前、FSDP 前应用。
+      common_confusions:
+        - 把本关 child wrapper 等同于 TorchTitan 全部 AC 能力。
+        - 忽略 compile/FSDP 顺序带来的模块树和 graph 影响。
+        - 把 activation checkpoint 和 training checkpoint save/load 放在同一层排查。
+      checkpoint_questions:
+        - TorchTitan apply_ac 位于 compile 的哪一侧？
+        - full AC、selective AC 和 memory budget 的边界有什么不同？
+        - 本关 wrapper 相比 TorchTitan 生产实现少了哪些复杂度？
+    - title: Smoke 和训练 Checkpoint 边界
+      plain_explanation: |
+        run_torchtitan_stub.py 跑一个小训练循环，写 metrics、保存 checkpoint.pt，再加载模型参数计算 resume_delta。这个 checkpoint.pt 是磁盘训练 checkpoint，用来验证框架 artifact 边界。
+
+        stub 不调用 patch starter，也不证明 activation checkpoint 生效。它回答的是训练框架应如何保留配置、metrics、checkpoint 和恢复证据。
+      mental_model: |
+        patch-test 验证 activation checkpoint wrapper，stub 验证训练框架证据链。
+      why_it_matters: |
+        同一个词 checkpoint 在训练系统里有两层含义。排障时必须先确定你在查 autograd 重算还是磁盘恢复。
+      source_refs:
+        - title: Stub train loop
+          repo_path: labs/l06_torchtitan_training/scripts/run_torchtitan_stub.py
+          lines: [50, 62]
+          note: |
+            L50-L62: stub 运行小模型训练循环。
+        - title: Stub metrics
+          repo_path: labs/l06_torchtitan_training/scripts/run_torchtitan_stub.py
+          lines: [63, 72]
+          note: |
+            L63-L72: 每 step 写 metrics.jsonl。
+        - title: Stub checkpoint
+          repo_path: labs/l06_torchtitan_training/scripts/run_torchtitan_stub.py
+          lines: [74, 86]
+          note: |
+            L74-L94: 保存并加载磁盘 checkpoint，计算 resume_delta。
+      common_confusions:
+        - 用 stub 通过证明 patch wrapper 正确；stub 不调用 starter。
+        - 用 patch-test 通过证明训练 checkpoint resume；patch-test 不覆盖磁盘恢复。
+        - 只保存 loss，不保存 config、command、checkpoint 和 validation JSON。
+      checkpoint_questions:
+        - stub 的 checkpoint.pt 属于哪类 checkpoint？
+        - patch-test 和 stub 分别回答什么问题？
+        - resume_delta 能证明什么？
 mini_infra_targets:
   - mini_infra/training/
-
 notebooks:
   - notebooks/n06_activation_recompute.ipynb
-
-tickets:
-  - tt_config_001
-  - tt_checkpoint_002
-  - tt_fsdp_memory_003
-
-prereq: l05_distributed_primitives
-next_lab: l08_megatron_text_pretrain
-
-gpu_modes:
-  local: CPU 4 个测试通过，1×4090 跑显存对比测试
-  cluster: 1×H200 完整 perf
+lesson_docs:
+  - title: 系统地图
+    path: labs/l06_torchtitan_training/system_map.md
+    description: 本讲在训练系统中的位置、activation checkpoint 时间线和易混点。
+  - title: 主讲义
+    path: labs/l06_torchtitan_training/lecture.md
+    description: 从 activation 显存、wrapper、policy、TorchTitan 顺序讲到测试和 debug。
+  - title: 源码带读讲义
+    path: labs/l06_torchtitan_training/source_walkthrough.md
+    description: 按 starter、reference、tests、TorchTitan apply_ac 和 stub 边界组织阅读。
+source_reading:
+  - title: Starter selective ckpt
+    repo_path: labs/l06_torchtitan_training/patch/starter/selective_ckpt.py
+    focus: 学生需要补齐的 wrapper 调用和 policy。
+    highlights:
+      - title: Wrapper
+        lines: [21, 33]
+        note: |
+          L21-L33: 定义 PolicyFn 和 _CheckpointWrapper，forward 调用 torch.utils.checkpoint。
+      - title: Wrap TODO
+        lines: [36, 48]
+        note: |
+          L36-L48: selective_checkpoint_wrap 只遍历一层 named_children 并原地替换 child。
+      - title: Policy TODO
+        lines: [51, 55]
+        note: |
+          L51-L55: attention_only_policy 应匹配 attn 或 attention。
+  - title: Reference selective ckpt
+    repo_path: labs/l06_torchtitan_training/patch/reference/selective_ckpt.py
+    focus: 最小正确实现。
+    highlights:
+      - title: Reference wrapper
+        lines: [13, 19]
+        note: |
+          L13-L19: wrapper 保存原 module，并使用 use_reentrant=False。
+      - title: Reference wrap
+        lines: [22, 26]
+        note: |
+          L22-L26: 遍历 named_children，policy True 时 setattr 成 wrapper。
+      - title: Reference policy
+        lines: [29, 31]
+        note: |
+          L29-L31: policy 匹配 attn 或 attention。
+  - title: Patch tests
+    repo_path: labs/l06_torchtitan_training/patch/tests/test_patch.py
+    focus: 输出、梯度、policy 和显存测试。
+    highlights:
+      - title: Test model children
+        lines: [42, 50]
+        note: |
+          L42-L57: 测试模型直接 child 是 attn0、mlp0、attn1、mlp1。
+      - title: Output equivalence
+        lines: [65, 75]
+        note: |
+          L65-L75: wrapped 输出与 base 输出 allclose。
+      - title: Grad equivalence
+        lines: [78, 88]
+        note: |
+          L78-L93: wrapped 输入梯度与 base 输入梯度 allclose。
+      - title: Param grad compare
+        lines: [94, 99]
+        note: |
+          L94-L99: 参数名可变化，但参数梯度值必须 allclose。
+      - title: Policy count
+        lines: [102, 114]
+        note: |
+          L102-L114: attention child 被包，MLP child 未被包。
+      - title: No-op policy
+        lines: [117, 123]
+        note: |
+          L117-L123: 全 False policy 保持直接 child 类型不变。
+      - title: Memory test
+        lines: [126, 136]
+        note: |
+          L126-L148: CUDA 可用时比较 base_peak 和 wrap_peak。
+  - title: TorchTitan activation checkpoint
+    repo_path: github_repo/torchtitan/torchtitan/distributed/activation_checkpoint.py
+    focus: 生产 apply_ac 和 selective checkpoint context。
+    highlights:
+      - title: Save ops
+        lines: [28, 40]
+        note: |
+          L28-L40: _get_save_ops 开始列出应保存的 compute ops。
+      - title: Custom policy
+        lines: [122, 134]
+        note: |
+          L122-L153: selective checkpoint policy 按 forward/recompute 和 op 类型返回保存或重算策略。
+      - title: Mode dispatch
+        lines: [186, 198]
+        note: |
+          L186-L202: full 和 selective 模式分发到不同 wrapper。
+      - title: apply_ac loop
+        lines: [204, 216]
+        note: |
+          L204-L216: apply_ac 接收 model、AC config 和 compile 状态。
+      - title: apply_ac layers
+        lines: [246, 255]
+        note: |
+          L234-L255: memory_budget 分支之外，按 transformer block 应用 AC。
+  - title: TorchTitan parallelize
+    repo_path: github_repo/torchtitan/torchtitan/models/llama3/parallelize.py
+    focus: AC、compile、FSDP 的调用顺序。
+    highlights:
+      - title: parallelize signature
+        lines: [35, 47]
+        note: |
+          L35-L47: parallelize_llama 接收 parallel dims、training、compile 和 AC config。
+      - title: CP and TP
+        lines: [59, 71]
+        note: |
+          L59-L74: 先处理 CP，再处理 TP。
+      - title: AC and compile
+        lines: [76, 88]
+        note: |
+          L76-L90: AC 在 model compile 之前应用。
+      - title: FSDP call
+        lines: [92, 102]
+        note: |
+          L92-L102: compile 后进入 FSDP。
+  - title: TorchTitan config
+    repo_path: github_repo/torchtitan/torchtitan/config/configs.py
+    focus: 训练和并行配置的字段边界。
+    highlights:
+      - title: Training config
+        lines: [25, 37]
+        note: |
+          L25-L42: TrainingConfig 包含 local/global batch、seq_len、steps 等训练边界。
+      - title: Parallelism config
+        lines: [82, 94]
+        note: |
+          L82-L95: ParallelismConfig 开始定义 DP replicate 和 DP shard。
+  - title: TorchTitan stub
+    repo_path: labs/l06_torchtitan_training/scripts/run_torchtitan_stub.py
+    focus: 教学 smoke 的训练框架 artifact。
+    highlights:
+      - title: Config and run dir
+        lines: [37, 45]
+        note: |
+          L37-L45: stub 读取 toml 配置，写 command 和 resolved config。
+      - title: Train loop
+        lines: [50, 62]
+        note: |
+          L50-L62: 小模型训练 loop 写 loss。
+      - title: Metrics
+        lines: [63, 72]
+        note: |
+          L63-L72: 每 step 追加 metrics.jsonl。
+      - title: Disk checkpoint
+        lines: [74, 86]
+        note: |
+          L74-L94: 保存并加载训练 checkpoint，计算 resume_delta。
+      - title: Framework validation
+        lines: [96, 105]
+        note: |
+          L96-L105: 写 torchtitan_available、device、checkpoint 和 resume_delta。

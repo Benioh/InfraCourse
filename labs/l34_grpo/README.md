@@ -1,13 +1,37 @@
-# L11.8 · GRPO / RLOO：DeepSeek-R1 同款 advantage 估计
+# L39 · GRPO / RLOO：Critic-free Advantage 与 Clipped KL Loss
 
-> 本关只做一件事：**手写 GRPO（Group Relative Policy Optimization）和 RLOO
-> （Leave-One-Out）的 advantage + loss**——这是 DeepSeek-R1、Qwen2.5-Math、verl
-> 等开源 RL 主流的核心 60 行代码。
+<!-- LECTURE_FIRST_START -->
 
-之前 RL 段只学了 vanilla PPO 的 KL controller（L10）。L11.8 把现代 RL 的
-critic-free advantage 估计补上，与 L10.3 DPO 形成完整"DPO / PPO / GRPO / RLOO"对照。
+本讲把 RL 主线从 rollout freshness 推到算法更新本身：不用 value critic 时，怎样用同一 prompt 下的一组 response reward 构造 advantage，并把它放进带 ratio clip 和 reference KL 的 policy loss。
 
-## 闭环
+## 学习路线
+
+1. 读 [system_map.md](system_map.md)：确认 L39 在 RL 与对齐主线中的位置。
+2. 读 [lecture.md](lecture.md)：从 critic-free 训练问题、GRPO/RLOO advantage、loss 公式、mask 和 KL 边界讲到 smoke。
+3. 读 [source_walkthrough.md](source_walkthrough.md)：按 patch、测试、reward parser、SLiME PPO utils 和 smoke 脚本读源码。
+4. 做 quiz：确认公式、边界、mask、clip 和 KL 的语义。
+5. 做 patch：实现 `grpo_advantage`、`rloo_advantage` 和 `grpo_loss`。
+6. 跑 smoke：观察合成 reward + log-prob 下的 loss、KL 和 ratio 指标。
+7. 使用 [outputs/rl_rollout_template.md](outputs/rl_rollout_template.md) 记录一次复盘。
+
+## 本讲定位
+
+| 问题 | 本讲回答 |
+|---|---|
+| 所属主线 | 第 4 章：RL 与对齐 / policy optimization |
+| 解决什么问题 | 不训练 value critic 时，如何从同组 responses 的 reward 得到 advantage，并约束 policy 更新幅度 |
+| 连接哪些源码 | `labs/l34_grpo/patch/reference/grpo.py`, `labs/l34_grpo/patch/tests/test_patch.py`, `mini_infra/rl/reward.py`, `github_repo/slime/slime/utils/ppo_utils.py`, `labs/l34_grpo/scripts/run_grpo_smoke.py` |
+| lab 检验什么 | 组内 advantage、RLOO baseline、ratio clip、k3 KL、completion mask 和指标返回 |
+
+## 你会学到什么
+
+- 解释 GRPO 为什么可以不用 value model，并说清它的边界。
+- 手写 GRPO 和 RLOO advantage，处理 G=1、常数 reward 和 std=0。
+- 实现带 mask、ratio clip 和 reference KL 的最小 `grpo_loss`。
+- 读懂 SLiME PPO utils 中 KL estimator、OPSM 和 policy loss 的对应关系。
+- 用 smoke 产物判断 loss、KL、ratio_mean 和 clipped fraction 是否支持结论。
+
+## Patch 闭环
 
 ```bash
 cat labs/l34_grpo/patch/task.md
@@ -15,27 +39,23 @@ $EDITOR labs/l34_grpo/patch/starter/grpo.py
 make patch-test M=l34_grpo
 ```
 
-## 测试覆盖
+参考实现验收：
 
-| 测试 | 验证 |
+```bash
+IMPL=reference make patch-test M=l34_grpo
+IMPL=reference python labs/l34_grpo/scripts/run_grpo_smoke.py --run-id l39_local
+```
+
+## 课后产物
+
+| 产物 | 用途 |
 |---|---|
-| `test_group_advantage_zero_mean` | 同 group 内 advantage 均值 ≈ 0 |
-| `test_group_advantage_unit_std` | 同 group 内 std ≈ 1（除常数偏移） |
-| `test_single_response_group_returns_zero` | G=1 时 advantage 全为 0（不能 NaN） |
-| `test_rloo_advantage_uses_other_responses` | A_i 与 r_{j≠i} 相关，不与 r_i 相关 |
-| `test_rloo_zero_when_all_equal` | 所有 reward 相等时 A==0 |
-| `test_grpo_loss_with_kl_penalty` | β=0.1 时 loss 包含 KL 项 |
-| `test_grpo_loss_clip_caps_ratio` | ratio 超出 [1-ε, 1+ε] 时被截断 |
-| `test_grpo_loss_per_token_mask` | mask=0 的位置不计入 |
+| [outputs/debug_checklist.md](outputs/debug_checklist.md) | 排查 NaN advantage、mask 归一化、KL 爆炸和 ratio clip 异常 |
+| [outputs/source_reading_card.md](outputs/source_reading_card.md) | 复习 GRPO/RLOO 源码主路径 |
+| [outputs/rl_rollout_template.md](outputs/rl_rollout_template.md) | 记录 reward、advantage、loss、KL、ratio 和 smoke 产物 |
 
-## Configs
+<!-- LECTURE_FIRST_END -->
 
-| 配置 | 用途 |
-|---|---|
-| `configs/cpu_smoke.yaml` | 合成 reward + log-prob，跑 50 步看 loss 下降 |
-| `configs/h200_qwen.yaml` | 真实 Qwen2.5-7B + GSM8K rule-based reward |
+## 进入下一讲
 
-## 进入下一关
-
-通过后回到 [L11.5 SLiME rollout freshness](../l33_rl_rollout_freshness/README.md) 或
-进入 [L12 capstone](../l35_multimodal_capstone/README.md)。
+通过 L39 后进入 [L40 · GAE Chunked Parallel](../l34.5_gae_chunked_parallel/README.md)。

@@ -1,5 +1,5 @@
 """
-L05 Patch · Bucketed Manual DDP
+L12 Patch · Bucketed Manual DDP
 
 填空规则：
 - TODO(student) 必须自己写
@@ -21,7 +21,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 
 class BucketedManualDDP:
-    """L01.5 ManualDDP 的进阶版：把 grad 按字节数分组合并 all-reduce."""
+    """逐参数 ManualDDP 的进阶版：把 grad 按字节数分组合并 all-reduce."""
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class BucketedManualDDP:
         )
         self.bucket_size_bytes = int(bucket_size_mb * 1024 * 1024)
         # TODO(student): self.buckets = self._create_buckets()
-        raise NotImplementedError("L05 Patch: implement __init__ buckets")
+        raise NotImplementedError("L12 Patch: implement __init__ buckets")
 
     def _create_buckets(self) -> List[List[nn.Parameter]]:
         """把 self.module 的 requires_grad params 按累加字节数分组。
@@ -57,7 +57,7 @@ class BucketedManualDDP:
         #     current.append(p); current_size += p_bytes
         #   if current: buckets.append(current)
         #   return buckets
-        raise NotImplementedError("L05 Patch: implement _create_buckets")
+        raise NotImplementedError("L12 Patch: implement _create_buckets")
 
     def synchronize_grads(self) -> None:
         if self.world_size == 1 or not dist.is_initialized():
@@ -71,4 +71,4 @@ class BucketedManualDDP:
         #     flat /= self.world_size
         #     for g, ug in zip(grads, _unflatten_dense_tensors(flat, grads)):
         #         g.copy_(ug)
-        raise NotImplementedError("L05 Patch: implement synchronize_grads")
+        raise NotImplementedError("L12 Patch: implement synchronize_grads")

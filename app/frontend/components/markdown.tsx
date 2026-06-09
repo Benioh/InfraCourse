@@ -1,10 +1,40 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { withPublicPrefix } from "@/lib/runtime";
+
+function isAbsoluteImageSrc(src: string): boolean {
+  return /^(?:https?:|data:|blob:)/i.test(src);
+}
+
+function normaliseRepoPath(value: string): string {
+  const stack: string[] = [];
+  for (const part of value.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      stack.pop();
+      continue;
+    }
+    stack.push(part);
+  }
+  return stack.join("/");
+}
+
+function imageSource(src: string, basePath?: string): string {
+  const cleaned = src.trim();
+  if (isAbsoluteImageSrc(cleaned)) return cleaned;
+  if (cleaned.startsWith("/")) return withPublicPrefix(cleaned);
+
+  const baseDir = basePath?.includes("/")
+    ? basePath.slice(0, basePath.lastIndexOf("/"))
+    : "";
+  const repoPath = normaliseRepoPath(baseDir ? `${baseDir}/${cleaned}` : cleaned);
+  return `${withPublicPrefix("/api/assets")}?path=${encodeURIComponent(repoPath)}`;
+}
 
 function renderInline(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/[^)]+\)|https?:\/\/[^\s)]+)/g;
+  const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s)]+)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -29,7 +59,7 @@ function renderInline(text: string): ReactNode[] {
         </strong>,
       );
     } else {
-      const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/);
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       const href = linkMatch ? linkMatch[2] : token;
       const label = linkMatch ? linkMatch[1] : token;
       nodes.push(
@@ -72,9 +102,11 @@ export type MarkdownProps = {
   compact?: boolean;
   /** Extra classes on the wrapping <div>. */
   className?: string;
+  /** Repository path of the markdown file; used to resolve relative image links. */
+  basePath?: string;
 };
 
-export function Markdown({ source, compact = false, className }: MarkdownProps) {
+export function Markdown({ source, compact = false, className, basePath }: MarkdownProps) {
   const lines = source.split("\n");
   const elements: ReactNode[] = [];
   let listItems: string[] = [];
@@ -99,6 +131,9 @@ export function Markdown({ source, compact = false, className }: MarkdownProps) 
   const codeWrapCls = compact
     ? "my-3 overflow-hidden rounded-xl border border-quest-border bg-[#1f2933]"
     : "my-4 overflow-hidden rounded-2xl border border-quest-border bg-[#1f2933]";
+  const imageCls = compact
+    ? "my-3 w-full rounded-xl border border-quest-border bg-white object-cover"
+    : "my-4 w-full rounded-2xl border border-quest-border bg-white object-cover";
 
   function flushList() {
     if (!listItems.length) return;
@@ -221,6 +256,23 @@ export function Markdown({ source, compact = false, className }: MarkdownProps) 
       flushList();
       flushParagraph();
       flushQuote();
+      continue;
+    }
+
+    const imageMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    if (imageMatch) {
+      flushList();
+      flushParagraph();
+      flushQuote();
+      elements.push(
+        <img
+          key={`img-${elements.length}`}
+          src={imageSource(imageMatch[2], basePath)}
+          alt={imageMatch[1]}
+          className={imageCls}
+          loading="lazy"
+        />,
+      );
       continue;
     }
 

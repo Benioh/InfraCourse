@@ -1,8 +1,9 @@
-"""L10.3 · 在合成数据上跑 DPO smoke：观察 loss 单调下降、reward_margin 拉开。"""
+"""L33 · 在合成数据上跑 DPO smoke：观察 loss 和 reward_margin。"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +30,13 @@ MISSION_ID = "l30_dpo_loss"
 
 
 def _impl():
+    impl = os.environ.get("IMPL", "starter")
+    if impl == "reference":
+        from reference import dpo as mod  # type: ignore[import-not-found]
+
+        return mod, "reference"
+    if impl != "starter":
+        raise ValueError(f"Unsupported IMPL={impl!r}; expected starter or reference")
     try:
         from starter import dpo as mod  # type: ignore[import-not-found]
 
@@ -91,7 +99,7 @@ def main() -> None:
     for param in ref.parameters():
         param.requires_grad_(False)
 
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=float(config.get("learning_rate", 1e-3)))
     pairs = int(config["num_pairs"])
     chosen_ids = torch.randint(0, vocab, (pairs, seq))
     rejected_ids = torch.randint(0, vocab, (pairs, seq))

@@ -1,4 +1,4 @@
-"""Reference solution for L06 Patch · multimodal collator."""
+"""Reference solution for L18 Patch · multimodal collator."""
 
 from __future__ import annotations
 

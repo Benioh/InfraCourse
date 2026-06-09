@@ -1,4 +1,4 @@
-# Debug Tickets — L08.3
+# Debug Tickets - L23
 
 | Ticket | 故障形态 | 主要练什么 |
 |---|---|---|

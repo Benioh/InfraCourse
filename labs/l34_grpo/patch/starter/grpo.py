@@ -1,4 +1,4 @@
-"""L11.8 Patch · GRPO / RLOO advantage + loss."""
+"""L39 Patch · GRPO / RLOO advantage + loss."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def grpo_advantage(rewards: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     # TODO(student): mean = rewards.mean(); std = rewards.std(unbiased=False)
     # TODO(student): if std < eps return rewards - mean (or zeros)
     # TODO(student): return (rewards - mean) / (std + eps)
-    raise NotImplementedError("L11.8: implement grpo_advantage")
+    raise NotImplementedError("L39: implement grpo_advantage")
 
 
 def rloo_advantage(rewards: torch.Tensor) -> torch.Tensor:
@@ -20,7 +20,7 @@ def rloo_advantage(rewards: torch.Tensor) -> torch.Tensor:
     # TODO(student): total = rewards.sum()
     # TODO(student): baseline_i = (total - rewards) / (G - 1)
     # TODO(student): return rewards - baseline_i
-    raise NotImplementedError("L11.8: implement rloo_advantage")
+    raise NotImplementedError("L39: implement rloo_advantage")
 
 
 def grpo_loss(
@@ -41,4 +41,4 @@ def grpo_loss(
     # TODO(student): kl_loss = (kl * mask).sum() / mask.sum().clamp(min=1)
     # TODO(student): total = policy_loss + kl_beta * kl_loss
     # TODO(student): also report ratio_mean and clipped_frac
-    raise NotImplementedError("L11.8: implement grpo_loss")
+    raise NotImplementedError("L39: implement grpo_loss")

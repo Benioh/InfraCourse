@@ -1,75 +1,102 @@
 mission: l32.5_ipc_weight_sync
-title: L11.3 Quiz · CUDA IPC Weight Sync
+title: L37 Quiz · CUDA IPC Weight Sync
 pass_threshold: 1.0
 description: |
-  3 题打中 handle tuple 共享 storage 这件事最容易模糊的点。
+  检查学习者是否理解 handle tuple、共享 storage、rank gather、LocalSerializedTensor、flush 时序和 CPU patch 边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L37 在 RL co-locate weight sync 主线中的位置
+    kind: doc
+    path: labs/l32.5_ipc_weight_sync/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 handle tuple 到 SLiME/SGLang 对照
+    kind: doc
+    path: labs/l32.5_ipc_weight_sync/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、SGLang、SLiME 和 serializer 阅读
+    kind: doc
+    path: labs/l32.5_ipc_weight_sync/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l32.5_ipc_weight_sync/patch/task.md
-  - title: 读 weight update 主线博客
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 patch reference
     kind: source
-    path: github_repo/Awesome-ML-SYS-Tutorial/rlhf/sys-design/readme-1.md
-  - title: 跑对应 notebook
-    kind: notebook
-    path: notebooks/n22_weight_sync_handle_tuple.ipynb
+    path: labs/l32.5_ipc_weight_sync/patch/reference/ipc_weight_sync.py
+    estimate_min: 8
+  - title: 对照 SGLang ModelRunner
+    kind: source
+    path: github_repo/sglang/python/sglang/srt/model_executor/model_runner.py
+    estimate_min: 15
 
 questions:
   - id: q1_handle_content
-    prompt: |
-      verl `MultiprocessingSerializer.serialize(tensor)` 返回的 bytes 里包含哪些内容？
+    prompt: L37 中 `serialize_handle(tensor)` 返回的 bytes 应该包含什么？
     options:
       - id: a
-        text: 完整 tensor 数据 + meta 信息
-      - id: b
-        text: 只有 tensor data 的 base64 编码
-      - id: c
-        text: rebuild_fn + (size, stride, dtype, device, CUDA IPC handle, refcount, event)，**不含数据**
+        text: handle、shape、dtype、stride、device 等元数据，不包含完整 tensor data
         correct: true
+      - id: b
+        text: tensor data 的 base64 编码
+      - id: c
+        text: tensor.tolist() 的 pickle 结果
       - id: d
-        text: tensor 的 numpy view
-    explanation: |
-      C 对：返回的 handle tuple 只是元数据 + CUDA IPC handle（storage 指针），
-      绝不包含数据本身。这是为什么 verl 能在 ms 级跨进程同步 GB 级权重——
-      传输的是几百字节的 handle，数据靠 IPC 共享同一块 VRAM。
-      A/B/D 都会让传输量等于 tensor 数据量，违背设计目标。
-
-  - id: q2_who_gets_list
-    prompt: |
-      `dist.gather_object(serialized_tensor, dst=0)` 调用后：
+        text: 只包含 shape 和 dtype，不需要 handle
+    explanation: "handle 是访问凭证；如果 bytes 接近 tensor data 大小，co-locate 路径已经退化成数据复制。"
+  - id: q2_storage
+    prompt: patch 为什么要检查 `data_ptr()` 一致？
     options:
       - id: a
-        text: 所有 rank 都拿到完整的 handle list
-      - id: b
-        text: 只有 dst (rank 0) 拿到 list，其他 rank 拿到 None
+        text: 它证明 CPU 模拟中反序列化结果和源 tensor 共享 storage
         correct: true
+      - id: b
+        text: 它证明 tensor 数值一定更准确
       - id: c
-        text: 只有 rank 0 调用，其他 rank 不参与
+        text: 它证明 CUDA IPC 跨进程已经真实可用
       - id: d
-        text: 所有 rank 拿到 list，但只有 dst 的内容是真值
-    explanation: |
-      B 对：所有 rank 都必须调用 gather_object（collective op），但只有 dst rank
-      拿到完整 list。这样后续只有 rank 0 跨进程把 list 传给 SGLang Engine，
-      避免了每 rank 都持有一份完整 handle 列表的内存浪费。
-      C 错：collective op 必须所有 rank 同时调用，否则会死锁。
-
-  - id: q3_flush_cache_timing
-    prompt: |
-      为什么 verl 在 update_weights_from_tensor 里只在最后一个 tensor 时
-      flush_cache=True，而不是每次都 flush？
+        text: 它证明不需要 handle
+    explanation: "数值相等可能来自 copy；`data_ptr()` 一致才说明本地模拟返回的是同一块 storage。"
+  - id: q3_gather
+    prompt: "`gather_handles_to_rank0` 中非 0 rank 应返回什么？"
     options:
       - id: a
-        text: 频繁 flush 会让 SGLang radix tree 反复重建，浪费 KV cache
+        text: None
         correct: true
       - id: b
-        text: flush_cache 是一次性 op，多次调用会报错
+        text: 完整 handle list
       - id: c
-        text: 中间不 flush 是为了让旧 KV cache 继续 serve 新请求
+        text: 自己的 local_blob
       - id: d
-        text: flush_cache 必须在 forward 前调用，所以放最后
-    explanation: |
-      A 对：每个 weight update 都会 invalidate KV cache 里依赖该 weight 的项。
-      如果每个 tensor 都 flush，radix tree 反复清空-重建；只在最后一次 flush，
-      整批 weight update 完成后再统一清掉旧 KV，性能最好。
-      C 错：旧 KV 在 weight 已经变了的情况下绝不能再用，逻辑上必须清。
+        text: 一个空 list
+    explanation: "这模拟 gather_object 的单目标接收语义：所有 rank 参与，只有目标 rank 在收齐后拿到完整列表。"
+  - id: q4_sglang_unwrap
+    prompt: SGLang TP rank 如何从 `LocalSerializedTensor` 取自己的 tensor？
+    options:
+      - id: a
+        text: 用 `values[tp_rank]` 反序列化对应 rank 的 blob
+        correct: true
+      - id: b
+        text: 所有 TP rank 都读取 `values[0]`
+      - id: c
+        text: 直接把 `values` 写进模型参数
+      - id: d
+        text: 先把所有 blob 合并成 JSON
+    explanation: "真实 `LocalSerializedTensor.get(rank)` 也是按 rank 选择 serialized tensor。"
+  - id: q5_boundary
+    prompt: L37 patch-test 不能证明什么？
+    options:
+      - id: a
+        text: 真实 CUDA IPC 跨进程、SGLang endpoint、Ray actor 和 GPU 生命周期都正确
+        correct: true
+      - id: b
+        text: handle bytes 小于 tensor data
+      - id: c
+        text: CPU pool 中 data_ptr 共享
+      - id: d
+        text: rank 0 gather 语义
+    explanation: "本关 CPU patch 只证明结构合同；硬件路径需要单独用 multiprocessing、GPU 和真实 engine 验证。"

@@ -17,6 +17,8 @@ type Props = {
 
 const KIND_LABELS: Record<string, string> = {
   read: "📄 必读",
+  doc: "📄 讲义",
+  task: "📄 任务契约",
   notebook: "📓 跑 Notebook",
   source: "🔍 读源码",
 };
@@ -24,11 +26,19 @@ const KIND_LABELS: Record<string, string> = {
 function PrereqLink({
   item,
 }: {
-  item: { title: string; kind: string; path: string; estimate_min?: number };
+  item: { title: string; kind: string; path: string; href?: string; estimate_min?: number };
 }) {
   let href = "#";
-  if (item.kind === "notebook") {
+  if (item.href) {
+    href = item.href.startsWith("#") || item.href.startsWith("http")
+      ? item.href
+      : withPublicPrefix(item.href);
+  } else if (item.kind === "notebook") {
     href = withPublicPrefix(`/notebooks?path=${encodeURIComponent(item.path)}`);
+  } else if (item.kind === "doc") {
+    href = "#lesson";
+  } else if (item.kind === "task") {
+    href = "#patch";
   } else if (item.kind === "source" || item.kind === "read") {
     href = withPublicPrefix(`/source?path=${encodeURIComponent(item.path)}`);
   }

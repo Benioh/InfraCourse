@@ -1,4 +1,4 @@
-# L05.5 Patch · MoE Top-2 Router + Capacity Factor + Aux Loss
+# L14 Patch · MoE Top-2 Router + Capacity Factor + Aux Loss
 
 ## 你要交付什么
 

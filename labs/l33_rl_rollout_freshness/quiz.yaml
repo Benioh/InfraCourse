@@ -1,83 +1,102 @@
 mission: l33_rl_rollout_freshness
-title: L11.5 Quiz · Versioned RolloutManager
+title: L38 Quiz · Rollout Freshness
 pass_threshold: 1.0
 description: |
-  检查学习者是否理解 SLiME/verl 训练和 rollout engine 解耦后的权重版本问题。
+  检查学习者是否理解 rollout freshness、versioned manager、stale rollout 风险、SLiME 版本证据和 drill 验收边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L38 在 RL rollout 主线中的位置
+    kind: doc
+    path: labs/l33_rl_rollout_freshness/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 stale rollout、版本合同到 SLiME 排障
+    kind: doc
+    path: labs/l33_rl_rollout_freshness/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、MiniInfra、SLiME 和 drill 阅读
+    kind: doc
+    path: labs/l33_rl_rollout_freshness/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l33_rl_rollout_freshness/patch/task.md
-  - title: 读 SLiME train_actor
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 patch reference
     kind: source
-    path: github_repo/slime/slime/ray/train_actor.py
-  - title: 读 SLiME rollout
+    path: labs/l33_rl_rollout_freshness/patch/reference/rollout_manager.py
+    estimate_min: 8
+  - title: 对照 SLiME rollout manager
     kind: source
     path: github_repo/slime/slime/ray/rollout.py
+    estimate_min: 15
 
 questions:
   - id: q1_freshness
-    prompt: rollout freshness 指什么？
+    prompt: rollout freshness 在 L38 中指什么？
     options:
       - id: a
         text: rollout engine 使用的权重落后 actor 当前权重多少 step
         correct: true
       - id: b
-        text: prompt 是否新鲜
+        text: prompt 文本是否刚生成
       - id: c
         text: GPU 风扇转速
       - id: d
-        text: markdown 更新时间
-    explanation: "训练和推理解耦后，权重同步延迟会造成 stale rollout。"
+        text: README 的更新时间
+    explanation: "L38 用 actor_version - server.weight_version 计算 staleness。"
   - id: q2_block
-    prompt: 所有 rollout engine 都 stale 时继续生成的风险是什么？
+    prompt: 所有 rollout engine 都 stale 时继续生成的主要风险是什么？
     options:
       - id: a
-        text: 用过旧策略采样，advantage/KL 语义偏离当前 actor
+        text: 用过旧 policy 采样，reward/KL/advantage 难以对应当前 actor
         correct: true
       - id: b
         text: tokenizer 文件一定损坏
       - id: c
-        text: HTTP 必定 404
+        text: HTTP 一定返回 404
       - id: d
         text: checkpoint 一定消失
-    explanation: "stale rollout 会降低 RL 更新的有效性和稳定性。"
-  - id: q3_sync
-    prompt: weight sync 太频繁的主要代价是什么？
+    explanation: "stale rollout 产出的样本格式可能正常，但 policy 版本不对。"
+  - id: q3_update
+    prompt: "`update_weights(version, server_ids=['s1'])` 应该怎么做？"
     options:
       - id: a
-        text: rollout engine 等待或传输开销增加，吞吐下降
+        text: 只更新 s1，并返回实际更新的 server id 列表
         correct: true
       - id: b
-        text: reward parser 不再工作
+        text: 更新所有 server
       - id: c
-        text: batch size 自动变 0
+        text: 删除 s1
       - id: d
-        text: loss 不能记录
-    explanation: "freshness 和吞吐需要 trade-off。"
+        text: 只修改 actor_version，不改 server weight_version
+    explanation: "局部更新必须保留子集语义，否则无法暴露 subset starvation。"
   - id: q4_debug
-    prompt: reward 突然下降时，除了 reward parser，还应检查什么？
+    prompt: reward 突然下降时，除了 reward parser，还应优先检查什么？
     options:
       - id: a
-        text: rollout freshness、KL、actor/engine step gap
+        text: actor_version、weight_version、staleness、server_id 和 KL
         correct: true
       - id: b
-        text: 只看 README
-      - id: c
         text: 只看端口号
+      - id: c
+        text: 只看 README 字数
       - id: d
         text: 只看 CSS
-    explanation: "RL 问题常跨 reward、policy、rollout、sync 多层。"
-  - id: q5_metric
-    prompt: versioned rollout 至少应记录什么？
+    explanation: "版本证据能帮助区分 reward 问题、policy 问题和 stale rollout。"
+  - id: q5_drill
+    prompt: L38 drill 的 no_update 场景应该验证什么？
     options:
       - id: a
-        text: actor_version、server weight_version、staleness、server_id
+        text: server 全部变旧后必须出现 no-fresh-server failure
         correct: true
       - id: b
-        text: 只包含 HTTP status
+        text: GPU NCCL 带宽达标
       - id: c
-        text: 只包含文件大小
+        text: SGLang 真实 endpoint 已在线更新
       - id: d
-        text: 只包含 README 行数
-    explanation: "没有 actor/server 版本信息，就无法判断 rollout 是否 stale。"
+        text: GRPO 长训已经稳定
+    explanation: "CPU drill 验证版本准入和证据格式，不替代真实集群训练。"

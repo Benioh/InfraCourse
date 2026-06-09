@@ -1,4 +1,4 @@
-"""Reference solution for L08.7 Patch · greedy_verify."""
+"""Reference solution for L25 Patch · greedy_verify."""
 
 from __future__ import annotations
 

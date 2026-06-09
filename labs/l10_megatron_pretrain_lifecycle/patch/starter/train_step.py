@@ -1,4 +1,4 @@
-"""L04.8 Patch · Megatron-shaped train_step.
+"""L11 Patch · Megatron-shaped train_step.
 
 This is a small, testable slice of ``mini_infra/megatron/training/training.py``:
 zero grads, run forward/backward, step optimizer, step LR scheduler, return metrics.
@@ -35,4 +35,4 @@ def train_step(
     # TODO(student): call optimizer.step(), detect skipped iterations, and expose grad_norm.
     # TODO(student): call lr_scheduler.step() only when optimizer update succeeds.
     # TODO(student): return iteration/loss/skipped_iter/lr/grad_norm metrics.
-    raise NotImplementedError("L04.8: implement train_step")
+    raise NotImplementedError("L11: implement train_step")

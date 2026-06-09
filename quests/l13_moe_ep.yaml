@@ -1,50 +1,486 @@
 id: l13_moe_ep
-title: MoE Top-2 Router + Capacity + Aux Loss
-level: L05.5
-act: 第 1 章：训练框架
-role: MoE 学徒
+title: L14 · MoE Top-2 Router、Capacity 与 Expert Parallelism
+level: L14
+act: 第 2 章：训练系统、并行与数据
+role: MoE 路由学徒
 priority: 核心
 estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - Megatron MoE (对照)
-  - Switch Transformer (对照)
+  - Megatron-LM
+  - MiniInfra
 
 patch:
   description: |
-    实现 top2_router(logits, capacity_factor)：返回 dispatch_mask、combine_weights、
-    aux_loss。包含 softmax + topk + scatter + capacity 限制 + Switch 风格负载均衡 loss。
+    实现 `top2_router(logits, capacity_factor)`：从 router logits 得到 top-2 expert，
+    构造 `dispatch_mask` 和 `combine_weights`，按 capacity factor drop overflow route，
+    并计算 Switch 风格 load-balance aux loss。
   task_md: labs/l13_moe_ep/patch/task.md
   starter_file: labs/l13_moe_ep/patch/starter/moe_router.py
   reference_file: labs/l13_moe_ep/patch/reference/moe_router.py
   test_command: make patch-test M=l13_moe_ep
   status_file: labs/l13_moe_ep/patch/.last_run.json
   test_count: 5
-  test_kind: 结果对比 + 行为契约
+  test_kind: MoE routing 张量行为合同
 
 source_reading:
-  - title: Switch Transformer paper Section 3 (router + aux loss)
-    repo_path: docs/术语表.md
-    focus: 公式 (3) (4) 与本关 patch 一一对应
-  - title: Megatron MoE 实现
-    repo_path: github_repo/Megatron-LM/megatron/core/
+  - title: Patch starter
+    repo_path: labs/l13_moe_ep/patch/starter/moe_router.py
+    focus: 学生需要补齐的 top-2 router 合同
+    highlights:
+      - title: 读函数签名
+        lines: [20, 32]
+        note: |
+          L20-L23: `top2_router` 接收 logits 和 capacity factor。
+          L24-L30: docstring 定义 dispatch mask、combine weights 和 aux loss。
+          L31-L32: 从 logits 读取 token 数和 expert 数。
+      - title: 读 softmax top-k TODO
+        lines: [33, 42]
+        note: |
+          L33-L35: 第一步要求把 logits 变成 softmax 概率。
+          L37-L42: 第二步要求取 top-2，并在两个选中 expert 内归一化。
+      - title: 读 scatter TODO
+        lines: [43, 46]
+        note: |
+          L43-L46: 第三步要求 scatter 回完整 expert 维度。
+      - title: 读 capacity TODO
+        lines: [48, 52]
+        note: |
+          L48-L52: capacity 限制要求每个 expert 最多接收固定数量 route。
+      - title: 读 overflow 处理 TODO
+        lines: [54, 64]
+        note: |
+          L54-L60: 对每个 expert 列找出需要保留的高权重 token。
+          L61-L64: overflow route 的 weights 和 mask 必须同步清零。
+  - title: Patch reference
+    repo_path: labs/l13_moe_ep/patch/reference/moe_router.py
+    focus: 参考实现中的 top-2、capacity 和 aux loss
+    highlights:
+      - title: 读 top-2 和 scatter
+        lines: [16, 22]
+        note: |
+          L16: 对 logits 做 softmax 得到全 expert 概率。
+          L17-L18: 取 top-2，并在 top-2 内重新归一化。
+          L20-L22: scatter 回完整 expert 维度，得到 weights 和 mask。
+      - title: 读 capacity drop
+        lines: [24, 33]
+        note: |
+          L24: 按 token、top-k、expert 数和 capacity factor 计算 capacity。
+          L25-L28: 逐 expert 检查实际 route 数是否超过 capacity。
+          L29-L33: 只保留高权重 route，并同步更新 weights 与 mask。
+      - title: 读 aux loss
+        lines: [35, 39]
+        note: |
+          L35: `fraction_routed` 来自 capacity 后的 dispatch mask。
+          L36: `fraction_prob` 来自全 softmax 概率。
+          L37-L39: Switch 风格 aux loss 返回标量。
+  - title: Patch tests
+    repo_path: labs/l13_moe_ep/patch/tests/test_patch.py
+    focus: 测试覆盖的 routing 不变量
+    highlights:
+      - title: 读 top-2 测试
+        lines: [22, 30]
+        note: |
+          L22-L26: 随机构造 logits，并设置足够大的 capacity。
+          L27-L30: capacity 足够时每个 token 应有两个 active expert。
+      - title: 读 capacity 测试
+        lines: [45, 56]
+        note: |
+          L45-L49: docstring 给出 capacity 计算例子。
+          L50-L56: 构造偏向 expert 0 的 logits。
+      - title: 读 capacity 断言
+        lines: [57, 62]
+        note: |
+          L57-L62: 每个 expert 的 load 都不能超过 capacity。
+      - title: 读 aux loss 测试
+        lines: [65, 72]
+        note: |
+          L65-L72: near-uniform logits 下 top-2 aux loss 应接近 2。
+      - title: 读 aux loss 失衡测试
+        lines: [75, 86]
+        note: |
+          L75-L86: 极端偏向一个 expert 时 aux loss 应明显升高。
+  - title: MiniInfra router
+    repo_path: mini_infra/megatron/core/transformer/moe/router.py
+    focus: 教学版 routing、entropy 和 aux 指标
+    highlights:
+      - title: 读 softmax
+        lines: [28, 34]
+        note: |
+          L28-L29: 教学版 softmax 接收一行 router 分数。
+          L31-L34: 减去最大值后指数化并归一化。
+      - title: 读 route_tokens
+        lines: [37, 43]
+        note: |
+          L37-L43: `route_tokens` 对每个 token 输出 top-k expert 和概率。
+      - title: 读 route_tokens 排序
+        lines: [45, 50]
+        note: |
+          L45-L49: 每行先 softmax，再按概率排序取 top-k。
+          L50: 返回所有 token 的 route 表。
+      - title: 读 entropy
+        lines: [58, 68]
+        note: |
+          L58-L60: router entropy 先统计每个 expert 收到的 route 数。
+          L61-L63: 没有 route 时返回 0。
+          L64-L68: 按 expert 分布计算归一化 entropy。
+  - title: MiniInfra MoE summary
+    repo_path: mini_infra/megatron/core/transformer/moe/experts.py
+    focus: drill 指标聚合路径
+    highlights:
+      - title: 读 moe_summary 输入
+        lines: [30, 41]
+        note: |
+          L30-L37: `moe_summary` 接收 token、expert、top-k、capacity 和 EP 配置。
+          L38-L41: 生成 synthetic logits，执行 routing、capacity 和 dispatch plan。
+      - title: 读 moe_summary 输出
+        lines: [44, 52]
+        note: |
+          L44-L52: 输出 token、expert、top-k、capacity、参数估算和路由指标。
+      - title: 读 moe_summary 细节
+        lines: [53, 60]
+        note: |
+          L53-L57: 输出 overflow、tokens per expert、all-to-all 和 step time 估算。
+          L58-L60: 保留 dispatch 和 capacity 细节，供 drill 复盘。
+  - title: Megatron TopKRouter
+    repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/router.py
+    focus: 生产 router 的 logits、scores、probs 和 routing_map
+    highlights:
+      - title: 读 Router 初始化
+        lines: [29, 37]
+        note: |
+          L29-L37: Router 基类保存配置和 MoE process groups。
+      - title: 读 gating
+        lines: [100, 107]
+        note: |
+          L100-L105: 根据配置选择 router 计算 dtype。
+          L106-L107: gating linear 把 hidden states 转成 logits。
+      - title: 读 TopKRouter 命名
+        lines: [137, 145]
+        note: |
+          L137-L145: TopKRouter 工作流包含 logits、top-k、token dropping 和 aux loss。
+      - title: 读 TopKRouter 输出
+        lines: [146, 150]
+        note: |
+          L146-L150: docstring 定义 logits、scores、probs 和 routing_map 的含义。
+  - title: Megatron moe_utils
+    repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/moe_utils.py
+    focus: aux loss、routing scatter 和 token dropping
+    highlights:
+      - title: 读 aux loss 签名
+        lines: [59, 68]
+        note: |
+          L59-L68: Switch load-balancing loss 接收 probs、tokens_per_expert、top-k 和 expert 数。
+      - title: 读 aux loss 计算
+        lines: [142, 146]
+        note: |
+          L142: 先按 expert 汇总 router 概率。
+          L143-L145: 概率和 token count 相乘，并按 expert、top-k 和 token 数缩放。
+          L146: 返回 aux loss。
+      - title: 读 routing scatter
+        lines: [823, 830]
+        note: |
+          L823-L824: dense_output 为真时直接返回 top-k 概率和索引。
+          L826-L830: 确定性模式下进入 index_put 构造分支。
+      - title: 读 scatter 输出
+        lines: [832, 842]
+        note: |
+          L832-L836: index_put 写入 routing_probs 和 routing_map。
+          L837-L842: 普通模式下用 scatter 构造 dense probabilities 和 boolean map。
+      - title: 读 token dropping
+        lines: [904, 911]
+        note: |
+          L904-L911: token dropping 接收 routing_probs、routing_map、top-k、capacity 和 drop policy。
+      - title: 读 capacity 与 mask
+        lines: [933, 940]
+        note: |
+          L933-L934: routing_probs 和 routing_map 必须都是二维张量。
+          L935-L940: capacity 使用 `num_tokens * router_topk` 和 expert 数计算。
+      - title: 读 final map/probs
+        lines: [947, 954]
+        note: |
+          L947-L954: 按概率或位置构造 capacity mask。
+      - title: 读 final capacity 应用
+        lines: [958, 965]
+        note: |
+          L958-L965: final map 和 final probs 同步应用 capacity 约束。
+  - title: Megatron token_dispatcher
+    repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+    focus: dispatcher 把 routing 结果变成通信和重排
+    highlights:
+      - title: 读 dispatcher 状态
+        lines: [53, 60]
+        note: |
+          L53-L60: MoETokenDispatcher 初始化接收配置和 process groups。
+      - title: 读 dispatcher groups
+        lines: [68, 76]
+        note: |
+          L68-L76: 保存 shared expert、EP/TP groups 和组合 group。
+      - title: 读 dispatcher ranks
+        lines: [78, 81]
+        note: |
+          L78-L81: 记录 TP 和 EP 的 size/rank。
+      - title: 读 dispatch_preprocess
+        lines: [87, 99]
+        note: |
+          L87-L90: dispatch preprocess 接收 tokens、routing_map 和 probs。
+          L91-L99: 该阶段做本地准备，避免提前暴露通信。
+      - title: 读 dispatch_preprocess 输出
+        lines: [101, 108]
+        note: |
+          L101-L108: 返回 token dispatch 前需要的中间状态。
+      - title: 读 token_dispatch
+        lines: [111, 120]
+        note: |
+          L111-L120: token_dispatch 接收 hidden states 和 route probabilities。
+      - title: 读 token_dispatch 输出
+        lines: [122, 125]
+        note: |
+          L122-L125: 返回发往 expert 设备后的 token 和概率。
+      - title: 读 AllGather dispatcher
+        lines: [211, 215]
+        note: |
+          L211-L215: AllGather dispatcher 说明通信域包含 TP 和 EP。
+      - title: 读 AllGather 初始化
+        lines: [217, 229]
+        note: |
+          L217-L229: 初始化接收 local experts、config 和 process groups。
+      - title: 读 AllGather 状态
+        lines: [232, 238]
+        note: |
+          L232-L238: 保存 local expert 数、indices、top-k 和 bias 配置。
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l13_moe_ep/system_map.md
+    description: L14 在稀疏 MoE/EP 主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l13_moe_ep/lecture.md
+    description: 从 MoE 稀疏激活、top-2 router、capacity、aux loss 讲到 Megatron dispatcher 对照。
+  - title: 源码带读讲义
+    path: labs/l13_moe_ep/source_walkthrough.md
+    description: 按 patch、MiniInfra、Megatron router、moe_utils 和 token dispatcher 组织源码阅读路线。
 
 mini_infra_targets:
-  - mini_infra/megatron/
-
+  - mini_infra/megatron/core/transformer/moe/router.py
+  - mini_infra/megatron/core/transformer/moe/experts.py
 notebooks:
   - notebooks/n15_moe_router_capacity.ipynb
-
 tickets:
   - moe_router_collapse_001
   - moe_capacity_overflow_002
   - moe_alltoall_slow_003
-
-prereq: l11_megatron_scale_optimization
-next_lab: l15_megatron_parallel_checkpoint
-
+prereq: l12_fsdp2_llama
+next_lab: l14_pipeline_1f1b
 gpu_modes:
-  local: CPU 即可
-  cluster: 分布式 EP all-to-all 验证（可选）
+  local: CPU patch 和 MiniInfra drill
+  cluster: 分布式 EP all-to-all benchmark
+
+lesson:
+  opening: |
+    # 第 14 讲：MoE Top-2 Router、Capacity 与 Expert Parallelism
+
+    L14 解决 MoE 层的路由控制问题。MoE 让每个 token 只激活少数 expert，但 router 一旦偏向少数 expert，就会产生 overload、drop rate 上升和 all-to-all 等待。本关先把 top-2 router 的张量语义写清楚，再对照 Megatron 的 `TopKRouter`、token dropping 和 dispatcher。
+
+    Patch 只实现 `top2_router(logits, capacity_factor)`。它返回 `dispatch_mask`、`combine_weights` 和 `aux_loss`，不执行 expert MLP，也不做真实 NCCL 通信。
+  sections:
+    - title: 课程定位：MoE 把 FFN 计算变成路由问题
+      plain_explanation: |
+        Dense FFN 让每个 token 经过同一组参数。MoE 把 FFN 拆成多个 expert，每个 token 只选 top-k 个 expert。这样可以扩大参数总量，同时控制单个 token 的计算量。
+
+        代价是系统多了 router、capacity 和 dispatcher。router 决定 token 去哪，capacity 控制每个 expert 的队列上限，dispatcher 把 token 发到 expert 所在 rank。任何一层出错，都会表现为 drop rate、负载不均、all-to-all 慢或 loss 异常。
+      mental_model: |
+        Dense FFN 像所有 token 排同一个窗口；MoE 像多个窗口并行处理，但需要调度员决定每个 token 去哪个窗口。
+      why_it_matters: |
+        MoE 的瓶颈经常不在 expert MLP 本身，而在路由不均和跨 rank token 通信。先读懂 router，才能定位 EP 性能问题。
+      source_refs:
+        - title: MiniInfra MoE summary
+          repo_path: mini_infra/megatron/core/transformer/moe/experts.py
+          lines: [30, 41]
+          note: |
+            L30-L37: `moe_summary` 接收 token、expert、top-k、capacity 和 EP 配置。
+            L38-L41: 生成 logits，并串起 routing、capacity 和 dispatch plan。
+        - title: Megatron dispatcher 状态
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [68, 76]
+          note: |
+            L68-L76: dispatcher 保存 shared expert、EP/TP groups 和组合 group。
+        - title: Megatron dispatcher ranks
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [78, 81]
+          note: |
+            L78-L81: 保存 TP 和 EP size/rank，后续通信依赖这些状态。
+      common_confusions:
+        - 认为 MoE 只是在模型里多放几个 FFN。
+        - 只看 expert MLP FLOPs，不看 token dispatch 和 combine。
+        - 把 CPU patch 通过当成 EP 通信性能合格。
+      checkpoint_questions:
+        - MoE 的稀疏激活省下哪类计算？
+        - router 不均为什么会拖慢 EP group？
+        - 本关 patch 不覆盖哪些生产路径？
+
+    - title: Top-2 routing：从 logits 到 mask 和 weights
+      plain_explanation: |
+        router logits 的形状是 `(num_tokens, num_experts)`。softmax 后，每个 token 得到一个 expert 概率分布。top-2 选择给出两个 expert id 和对应概率；再把这两个概率在 top-2 内重新归一化。
+
+        `dispatch_mask` 决定 token 是否发给某个 expert，`combine_weights` 决定 expert 输出回来后按多少权重合并。两者形状相同，且必须共享同一个 token-to-expert 对齐关系。没有 capacity drop 时，mask 每行有两个 1，weights 每行和接近 1。
+      mental_model: |
+        mask 是物流标签，weights 是结算比例。标签决定去哪，比例决定回来后怎么加权。
+      why_it_matters: |
+        如果 mask 和 weights 错位，dispatcher 可能把 token 发给一个 expert，却用另一个 expert 的权重合并。数值可能错误但不一定立刻报 shape error。
+      source_refs:
+        - title: Reference top-2 scatter
+          repo_path: labs/l13_moe_ep/patch/reference/moe_router.py
+          lines: [16, 22]
+          note: |
+            L16: softmax 得到全 expert 概率。
+            L17-L18: 取 top-2 并在 top-2 内归一化。
+            L20-L22: scatter 回完整 expert 维度，得到 weights 和 mask。
+        - title: Megatron routing scatter
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/moe_utils.py
+          lines: [837, 842]
+          note: |
+            L837-L840: 普通模式下用 scatter 构造 routing probabilities 和 boolean map。
+            L842: 返回 dense probabilities 和 routing map。
+      common_confusions:
+        - 只返回 expert id，缺少后续 capacity 和 combine 需要的 dense 形状。
+        - top-2 后忘记重新归一化，导致 weights 行和小于 1。
+        - 把 aux loss 的概率来源误写成 top-2 normalized weights。
+      checkpoint_questions:
+        - "`dispatch_mask` 和 `combine_weights` 分别服务于 MoE forward 的哪一步？"
+        - top-2 weights 为什么要重新归一化？
+        - Megatron 的 `routing_map` 对应本关哪个输出？
+
+    - title: Capacity 与 token dropping
+      plain_explanation: |
+        capacity factor 控制每个 expert 最多接收多少 route。top-2 时总 route 数是 `num_tokens * 2`，均匀分给 expert 后乘以 capacity factor。本关按 `max(1, int(capacity_factor * num_tokens * 2 / num_experts))` 计算 capacity。
+
+        overflow 时，reference 按该 expert 列的 combine weight 保留前 capacity 个 route，其余 route 的 weights 和 mask 同步清零。这样可以保留 router 更有信心的分配，同时避免重新路由的额外通信轮。
+      mental_model: |
+        capacity 像每个 expert 的队列长度上限。排不进队列的 route 会取消，不能只取消标签而保留结算比例。
+      why_it_matters: |
+        capacity 直接影响 drop rate、padding、expert buffer 和 all-to-all 大小。它是质量与系统成本之间的旋钮。
+      source_refs:
+        - title: Reference capacity
+          repo_path: labs/l13_moe_ep/patch/reference/moe_router.py
+          lines: [24, 33]
+          note: |
+            L24: 根据 token、top-k、expert 和 capacity factor 计算 capacity。
+            L25-L28: 逐 expert 检查 route 数。
+            L29-L33: 保留高权重 route，并同步更新 weights 与 mask。
+        - title: Megatron capacity
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/moe_utils.py
+          lines: [933, 940]
+          note: |
+            L933-L934: capacity 逻辑要求 routing_probs 和 routing_map 都是二维。
+            L935-L940: capacity 使用 `num_tokens * router_topk` 和 expert 数计算。
+        - title: Megatron final map/probs
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/moe_utils.py
+          lines: [958, 965]
+          note: |
+            L958-L961: pad_to_capacity 分支直接用 capacity mask。
+            L963-L965: 普通分支把 routing_map 与 capacity mask 取交集，并同步更新 probabilities。
+      common_confusions:
+        - 把 top-2 的 capacity 算成 `num_tokens / num_experts`。
+        - drop 时只清 mask，忘记清 weights。
+        - capacity 越大越好，忽略 padding、buffer 和通信成本。
+      checkpoint_questions:
+        - 32 个 token、4 个 expert、top-2、capacity factor 0.5 时 capacity 是多少？
+        - overflow 时本关按什么分数保留 route？
+        - capacity 太小会怎样影响 drop rate 和 loss？
+
+    - title: Aux loss 与 router collapse
+      plain_explanation: |
+        Switch 风格 aux loss 使用 `fraction_routed` 和 `fraction_prob` 的乘积。`fraction_routed` 来自实际 routing mask，表示某个 expert 接到多少 route；`fraction_prob` 来自 softmax，保留可微梯度通道。
+
+        top-2 均匀路由时，所有 expert 的 routed fraction 接近 `2 / num_experts`，prob fraction 接近 `1 / num_experts`，aux loss 接近 2。本关不除以 top-k，因此测试会把 2 当作均衡尺度。
+      mental_model: |
+        aux loss 像路由分布的罚单：谁既被频繁选择又拿到高概率，谁就让 router 付出更高代价。
+      why_it_matters: |
+        没有负载均衡约束，router 可能长期偏向少数 expert，导致 drop rate 上升、某些 rank 慢、其他 expert 空闲。
+      source_refs:
+        - title: Reference aux loss
+          repo_path: labs/l13_moe_ep/patch/reference/moe_router.py
+          lines: [35, 39]
+          note: |
+            L35: `fraction_routed` 来自 dispatch mask。
+            L36: `fraction_prob` 来自全 softmax 概率。
+            L37-L39: 计算并返回标量 aux loss。
+        - title: Megatron aux loss
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/moe_utils.py
+          lines: [142, 146]
+          note: |
+            L142: 汇总每个 expert 的 router 概率。
+            L143-L145: 概率和 token count 相乘，并按 expert、top-k 和 token 数缩放。
+            L146: 返回 aux loss。
+        - title: MiniInfra entropy
+          repo_path: mini_infra/megatron/core/transformer/moe/router.py
+          lines: [58, 68]
+          note: |
+            L58-L60: entropy 先统计 tokens per expert。
+            L61-L63: 没有 route 时返回 0。
+            L64-L68: 按 expert 分布计算归一化 entropy。
+      common_confusions:
+        - 认为 top-2 均匀 aux loss 应接近 1。
+        - 只看 aux loss，不看 tokens per expert 和 overflow rate。
+        - 用 detached routing count 直接当作可微 loss。
+      checkpoint_questions:
+        - "`fraction_routed` 和 `fraction_prob` 分别来自哪个张量？"
+        - top-2 均匀 aux loss 为什么接近 2？
+        - router collapse 时 entropy、drop rate 和 all-to-all 通常怎么变化？
+
+    - title: Dispatcher 边界：从路由到 EP 通信
+      plain_explanation: |
+        router 输出的是 token-to-expert 关系。dispatcher 要把这个关系变成实际通信：先做本地 token 重排，再把 token 发到 expert 所在设备，expert 计算后再把输出合回原 token 顺序。
+
+        Megatron 把 dispatcher 拆成 preprocess、dispatch、postprocess、combine preprocess、combine 和 combine postprocess。AllGather 和 AllToAll 分支会根据 EP/TP group 决定通信域。本关 patch 不覆盖这些通信，但 mask 和 weights 必须满足 dispatcher 的输入语义。
+      mental_model: |
+        router 写目的地清单，dispatcher 负责装车、跨 rank 运输、卸货和按原顺序归还。
+      why_it_matters: |
+        MoE 性能问题经常出在 dispatcher：tokens per expert 不均、all-to-all 慢、combine 重排错，都可能让 step time 或 loss 异常。
+      source_refs:
+        - title: Dispatcher preprocess
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [87, 99]
+          note: |
+            L87-L90: preprocess 接收 tokens、routing_map 和 probs。
+            L91-L99: 该阶段做本地准备，避免提前暴露通信。
+        - title: Dispatcher preprocess 输出
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [101, 108]
+          note: |
+            L101-L108: 返回 dispatch 前所需状态。
+        - title: Token dispatch
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [111, 120]
+          note: |
+            L111-L120: token_dispatch 接收 hidden states 和 route probabilities。
+        - title: Token dispatch 输出
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [122, 125]
+          note: |
+            L122-L125: 返回发往 expert 设备后的 token 和概率。
+        - title: AllGather dispatcher
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [211, 215]
+          note: |
+            L211-L215: AllGather dispatcher 说明通信域包含 TP 和 EP。
+        - title: AllGather 初始化
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [217, 229]
+          note: |
+            L217-L229: 初始化接收 local experts、config 和 process groups。
+        - title: AllGather 状态
+          repo_path: github_repo/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py
+          lines: [232, 238]
+          note: |
+            L232-L238: 保存 local expert 数、indices、top-k 和 bias 配置。
+      common_confusions:
+        - 认为 router 写对后 MoE 性能就一定好。
+        - 把 EP 和 TP 混成同一种并行。
+        - 只看平均 tokens per expert，不看 p99 或最慢 rank。
+      checkpoint_questions:
+        - EP dispatcher 为什么需要 routing_map 和 probs？
+        - AllGather dispatcher 的通信域包含哪些并行维度？
+        - all-to-all 慢时应该同时检查哪些 routing 指标？

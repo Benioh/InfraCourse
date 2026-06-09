@@ -1,4 +1,4 @@
-"""L05.3 · 在多 GPU 上跑 FSDP2 wrap + 训练 smoke。
+"""L13 · 在多 GPU 上跑 FSDP2 wrap + 训练 smoke。
 
 CPU dryrun: 只跑 wrap_only 模式，验证 wrapped_blocks 数量。
 GPU train_smoke: 用 torchrun 启动，初始化 NCCL 进程组，wrap Llama-style
@@ -36,10 +36,14 @@ MISSION_ID = "l12_fsdp2_llama"
 
 
 def _impl():
+    selected = os.environ.get("IMPL") or "starter"
     try:
-        from starter import fsdp2_wrap as mod  # type: ignore[import-not-found]
+        if selected == "reference":
+            from reference import fsdp2_wrap as mod  # type: ignore[import-not-found]
+        else:
+            from starter import fsdp2_wrap as mod  # type: ignore[import-not-found]
 
-        return mod, "starter"
+        return mod, selected
     except (ImportError, NotImplementedError):
         from reference import fsdp2_wrap as mod  # type: ignore[import-not-found]
 
@@ -310,7 +314,7 @@ def _train_report_md(mission, impl, config, head, tail, drop, peak, ok):
 - 如果 loss 不动：检查是否所有 block 都被 wrap、是否 mp_policy reduce_dtype 是 fp32
 
 ## 5. 下一步
-进入 L05.5 看 MoE / EP，然后回到 L04.8 用 FSDP2 替换 ManualDDP。
+进入 L14 看 MoE / EP，然后在后续 Megatron 训练闭环里替换手写 DDP。
 """
 
 

@@ -1,5 +1,5 @@
 """
-L29.5 Patch · Train-Infer Mismatch 修正算子组
+L32 Patch · Train-Infer Mismatch 修正算子
 
 填空规则：
 - TODO(student) 必须自己写
@@ -30,7 +30,7 @@ def compute_k3_kl(logp_p: torch.Tensor, logp_q: torch.Tensor) -> torch.Tensor:
     #   ratio = torch.exp(log_ratio)
     #   k3 = ratio - 1.0 - log_ratio
     #   return k3.mean()
-    raise NotImplementedError("L29.5: implement compute_k3_kl")
+    raise NotImplementedError("L32: implement compute_k3_kl")
 
 
 def tis_correct(
@@ -48,7 +48,7 @@ def tis_correct(
     #   ratio = torch.exp(logp_new - logp_old)
     #   ratio_clipped = torch.clamp(ratio, lo, hi)
     #   return ratio_clipped * advantages
-    raise NotImplementedError("L29.5: implement tis_correct")
+    raise NotImplementedError("L32: implement tis_correct")
 
 
 def mis_with_mask(
@@ -63,7 +63,7 @@ def mis_with_mask(
     #   ratio = torch.exp(logp_new - logp_old)
     #   mask = ((ratio >= lo) & (ratio <= hi)).to(ratio.dtype)
     #   return ratio * mask * advantages
-    raise NotImplementedError("L29.5: implement mis_with_mask")
+    raise NotImplementedError("L32: implement mis_with_mask")
 
 
 def geometric_seq_is(
@@ -84,7 +84,7 @@ def geometric_seq_is(
     #   sum_log = (log_ratios * mask).sum(dim=-1)
     #   denom = seq_lens.to(log_ratios.dtype).clamp(min=1.0)
     #   return torch.exp(sum_log / denom)
-    raise NotImplementedError("L29.5: implement geometric_seq_is")
+    raise NotImplementedError("L32: implement geometric_seq_is")
 
 
 def apply_veto(logp_rollout: torch.Tensor, threshold: float = 1e-6) -> torch.Tensor:
@@ -95,7 +95,7 @@ def apply_veto(logp_rollout: torch.Tensor, threshold: float = 1e-6) -> torch.Ten
     # TODO(student):
     #   log_thresh = math.log(threshold)
     #   return (logp_rollout >= log_thresh).to(logp_rollout.dtype)
-    raise NotImplementedError("L29.5: implement apply_veto")
+    raise NotImplementedError("L32: implement apply_veto")
 
 
 def batch_normalize_weights(weights: torch.Tensor) -> torch.Tensor:
@@ -103,4 +103,4 @@ def batch_normalize_weights(weights: torch.Tensor) -> torch.Tensor:
     # TODO(student):
     #   mean = weights.mean()
     #   return weights / mean.clamp(min=1e-12)
-    raise NotImplementedError("L29.5: implement batch_normalize_weights")
+    raise NotImplementedError("L32: implement batch_normalize_weights")

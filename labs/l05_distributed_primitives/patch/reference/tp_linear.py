@@ -1,4 +1,4 @@
-"""Reference solution for L02 Patch · Tensor Parallel Linear.
+"""Reference solution for L06 Patch · Tensor Parallel Linear.
 
 This file is the canonical answer. Tests can import from either
 `starter.tp_linear` or `reference.tp_linear` via the

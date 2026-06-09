@@ -1,11 +1,11 @@
-# Debug Tickets — L05.8.5
+# Debug Tickets — L17
 
 | Ticket | 故障形态 | 主要练什么 |
 |---|---|---|
-| `crash_partial_corrupts_load` | save 中途 SIGKILL，下次 load 拿到半文件 | atomic rename + tmp 清理 |
-| `crash_lr_scheduler_drift` | resume 后 loss 抖动，因为 scheduler 没存 | scheduler / global step 也要存 |
-| `crash_rng_state_lost` | resume 后 dropout 模式不一致 | torch / numpy / cuda RNG 全部存 |
-| `crash_optimizer_momentum_lost` | resume 后训练像热启动 | optimizer state 必存 |
-| `crash_concurrent_two_writers` | 多进程同时 save 同 step 抢文件 | 必须 rank0 唯一写 |
+| `crash_tmp_loaded` | loader 读取了半写 `.tmp` | committed checkpoint 边界 |
+| `crash_marker_ahead` | latest marker 指向不存在的 step | marker 更新顺序 |
+| `crash_rng_missing` | 恢复后随机相关 loss 分叉 | RNG state 保存与恢复 |
+| `crash_optimizer_reset` | resume 后 loss 从 crash step 后偏离 | optimizer state 恢复 |
+| `crash_duplicate_step` | 同 step 重复 save 产生多个文件 | idempotent save |
 
 工单 YAML 在 `InfraCourse/tickets/`。

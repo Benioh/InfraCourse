@@ -1,4 +1,4 @@
-"""L09.8 Patch · SFT loss-mask + chat tokenization."""
+"""L29 Patch · SFT loss-mask + chat tokenization."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def tokenize_chat_with_loss_mask(
     #               segment (including the trailing EOS), else labels[i] = -100
     # TODO(student): truncate to max_length, then pad with pad_token_id; pad labels = -100; mask = 0
     # TODO(student): return {"input_ids", "labels", "attention_mask"} as plain lists[int]
-    raise NotImplementedError("L09.8: implement tokenize_chat_with_loss_mask")
+    raise NotImplementedError("L29: implement tokenize_chat_with_loss_mask")
 
 
 def sft_loss(logits, labels, ignore_index: int = -100):
@@ -47,4 +47,4 @@ def sft_loss(logits, labels, ignore_index: int = -100):
     # TODO(student): shift labels (causal LM convention) — this lab assumes pre-shifted
     # TODO(student): compute F.cross_entropy(logits.reshape(-1, V), labels.reshape(-1),
     #               ignore_index=ignore_index, reduction="mean")
-    raise NotImplementedError("L09.8: implement sft_loss")
+    raise NotImplementedError("L29: implement sft_loss")

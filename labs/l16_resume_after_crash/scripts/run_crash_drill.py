@@ -1,8 +1,9 @@
-"""L05.8.5 · Crash drill：baseline vs crash+resume，要求最终 loss 一致。"""
+"""L17 · Crash drill：baseline vs crash+resume，要求最终 loss 一致。"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 from pathlib import Path
@@ -30,10 +31,14 @@ MISSION_ID = "l16_resume_after_crash"
 
 
 def _impl():
+    selected = os.environ.get("IMPL") or "starter"
     try:
-        from starter import crash_safe as mod  # type: ignore[import-not-found]
+        if selected == "reference":
+            from reference import crash_safe as mod  # type: ignore[import-not-found]
+        else:
+            from starter import crash_safe as mod  # type: ignore[import-not-found]
 
-        return mod, "starter"
+        return mod, selected
     except (ImportError, NotImplementedError):
         from reference import crash_safe as mod  # type: ignore[import-not-found]
 

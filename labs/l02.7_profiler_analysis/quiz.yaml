@@ -1,0 +1,215 @@
+mission: l02.7_profiler_analysis
+title: L02.7 Quiz · Profiler 与性能分析
+pass_threshold: 1.0
+description: |
+  这 6 题验证你对 profiler 工具链的理解：torch.profiler 输出解读、nsys timeline 分析、
+  memory profiler 用法和瓶颈分类方法论。答不对说明你后面做优化时会"瞎猜"而不是"有据定位"。
+
+prereq_checklist:
+  - title: 读系统地图：确认 L02.7 在课程中的位置
+    kind: doc
+    path: labs/l02.7_profiler_analysis/system_map.md
+    href: "#lesson"
+    estimate_min: 5
+  - title: 读主讲义：三种 profiler 的使用与瓶颈分类方法论
+    kind: doc
+    path: labs/l02.7_profiler_analysis/lecture.md
+    href: "#lesson"
+    estimate_min: 50
+  - title: 读源码带读：profiler 分析实验
+    kind: doc
+    path: labs/l02.7_profiler_analysis/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 25
+  - title: 读 patch/task.md
+    kind: task
+    path: labs/l02.7_profiler_analysis/patch/task.md
+    href: "#patch"
+    estimate_min: 5
+
+questions:
+  - id: q1_cpu_vs_cuda_time
+    prompt: |
+      torch.profiler 输出中，一个 `aten::mm` op 的 CPU Time = 200μs，CUDA Time = 5000μs。
+      下面哪个解释是**正确**的？
+    options:
+      - id: a
+        text: 这个 op 有严重的 CPU overhead，需要优化 CPU 侧代码
+      - id: b
+        text: CPU Time 只包含 dispatch+launch 时间，CUDA Time 是 GPU 真实执行时间；这个 op 是正常的 GPU 密集型 op
+        correct: true
+      - id: c
+        text: 数据有误，CUDA Time 不可能大于 CPU Time
+      - id: d
+        text: 说明 GPU 比 CPU 慢 25 倍，应该换成 CPU 执行
+    explanation: |
+      torch.profiler 中的两个时间含义不同：
+
+      - **CPU Time**：CPU 侧从调用 op 开始到返回的时间。对于 CUDA op，这主要是
+        dispatch + kernel launch 的时间。因为 GPU 是异步的，CPU 提交完就返回了。
+      - **CUDA Time**：GPU 实际执行 kernel 的时间。
+
+      CPU Time < CUDA Time 很正常，说明：
+      1. CPU 快速提交了 kernel（200μs）
+      2. GPU 花了 5000μs 真正执行
+      3. 异步执行模型下 CPU 不需要等 GPU 完成
+
+      如果你看到 CPU Time >> CUDA Time，那才暗示 CPU 侧有问题（比如 Python GIL、
+      大量 dispatcher 开销、或者在等 sync）。
+
+  - id: q2_many_small_ops
+    prompt: |
+      profiler 输出中有大量 op（如 `aten::add`、`aten::mul`），每个调用 500+ 次，
+      每次 CUDA Time 只有 2-5μs，但总时间加起来占了 30% 的 GPU 时间。
+      这最可能是什么瓶颈？
+    options:
+      - id: a
+        text: Memory bound — 这些 element-wise op 是带宽瓶颈
+      - id: b
+        text: Launch bound / CPU overhead — 大量小 kernel 的 launch 开销累积
+        correct: true
+      - id: c
+        text: Compute bound — add/mul 计算量太大
+      - id: d
+        text: Communication bound — 这些 op 在做隐式通信
+    explanation: |
+      关键信号：**调用次数多（500+）+ 每次执行时间极短（2-5μs）**。
+
+      每次 kernel launch 在 CPU 侧有 5-20μs 的固定开销。如果 kernel 本身只跑 2μs，
+      那 GPU 大部分时间在等 CPU 发下一个 kernel——这就是 launch bound。
+
+      nsys timeline 上的表现：大量很短的 kernel 色块之间有小间隙（launch gap）。
+
+      优化方向：
+      - `torch.compile`：自动将多个小 op fusion 成一个大 kernel
+      - CUDA Graph：录制 kernel 序列，replay 时一次性提交
+      - 手动 kernel fusion（Triton）
+
+      注意区分：如果每个 element-wise op 的 CUDA Time 较长（比如 100μs+），那可能
+      是 memory bound（HBM 带宽瓶颈），不是 launch bound。
+
+  - id: q3_nsys_gpu_idle
+    prompt: |
+      在 nsys timeline 中，你看到 GPU compute stream 有大段空白（约 50ms），
+      这些空白出现在每个 training step 的**开头**。最可能的原因是？
+    options:
+      - id: a
+        text: Data loading bottleneck — GPU 在等 CPU 准备下一个 batch
+        correct: true
+      - id: b
+        text: Communication bound — GPU 在等 NCCL all-reduce 完成
+      - id: c
+        text: Compute bound — GPU 在等 Tensor Core 完成矩阵乘法
+      - id: d
+        text: Memory bound — GPU 在等 HBM 读写完成
+    explanation: |
+      GPU idle 出现的**位置**是诊断的关键线索：
+
+      | Idle 位置 | 最可能原因 |
+      |---|---|
+      | Step 开头 | Data loading — CPU 还没准备好下一个 batch |
+      | Kernel 之间均匀分布 | Launch bound — CPU dispatch 太慢 |
+      | Backward 后期 | Communication — 等 all-reduce 完成 |
+      | 某个特定 op 前 | Sync point — 如 `.item()` 或 Python 控制流 |
+
+      Data loading bottleneck 的优化方向：
+      - `pin_memory=True`：加速 CPU→GPU 数据传输
+      - 增加 `num_workers`：并行数据预处理
+      - `prefetch_factor`：提前准备更多 batch
+      - 把数据预处理放到 GPU 上（如 DALI）
+
+  - id: q4_comm_overlap
+    prompt: |
+      在 nsys timeline 中，你看到 NCCL all-reduce kernel 和 backward compute kernel
+      在时间上**没有重叠**——all-reduce 总是在所有 backward kernel 结束后才开始。
+      这说明什么？
+    options:
+      - id: a
+        text: 正常行为，all-reduce 必须等所有梯度算完才能开始
+      - id: b
+        text: DDP 的 bucket overlap 没有生效——通信本应和后面层的 backward 重叠
+        correct: true
+      - id: c
+        text: 通信不可能和计算 overlap，这是硬件限制
+      - id: d
+        text: 说明通信太快了，不需要 overlap
+    explanation: |
+      DDP 的设计就是为了让通信和计算 overlap：
+
+      正确的 timeline 应该是：
+      ```
+      Compute: |layer_N backward|layer_N-1 backward|...|layer_0 backward|
+      Comm:              |bucket_N allreduce|bucket_N-1 allreduce|...|
+      ```
+
+      如果 all-reduce 总是在所有 backward 结束后才开始，常见原因：
+      1. **Bucket size 设置太大**：所有参数在一个 bucket 里，必须等全部梯度算完。
+         → 减小 `bucket_cap_mb`
+      2. **没有使用 gradient_as_bucket_view**：PyTorch 需要额外 copy gradient 到 bucket。
+      3. **gradient accumulation 的 no_sync 忘了关**：之前 step 的 no_sync 模式没退出。
+      4. **模型太小**：backward 太快，bucket 来不及填满就已经全算完了。
+
+      这就是为什么 L11（Bucketed DDP）要教 bucket 机制——bucket 是实现 overlap 的核心。
+
+  - id: q5_memory_profiler
+    prompt: |
+      OOM 发生时 `nvidia-smi` 显示用了 78GB（80GB 卡），但 `torch.cuda.memory_allocated()`
+      只报 45GB。剩下的 33GB 是什么？
+    options:
+      - id: a
+        text: 其他进程占用的显存
+      - id: b
+        text: PyTorch caching allocator 持有但未使用的内存（memory reserved but not allocated）
+        correct: true
+      - id: c
+        text: 操作系统内核占用的 GPU 内存
+      - id: d
+        text: 显存报告不准，这是 nvidia-smi 的 bug
+    explanation: |
+      PyTorch 使用 caching allocator 管理 GPU 内存：
+
+      - `torch.cuda.memory_allocated()`：当前 PyTorch 张量实际占用的字节数 (45GB)
+      - `torch.cuda.memory_reserved()`：caching allocator 从 CUDA 申请的总字节数 (~78GB)
+      - 差值 (33GB)：allocator 持有但当前未分配给张量的"空闲池"
+
+      为什么 allocator 会持有这么多？
+      1. 训练过程中 activation 在 forward 时分配、backward 后释放
+      2. allocator 不会立即把内存还给 CUDA（还回去再申请很慢）
+      3. 所以它保持 reserved，下次分配时直接从池中取
+
+      但如果碎片严重（大小不一的 tensor 交替分配/释放），可能 reserved 中的
+      空闲块都太小，无法满足新的大分配 → OOM，即使"看起来"还有空间。
+
+      诊断方法：
+      ```python
+      torch.cuda.memory_stats()  # 查看碎片情况
+      torch.cuda.memory._dump_snapshot()  # 查看分配历史
+      ```
+
+  - id: q6_bottleneck_classification
+    prompt: |
+      以下哪个组合能**最快**确认一个训练循环是 communication bound？
+    options:
+      - id: a
+        text: torch.profiler 看 aten::mm 的 CUDA time
+      - id: b
+        text: nsys timeline 看 NCCL kernel 占总 GPU active time 的比例 + 检查 compute-comm 是否 overlap
+        correct: true
+      - id: c
+        text: nvidia-smi 看 GPU utilization 百分比
+      - id: d
+        text: memory profiler 看 gradient buffer 大小
+    explanation: |
+      确认 communication bound 需要两个证据：
+
+      1. **NCCL 通信时间占比大**：如果 NCCL kernel（all-reduce、all-gather 等）
+         占了 30%+ 的 GPU 活跃时间，通信是主要开销。
+      2. **通信和计算没有 overlap**：如果通信时间被 overlap 掉了，
+         即使通信本身很长，也不会成为瓶颈。
+
+      nsys 是唯一能同时看到这两点的工具：
+      - 它直接展示 NCCL kernel 在 timeline 上的位置和时长
+      - 它能直观看到 compute stream 和 comm stream 是否有时间重叠
+
+      torch.profiler 不能看 overlap（它只报总时间），nvidia-smi 粒度太粗，
+      memory profiler 看的是内存不是时间。

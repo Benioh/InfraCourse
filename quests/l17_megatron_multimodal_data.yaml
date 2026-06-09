@@ -1,54 +1,665 @@
 id: l17_megatron_multimodal_data
-title: ★ 多模态 Collator（image + audio + text）
-level: L06
-act: 第 2 章：数据与多模态
+title: L18 · Multimodal Data Collator
+level: L18
+act: 第 2 章：训练系统、并行与数据
 role: 多模态数据工程师
-priority: ★ 核心（与 Capstone 强相关）
+priority: 核心
 estimated_minutes: 150
 no_gpu_friendly: true
-
 frameworks:
-  - PyTorch
-  - LLaVA / Qwen2-VL / Qwen-Audio (对照)
-
+- PyTorch
+- MiniInfra
+- Megatron-LM
 patch:
   description: |
-    实现 multimodal_collate(batch, image_num_patches, max_audio_frames)：
-    把变长 image + audio + text 样本打包成对齐的 batch tensor。
-    序列拼接 [image_token × N][audio_token × M][text_ids]，输出 input_ids、
-    attention_mask、modal_type_ids、pixel_values、audio_features+mask 等。
-    这就是 LLaVA / Qwen2-VL / Qwen-Audio 数据管道的核心逻辑。
+    实现 `multimodal_collate`：把变长 image + audio + text 样本打包成
+    `input_ids`、`attention_mask`、`modal_type_ids` 和图像/音频 side tensors。
   task_md: labs/l17_megatron_multimodal_data/patch/task.md
   starter_file: labs/l17_megatron_multimodal_data/patch/starter/multimodal_collate.py
   reference_file: labs/l17_megatron_multimodal_data/patch/reference/multimodal_collate.py
   test_command: make patch-test M=l17_megatron_multimodal_data
   status_file: labs/l17_megatron_multimodal_data/patch/.last_run.json
   test_count: 7
-  test_kind: 结果对比 + 形状/索引契约
-
+  test_kind: 多模态 batch 合同验证
 source_reading:
-  - title: LLaVA-1.5 conversation_lib & data prep
-    repo_path: docs/术语表.md
-    focus: 看 LLaVA 怎么把 <image> 占位扩成 N 个 image embedding
-  - title: Qwen2-VL 多模态 tokenizer
-    repo_path: docs/术语表.md
-    focus: 动态分辨率怎么决定 image_num_patches
-
+- title: Patch starter
+  repo_path: labs/l17_megatron_multimodal_data/patch/starter/multimodal_collate.py
+  focus: 学生需要补齐的 batch 合同
+  highlights:
+  - title: 读函数签名
+    lines:
+    - 30
+    - 35
+    note: |
+      L30-L35: 输入是 batch、image patch 数和音频帧上限，输出是固定字段 dict。
+  - title: 读 image 段提示
+    lines:
+    - 38
+    - 47
+    note: |
+      L38-L47: 每个有图样本先追加 image placeholder 和 image modal id。
+  - title: 读 audio/text 段提示
+    lines:
+    - 48
+    - 57
+    note: |
+      L48-L57: 音频 token 数按截断后帧数计算，文本 token 总是追加到末尾。
+  - title: 读 batch padding
+    lines:
+    - 58
+    - 68
+    note: |
+      L58-L68: `input_ids`、`attention_mask`、`modal_type_ids` 必须按同一有效长度填充。
+  - title: 读 image side tensor
+    lines:
+    - 70
+    - 78
+    note: |
+      L70-L78: 只收集有图样本，并记录原 batch 行号。
+  - title: 读 image stack
+    lines:
+    - 79
+    - 83
+    note: |
+      L79-L83: 有图时 stack 成 `pixel_values`，并生成 `image_batch_indices`。
+  - title: 读 audio side tensor
+    lines:
+    - 84
+    - 90
+    note: |
+      L84-L90: 音频需要截断、pad、mask 和 batch indices。
+  - title: 读返回字段
+    lines:
+    - 91
+    - 101
+    note: |
+      L91-L101: 返回字段同时覆盖主序列、图像 side channel 和音频 side channel。
+- title: Patch reference
+  repo_path: labs/l17_megatron_multimodal_data/patch/reference/multimodal_collate.py
+  focus: 参考实现中的序列构造、padding 和 side tensor 收集
+  highlights:
+  - title: 读 per-sample 初始化
+    lines:
+    - 27
+    - 34
+    note: |
+      L27-L34: 每个样本先独立构造 ids 和 modal 两条等长 list。
+  - title: 读 audio/text 拼接
+    lines:
+    - 35
+    - 42
+    note: |
+      L35-L42: audio 段按真实保留帧数追加，随后追加文本 token。
+  - title: 读 batch 表
+    lines:
+    - 44
+    - 52
+    note: |
+      L44-L52: 创建 `(B,S)` 表，并按每行有效长度填入张量。
+  - title: 读 image collation
+    lines:
+    - 54
+    - 64
+    note: |
+      L54-L64: image side tensor 只包含真实图像，顺序由 `image_batch_indices` 解释。
+  - title: 读 audio 初始化
+    lines:
+    - 66
+    - 78
+    note: |
+      L66-L78: 音频 side tensor 先按样本循环，计算截断后的 `T_eff`。
+  - title: 读 audio pad 和 mask
+    lines:
+    - 79
+    - 89
+    note: |
+      L79-L89: `audio_features` pad 到上限，`audio_mask` 只标记真实帧。
+  - title: 读 audio stack
+    lines:
+    - 90
+    - 94
+    note: |
+      L90-L94: 有音频时 stack features、mask 和 batch indices。
+  - title: 读返回合同
+    lines:
+    - 95
+    - 104
+    note: |
+      L95-L104: dict 的字段名就是后续模型输入边界。
+- title: Patch tests
+  repo_path: labs/l17_megatron_multimodal_data/patch/tests/test_patch.py
+  focus: patch-test 覆盖的多模态 batch 不变量
+  highlights:
+  - title: 读 text-only 测试
+    lines:
+    - 38
+    - 49
+    note: |
+      L38-L49: 无图无音时 side tensors 为 None，modal 全为 0。
+  - title: 读 image placeholder
+    lines:
+    - 52
+    - 60
+    note: |
+      L52-L60: 有图样本前 16 个位置必须是 image token。
+  - title: 读 image side tensor
+    lines:
+    - 61
+    - 68
+    note: |
+      L61-L68: image modal、`pixel_values` 和 batch index 都要对齐。
+  - title: 读 audio 主序列
+    lines:
+    - 71
+    - 80
+    note: |
+      L71-L80: 音频主序列长度由真实帧数决定。
+  - title: 读 audio side tensor
+    lines:
+    - 81
+    - 85
+    note: |
+      L81-L85: `audio_features` pad 到上限，mask 标记真实帧。
+  - title: 读 mixed batch setup
+    lines:
+    - 88
+    - 96
+    note: |
+      L88-L96: mixed batch 同时覆盖纯文本、图像、音频和三模态样本。
+  - title: 读 mixed batch shape
+    lines:
+    - 98
+    - 104
+    note: |
+      L98-L104: 最长样本决定 `S=19`。
+  - title: 读 mixed side tensors
+    lines:
+    - 106
+    - 113
+    note: |
+      L106-L113: image 和 audio side tensors 都只包含对应模态样本。
+  - title: 读 padding 测试
+    lines:
+    - 115
+    - 126
+    note: |
+      L115-L126: padding 位置要同时满足 attention False、PAD id、modal 0。
+  - title: 读 audio truncation
+    lines:
+    - 129
+    - 141
+    note: |
+      L129-L141: 超长音频截断后主序列 audio token 数等于上限。
+  - title: 读 image indices setup
+    lines:
+    - 144
+    - 152
+    note: |
+      L144-L152: 测试构造第 0 行和第 2 行有图的 batch。
+  - title: 读 image indices assert
+    lines:
+    - 154
+    - 158
+    note: |
+      L154-L158: `pixel_values` 的顺序必须与 `image_batch_indices` 一致。
+- title: Build manifest
+  repo_path: labs/l17_megatron_multimodal_data/scripts/build_manifest.py
+  focus: toy manifest 如何表达图文、语音文本和音频标签任务
+  highlights:
+  - title: 读图文样本
+    lines:
+    - 4
+    - 13
+    note: |
+      L4-L13: 图文 caption 样本写入 id、task、files 和 split。
+  - title: 读语音文本样本
+    lines:
+    - 14
+    - 22
+    note: |
+      L14-L22: ASR 样本把 audio 和 text 文件放进同一个 manifest 行。
+  - title: 读音频标签样本
+    lines:
+    - 23
+    - 33
+    note: |
+      L23-L33: 音频分类样本写 label 文件，并把所有行落成 JSONL。
+- title: Validate manifest
+  repo_path: labs/l17_megatron_multimodal_data/scripts/validate_manifest.py
+  focus: manifest 层能发现哪些输入问题
+  highlights:
+  - title: 读任务和文件检查
+    lines:
+    - 11
+    - 19
+    note: |
+      L11-L19: validator 检查 task 是否允许，并逐个确认文件路径存在。
+  - title: 读结果 payload
+    lines:
+    - 20
+    - 31
+    note: |
+      L20-L31: 输出 rows、missing_files 和 validation_passed，必要时写 artifact。
+  - title: 读失败退出
+    lines:
+    - 32
+    - 33
+    note: |
+      L32-L33: 有 missing 项时以非零状态退出。
+- title: Build WebDataset shards
+  repo_path: labs/l17_megatron_multimodal_data/scripts/build_webdataset_shards.py
+  focus: manifest 行如何进入 tar shard
+  highlights:
+  - title: 读 shard 准备
+    lines:
+    - 7
+    - 10
+    note: |
+      L7-L10: 创建 shard 目录并打开一个 tar 文件。
+  - title: 读成员写入
+    lines:
+    - 11
+    - 20
+    note: |
+      L11-L20: 每个样本写 metadata，并把所有 files 加入同一个 shard。
+- title: Multimodal data smoke
+  repo_path: labs/l17_megatron_multimodal_data/scripts/run_multimodal_data_lab.py
+  focus: smoke 如何串起 manifest、shard 和 loader artifact
+  highlights:
+  - title: 读前置脚本
+    lines:
+    - 50
+    - 58
+    note: |
+      L50-L58: 依次生成 toy raw files、manifest、shard 和 batch preview。
+  - title: 读 validation 和 shard
+    lines:
+    - 59
+    - 68
+    note: |
+      L59-L68: manifest validation 和 shard inspection 都写入 run artifact。
+  - title: 读 loader smoke
+    lines:
+    - 69
+    - 73
+    note: |
+      L69-L73: loader smoke 统计样本 key，证明 shard 可被读取。
+  - title: 读 metrics
+    lines:
+    - 83
+    - 94
+    note: |
+      L83-L94: rows、missing、shard_count 和 sample_count 进入 metrics。
+  - title: 读 report
+    lines:
+    - 95
+    - 104
+    note: |
+      L95-L104: report 把目标、环境和 artifact 结论写成可复盘文本。
+- title: MiniInfra manifest
+  repo_path: mini_infra/data/manifest.py
+  focus: MiniInfra 中的多模态 manifest/schema check
+  highlights:
+  - title: 读 image sample
+    lines:
+    - 11
+    - 18
+    note: |
+      L11-L18: 教学 manifest 显式记录 image-caption 样本。
+  - title: 读 audio sample
+    lines:
+    - 19
+    - 25
+    note: |
+      L19-L25: 第二个样本覆盖 audio-text 场景。
+  - title: 读路径检查
+    lines:
+    - 26
+    - 32
+    note: |
+      L26-L32: image/audio 字段存在时检查对应文件。
+  - title: 读 payload
+    lines:
+    - 33
+    - 39
+    note: |
+      L33-L39: payload 写出 format、root 和 samples。
+- title: Megatron multimodal TaskEncoder
+  repo_path: github_repo/Megatron-LM/examples/multimodal/dataset_helpers.py
+  focus: 真实多模态样本、batch 和 image token 检查
+  highlights:
+  - title: 读 ImageTaskSample
+    lines:
+    - 35
+    - 46
+    note: |
+      L35-L46: 单样本保存 imgs、num_tiles、tokens、total_len 和 labels。
+  - title: 读 batch dataclass 前半
+    lines:
+    - 70
+    - 80
+    note: |
+      L70-L80: batch 注释说明 N、P、seq_len 和 num_imgs 的含义。
+  - title: 读 batch dataclass 字段
+    lines:
+    - 81
+    - 90
+    note: |
+      L81-L90: batch 保存 tokens、labels、imgs、num_tiles 和 packed length metadata。
+  - title: 读 image embedding 数
+    lines:
+    - 168
+    - 179
+    note: |
+      L168-L179: 每个 tile 产生多少 image embedding 由图像尺寸、patch 和 tiling 参数决定。
+  - title: 读总长度
+    lines:
+    - 195
+    - 200
+    note: |
+      L195-L200: 总长度由文本 token 和 image tile embedding 共同决定。
+  - title: 读 image tag 替换
+    lines:
+    - 381
+    - 393
+    note: |
+      L381-L393: conversation 中的 `<image-N>` 被替换为统一 image token。
+  - title: 读一致性检查
+    lines:
+    - 496
+    - 502
+    note: |
+      L496-L502: image token 数、tile 数和 image tensor 数必须一致。
+  - title: 读 batch images
+    lines:
+    - 791
+    - 798
+    note: |
+      L791-L798: batch 阶段 stack 所有 sample 的 image tiles。
+  - title: 读 batch pad
+    lines:
+    - 799
+    - 806
+    note: |
+      L799-L806: tokens 和 labels 先填 pad，再按样本写入有效前缀。
+  - title: 读 sample 填充
+    lines:
+    - 808
+    - 818
+    note: |
+      L808-L818: 每个样本按截断长度写入 tokens 和 labels，并整理 num_tiles。
+  - title: 读 batch 返回
+    lines:
+    - 851
+    - 862
+    note: |
+      L851-L862: 返回 Megatron 训练循环消费的 batch dataclass。
+- title: Megatron multimodal dataloader
+  repo_path: github_repo/Megatron-LM/examples/multimodal/dataloader_provider.py
+  focus: Energon dataloader 的 rank gating 和 state restore
+  highlights:
+  - title: 读 provider 入口
+    lines:
+    - 27
+    - 31
+    note: |
+      L27-L31: provider 从训练参数读取 data_path。
+  - title: 读 train dataset
+    lines:
+    - 32
+    - 43
+    note: |
+      L32-L43: train dataset 接收 task encoder、worker config 和 image decode 策略。
+  - title: 读 dataloader rank
+    lines:
+    - 84
+    - 92
+    note: |
+      L84-L92: 只在特定 TP/PP rank 上运行 dataloader。
+  - title: 读 provider gating
+    lines:
+    - 95
+    - 104
+    note: |
+      L95-L104: 非 dataloader rank 直接返回空 dataloader。
+  - title: 读 worker config
+    lines:
+    - 113
+    - 123
+    note: |
+      L113-L123: DP rank/world size、num_workers 和 data parallel group 进入 `WorkerConfig`。
+  - title: 读 dataloader state path
+    lines:
+    - 124
+    - 132
+    note: |
+      L124-L132: load 时按 dataloader_save 和 DP rank 构造 state 文件路径。
+  - title: 读 dataloader restore
+    lines:
+    - 133
+    - 141
+    note: |
+      L133-L141: state 文件存在时调用 `restore_state_rank`，失败时打印诊断。
+  - title: 读 wrapper next
+    lines:
+    - 152
+    - 159
+    note: |
+      L152-L159: wrapper 把内部 dataloader 变成循环 iterator。
+  - title: 读 wrapper state
+    lines:
+    - 161
+    - 165
+    note: |
+      L161-L165: wrapper 暴露 `save_state`，用于训练 checkpoint 记录 dataloader 状态。
 mini_infra_targets:
-  - mini_infra/data/
-
+- mini_infra/data/manifest.py
+- mini_infra/data/wds_pipeline.py
+- mini_infra/data/shard_resume.py
 notebooks: []
-
 tickets:
-  - mm_missing_file_001
-  - mm_corrupt_audio_002
-  - mm_bad_shard_003
-  - mm_resume_state_004
-  - wds_slow_io_001
-
-prereq: l15_megatron_parallel_checkpoint
-next_lab: l18_data_engineering
-
+- mm_missing_file_001
+- mm_corrupt_audio_002
+- mm_bad_shard_003
+- mm_resume_state_004
+- wds_slow_io_001
 gpu_modes:
   local: CPU 即可
-  cluster: 配合 Capstone Stage A 大数据集
+  cluster: 用真实 shard 和多 worker 记录吞吐、重复读、漏读和 resume cursor
+lesson:
+  opening: |-
+    # L18：Multimodal Data Collator
+
+    本讲解决多模态训练数据进入模型前的 batch 合同问题：一个 batch 内可能混合文本、图像和音频样本，collator 必须把它们整理成 shape 对齐、字段清楚、能被 forward 检查的张量。
+  sections:
+  - title: 系统位置：manifest 到 forward 的边界
+    plain_explanation: |-
+      L18 位于多模态数据主线中间。manifest 负责样本集合和文件路径，dataset/processor 负责单样本读取与预处理，collator 负责 batch 对齐，forward 负责 image/audio encoder 和 embedding replacement。
+
+      这条边界帮助排查问题：缺文件看 manifest，单样本 shape 异常看 dataset，mask 或 batch index 错看 collator，placeholder 数与 encoder 输出数不一致看 forward。
+    mental_model: manifest 证明有哪些样本，collator 证明这一批样本怎样摆成矩阵。
+    why_it_matters: 多模态训练的错误常跨越数据、模型和恢复状态，先划清层次才能定位。
+    source_refs:
+    - title: 读图文样本
+      repo_path: labs/l17_megatron_multimodal_data/scripts/build_manifest.py
+      lines:
+      - 4
+      - 13
+      note: |
+        L4-L13: 图文 caption 样本写入 id、task、files 和 split。
+    - title: 读任务和文件检查
+      repo_path: labs/l17_megatron_multimodal_data/scripts/validate_manifest.py
+      lines:
+      - 11
+      - 19
+      note: |
+        L11-L19: validator 检查 task 是否允许，并逐个确认文件路径存在。
+    checkpoint_questions:
+    - manifest、dataset、collator、forward 分别负责哪一层？
+    - 缺失 wav 文件时，应该先看哪一个 artifact？
+  - title: 主序列：placeholder、padding 和 modal id
+    plain_explanation: |-
+      每个样本按 `[image tokens][audio tokens][text ids]` 生成主序列。`attention_mask` 只回答位置是否有效；`modal_type_ids` 回答有效位置来自哪类模态。padding 和真实文本的 modal 值都可以是 0，所以判断 padding 必须同时看 attention mask。
+
+      实现时先按样本构造 ids/modal，再 pad 到 batch 内最大长度。这样可以避免边扩矩阵边写字段导致的 off-by-one。
+    mental_model: 主序列排座位，modal type 贴来源标签，attention mask 标记座位是否有人。
+    why_it_matters: 主序列错位会让后续 embedding replacement 写到错误位置，训练可能不报 shape 错但监督信号已经污染。
+    source_refs:
+    - title: 读 per-sample 初始化
+      repo_path: labs/l17_megatron_multimodal_data/patch/reference/multimodal_collate.py
+      lines:
+      - 27
+      - 34
+      note: |
+        L27-L34: 每个样本先独立构造 ids 和 modal 两条等长 list。
+    - title: 读 batch 表
+      repo_path: labs/l17_megatron_multimodal_data/patch/reference/multimodal_collate.py
+      lines:
+      - 44
+      - 52
+      note: |
+        L44-L52: 创建 `(B,S)` 表，并按每行有效长度填入张量。
+    - title: 读 mixed batch shape
+      repo_path: labs/l17_megatron_multimodal_data/patch/tests/test_patch.py
+      lines:
+      - 98
+      - 104
+      note: |
+        L98-L104: 最长样本决定 `S=19`。
+    - title: 读 padding 测试
+      repo_path: labs/l17_megatron_multimodal_data/patch/tests/test_patch.py
+      lines:
+      - 115
+      - 126
+      note: |
+        L115-L126: padding 位置要同时满足 attention False、PAD id、modal 0。
+    checkpoint_questions:
+    - mixed batch 中 `S` 由哪一行决定？
+    - 为什么 `modal_type_ids=0` 不能单独证明某个位置是真实文本？
+  - title: Side channel：图像、音频和 batch indices
+    plain_explanation: |-
+      图像和音频的真实内容走 side channel。`pixel_values` 只 stack 有图样本，`image_batch_indices` 记录这些图来自原 batch 的哪一行。音频先截断到 `max_audio_frames`，再 pad 到固定 shape，并用 `audio_mask` 标记真实帧。
+
+      主序列里的 image/audio token 是占位，真实内容要等 encoder 输出后替换进 embedding。
+    mental_model: 主序列是索引表，side tensors 是真实货物，batch indices 是回填地址。
+    why_it_matters: side tensor 顺序错一位，模型可能把 A 样本的图片写进 B 样本上下文。
+    source_refs:
+    - title: 读 image collation
+      repo_path: labs/l17_megatron_multimodal_data/patch/reference/multimodal_collate.py
+      lines:
+      - 54
+      - 64
+      note: |
+        L54-L64: image side tensor 只包含真实图像，顺序由 `image_batch_indices` 解释。
+    - title: 读 audio pad 和 mask
+      repo_path: labs/l17_megatron_multimodal_data/patch/reference/multimodal_collate.py
+      lines:
+      - 79
+      - 89
+      note: |
+        L79-L89: `audio_features` pad 到上限，`audio_mask` 只标记真实帧。
+    - title: 读 audio truncation
+      repo_path: labs/l17_megatron_multimodal_data/patch/tests/test_patch.py
+      lines:
+      - 129
+      - 141
+      note: |
+        L129-L141: 超长音频截断后主序列 audio token 数等于上限。
+    - title: 读 image indices assert
+      repo_path: labs/l17_megatron_multimodal_data/patch/tests/test_patch.py
+      lines:
+      - 154
+      - 158
+      note: |
+        L154-L158: `pixel_values` 的顺序必须与 `image_batch_indices` 一致。
+    checkpoint_questions:
+    - '`pixel_values` 为什么不需要补到 batch 大小 `B`？'
+    - 音频 padding 帧为什么不生成 `AUDIO_TOKEN_ID`？
+  - title: 真实框架：TaskEncoder、packing 和 dataloader state
+    plain_explanation: |-
+      Megatron multimodal 示例把 L18 的简化合同扩展成真实训练字段。TaskEncoder 处理 image tag、tokenize、image tile、labels 和 total length。batch 阶段 stack images、pad tokens/labels，并保留 packed length metadata。
+
+      真实 dataloader 还要处理 rank gating 和恢复状态。训练从 checkpoint 恢复时，dataloader state 决定是否重复读或漏读样本。
+    mental_model: L18 patch 是 batch 合同缩小图，Megatron TaskEncoder 是生产版同构问题。
+    why_it_matters: 真训练的 bug 不一定出现在 collator；packing、rank、worker 和 resume state 都可能改变样本顺序。
+    source_refs:
+    - title: 读总长度
+      repo_path: github_repo/Megatron-LM/examples/multimodal/dataset_helpers.py
+      lines:
+      - 195
+      - 200
+      note: |
+        L195-L200: 总长度由文本 token 和 image tiles 共同决定。
+    - title: 读一致性检查
+      repo_path: github_repo/Megatron-LM/examples/multimodal/dataset_helpers.py
+      lines:
+      - 496
+      - 502
+      note: |
+        L496-L502: image token 数、tile 数和 image tensor 数必须一致。
+    - title: 读 batch pad
+      repo_path: github_repo/Megatron-LM/examples/multimodal/dataset_helpers.py
+      lines:
+      - 799
+      - 806
+      note: |
+        L799-L806: tokens 和 labels 先填 pad，再按样本写入有效前缀。
+    - title: 读 dataloader rank
+      repo_path: github_repo/Megatron-LM/examples/multimodal/dataloader_provider.py
+      lines:
+      - 84
+      - 92
+      note: |
+        L84-L92: 只在特定 TP/PP rank 上运行 dataloader。
+    - title: 读 dataloader restore
+      repo_path: github_repo/Megatron-LM/examples/multimodal/dataloader_provider.py
+      lines:
+      - 133
+      - 141
+      note: |
+        L133-L141: state 文件存在时调用 `restore_state_rank`，失败时打印诊断。
+    checkpoint_questions:
+    - Megatron 在哪里检查 image token 数和 image tile 数一致？
+    - resume 后重复读样本时，为什么要先查 dataloader state？
+  - title: Lab 验收：patch-test 和 smoke 分层看
+    plain_explanation: |-
+      patch-test 验证 collator 的函数级合同：主序列、mask、side tensors、batch indices 和音频截断。smoke 验证 toy 数据集合：manifest 是否可读、shard 成员是否完整、loader 是否能拿到样本 key。
+
+      两类验证不能互相替代。patch-test 不证明 shard 和 worker 没问题；smoke 也不证明每个 `modal_type_ids` 都写对。
+    mental_model: patch-test 看 batch 内字段，smoke 看数据集合和 artifact。
+    why_it_matters: 多模态数据问题容易被一个通过的局部测试掩盖，分层验收能保留明确证据。
+    source_refs:
+    - title: 读前置脚本
+      repo_path: labs/l17_megatron_multimodal_data/scripts/run_multimodal_data_lab.py
+      lines:
+      - 50
+      - 58
+      note: |
+        L50-L58: 依次生成 toy raw files、manifest、shard 和 batch preview。
+    - title: 读 metrics
+      repo_path: labs/l17_megatron_multimodal_data/scripts/run_multimodal_data_lab.py
+      lines:
+      - 83
+      - 94
+      note: |
+        L83-L94: rows、missing、shard_count 和 sample_count 进入 metrics。
+    - title: 读成员写入
+      repo_path: labs/l17_megatron_multimodal_data/scripts/build_webdataset_shards.py
+      lines:
+      - 11
+      - 20
+      note: |
+        L11-L20: 每个样本写 metadata，并把所有 files 加入同一个 shard。
+    checkpoint_questions:
+    - patch-test 和 smoke 各自证明什么？
+    - 如果 patch-test 通过但 smoke 显示 missing files，下一步查哪里？
+lesson_docs:
+- title: 系统地图
+  path: labs/l17_megatron_multimodal_data/system_map.md
+  description: L18 在数据与多模态主线中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l17_megatron_multimodal_data/lecture.md
+  description: 从多模态 batch 合同、mask、side channel 讲到 Megatron dataloader。
+- title: 源码带读讲义
+  path: labs/l17_megatron_multimodal_data/source_walkthrough.md
+  description: 按 patch、lab scripts、MiniInfra 和 Megatron 主路径组织的源码阅读路线。

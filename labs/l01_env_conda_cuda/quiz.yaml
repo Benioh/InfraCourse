@@ -1,5 +1,5 @@
 mission: l01_env_conda_cuda
-title: L00 Quiz · 环境四件套与 rank/device 映射
+title: L01 Quiz · 环境四件套与 rank/device 映射
 pass_threshold: 1.0
 description: |
   这 4 题打中"接手陌生机器最先暴雷"的四类失败：CUDA wheel、PYTHONPATH 污染、
@@ -7,15 +7,34 @@ description: |
   最小不变量还没有直觉，先回去读 scripts/env/check_cuda.py 与本关 task.md。
 
 prereq_checklist:
-  - title: 读 patch/task.md（10min）
-    kind: read
+  - title: 读系统地图：确认 L01 的环境证据边界
+    kind: doc
+    path: labs/l01_env_conda_cuda/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 Python/Conda 讲到 CUDA/NCCL 证据
+    kind: doc
+    path: labs/l01_env_conda_cuda/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按环境探针和 smoke 路径阅读
+    kind: doc
+    path: labs/l01_env_conda_cuda/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l01_env_conda_cuda/patch/task.md
+    href: "#patch"
+    estimate_min: 5
   - title: 读 CUDA / PyTorch wheel 体检脚本（10min）
     kind: source
     path: scripts/env/check_cuda.py
+    estimate_min: 10
   - title: 读 torchrun rank 演示脚本（10min）
     kind: source
     path: labs/l01_env_conda_cuda/scripts/torchrun_hello.py
+    estimate_min: 10
 
 questions:
   - id: q1_torch_cuda_false

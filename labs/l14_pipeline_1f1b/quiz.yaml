@@ -1,80 +1,103 @@
 mission: l14_pipeline_1f1b
-title: L05.7 Quiz · PP / 1F1B
+title: L15 Quiz · Pipeline Parallel 1F1B
 pass_threshold: 0.8
 description: |
-  这 5 题确认你能讲清 1F1B 为什么比 GPipe 内存友好。
+  这 5 题检查 L15 的关键边界：pipeline stage、microbatch、warmup/cooldown、
+  bubble、1F1B 的激活驻留，以及 Megatron interleaved PP 的取舍。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图
+    kind: doc
+    path: labs/l14_pipeline_1f1b/system_map.md
+    href: "#lesson"
+  - title: 读主讲义
+    kind: doc
+    path: labs/l14_pipeline_1f1b/lecture.md
+    href: "#lesson"
+  - title: 读源码带读
+    kind: doc
+    path: labs/l14_pipeline_1f1b/source_walkthrough.md
+    href: "#lesson"
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l14_pipeline_1f1b/patch/task.md
-  - title: 读 Megatron schedules.py
+    href: "#patch"
+  - title: 对照 Megatron schedules.py
     kind: source
     path: github_repo/Megatron-LM/megatron/core/pipeline_parallel/schedules.py
 
 questions:
-  - id: q1_bubble
-    prompt: 经典 1F1B pipeline bubble 总长度（以 stage time 为单位）？
+  - id: q1_stage_microbatch
+    prompt: Pipeline Parallelism 里 stage 和 microbatch 分别解决什么问题？
     options:
       - id: a
-        text: 2(D-1)（warmup + cooldown 各 D-1）
+        text: stage 把模型层切到不同设备，microbatch 把 global batch 切成可在流水线中连续流动的工作单元
         correct: true
       - id: b
-        text: D
+        text: stage 只用于 tokenizer，microbatch 只用于评测
       - id: c
+        text: stage 和 microbatch 都只影响日志格式
+      - id: d
+        text: microbatch 会减少模型总参数量
+    explanation: |
+      PP 的基本对象是模型层切分后的 stage 和训练 batch 切分后的 microbatch。stage 控制模型放置，microbatch 控制流水线填充和梯度累积。
+
+  - id: q2_warmup
+    prompt: 标准 non-interleaved 1F1B 中，stage s 的 warmup forward 数是多少？
+    options:
+      - id: a
+        text: D - s - 1
+        correct: true
+      - id: b
+        text: s + 1
+      - id: c
+        text: N - D
+      - id: d
+        text: 永远等于 0
+    explanation: |
+      stage 越靠前，越需要先把 activation 往后送。对 D 个 stage，stage s 的 warmup 是 D - s - 1。
+
+  - id: q3_bubble
+    prompt: 标准 non-interleaved 1F1B 的首尾 bubble count 是多少？
+    options:
+      - id: a
+        text: 2 * (D - 1)
+        correct: true
+      - id: b
+        text: D * N
+      - id: c
+        text: N - D
+      - id: d
         text: 0
-      - id: d
-        text: D²
-    explanation: "warmup 让前面 stage 把后面 stage 排空；cooldown 反之。"
-  - id: q2_memory
-    prompt: 1F1B 比 GPipe 省内存的关键？
+    explanation: |
+      pipeline 开头要填充 D - 1 个 stage time，结尾要排空 D - 1 个 stage time。microbatch 数增加会降低 bubble ratio，但这个固定 count 不变。
+
+  - id: q4_memory
+    prompt: 1F1B 相比 GPipe 更省激活显存的关键原因是什么？
     options:
       - id: a
-        text: 1F1B 让每个 stage 同时驻留的激活 ≈ pp_stage_count，而 GPipe 是 num_microbatches
+        text: 稳定阶段尽早穿插 backward，让已经满足反向依赖的 microbatch 释放激活
         correct: true
       - id: b
-        text: 不需要存 activation
+        text: 1F1B 完全不保存 activation
       - id: c
-        text: 只用 fp16
+        text: 1F1B 不需要 backward
       - id: d
-        text: 不存 grad
-    explanation: "1F1B 在 steady 阶段把已 backward 的 microbatch activation 释放掉。"
-  - id: q3_microbatch
-    prompt: 增加 num_microbatches 对 bubble 比例的影响？
-    options:
-      - id: a
-        text: 比例下降（bubble 不变，总时间变长），但 micro batch 太大会反而损害收敛
-        correct: true
-      - id: b
-        text: bubble 比例反而上升
-      - id: c
-        text: 与吞吐无关
-      - id: d
-        text: 必须等于 stage 数
-    explanation: "工业经验：num_microbatches ≈ 4×D 起步即可，更多收益递减。"
-  - id: q4_constraint
-    prompt: 1F1B 要求 num_microbatches ≥ num_stages 的原因？
-    options:
-      - id: a
-        text: warmup 阶段每个 stage s 需要 D - s - 1 个未消化的 forward，否则不够 fill
-        correct: true
-      - id: b
-        text: 编译器要求
-      - id: c
-        text: 是任意约束
-      - id: d
-        text: 只有 transformer 才需要
-    explanation: "若 num_microbatches < num_stages，1F1B 无法填满 pipeline。"
+        text: 1F1B 只支持 batch size 1
+    explanation: |
+      GPipe 先跑完所有 forward，早期 microbatch 的 activation 驻留很久。1F1B 在 steady 阶段交替 forward/backward，缩短部分激活的驻留窗口。
+
   - id: q5_interleaved
-    prompt: Megatron interleaved 1F1B 的优化点？
+    prompt: Megatron interleaved 1F1B 的主要取舍是什么？
     options:
       - id: a
-        text: 把每个 device 拆成多个 virtual stage，warmup/cooldown 比例进一步下降
+        text: 把每个设备拆成多个 virtual stage 以降低 bubble，但增加模型 chunk、通信和调度复杂度
         correct: true
       - id: b
-        text: 不再需要 backward
+        text: 删除所有 P2P 通信
       - id: c
-        text: 只有 MoE 才能用
+        text: 只能用于推理服务
       - id: d
-        text: 必须 fp8
-    explanation: "interleaved schedule 把 D 个真实 stage 切成 V·D virtual stage。"
+        text: 让 microbatch 数必须小于 stage 数
+    explanation: |
+      interleaved PP 用 virtual pipeline stage 进一步填充流水线。它降低空泡的同时，会让模型 chunk、通信顺序和工程实现更复杂。

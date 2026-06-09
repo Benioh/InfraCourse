@@ -145,7 +145,7 @@ def main() -> None:
         "## 10. 如果迁移到 8×H200\n\n"
         "把 `--nproc_per_node` 提到 8，并确认所有 rank 都发现预期设备。\n\n"
         "## 11. 下一步\n\n"
-        "进入 L01，开始 profile 一个真实训练循环。\n",
+        "进入 L02，开始 profile 一个真实训练循环。\n",
     )
     print(run_dir)
 

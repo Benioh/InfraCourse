@@ -1,72 +1,96 @@
 mission: l30.5_cuda_graph_savor
-title: L10.7 Quiz · CUDA Graph + Memory Savor
+title: L34 Quiz · CUDA Graph Cache + Memory Savor
 pass_threshold: 1.0
 description: |
-  3 题打中 graph 与 savor 协作的最常见误区。
+  检查学习者是否理解 graph replay 的地址约束、shape cache、Memory Savor 和 co-locate 切换顺序。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L34 在 RL co-locate 主线中的位置
+    kind: doc
+    path: labs/l30.5_cuda_graph_savor/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 CUDA Graph 到 Memory Savor
+    kind: doc
+    path: labs/l30.5_cuda_graph_savor/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、tests 和 Megatron 对照阅读
+    kind: doc
+    path: labs/l30.5_cuda_graph_savor/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 25
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l30.5_cuda_graph_savor/patch/task.md
-  - title: 读 cuda-graph 主线博客
+    href: "#patch"
+    estimate_min: 8
+  - title: 对照 patch reference
     kind: source
-    path: github_repo/Awesome-ML-SYS-Tutorial/torch/cuda-graph/readme.md
+    path: labs/l30.5_cuda_graph_savor/patch/reference/cuda_graph_cache.py
+    estimate_min: 10
+  - title: 对照 Megatron CUDA Graph metadata
+    kind: source
+    path: github_repo/Megatron-LM/megatron/core/transformer/cuda_graphs.py
+    estimate_min: 20
 
 questions:
-  - id: q1_static_buffer
-    prompt: |
-      为什么 CUDA Graph replay 时必须复用同一块 input/output buffer，
-      不能每次 alloc 新 tensor？
+  - id: q1_static_address
+    prompt: CUDA Graph replay 为什么不能随意换一块新分配的同 shape input tensor？
     options:
       - id: a
-        text: graph 录制时把 buffer 的虚拟地址硬编进 kernel 参数；换 buffer 等于换地址，
-              kernel 写到错误的地方
+        text: capture 会记录 kernel 参数和 buffer 地址，新 tensor 可能有不同地址
         correct: true
       - id: b
-        text: 性能优化：alloc 慢，所以复用
+        text: 因为新 tensor 一定比旧 tensor 慢
       - id: c
-        text: torch.cuda.graph API 不允许换 buffer
+        text: 因为 CUDA Graph 只能处理 scalar
       - id: d
-        text: 显存碎片问题
+        text: 因为 PyTorch 不支持 tensor clone
     explanation: |
-      A 对：CUDA Graph 是把一系列 kernel launch + 参数指针固化下来；replay 时 GPU
-      根据预先记录的指针读写。换 buffer 后预录的指针失效，行为未定义。
-      B 是好处之一，但**不是根因**。
+      A 对。真实 CUDA Graph replay 读写 capture 时记录的地址，所以动态输入通常要 copy 到 static buffer。
 
-  - id: q2_savor_vs_cudafree
-    prompt: |
-      为什么 RL co-locate 用 `torch_memory_saver` 而不是直接 `cudaFree`？
+  - id: q2_patch_scope
+    prompt: 本讲 CPU patch 能证明什么？
     options:
       - id: a
-        text: cudaFree 释放后，原虚拟地址失效，所有持有该指针的对象（包括 captured graph）都废了
+        text: cache key、capture/replay 计数、handle 状态和 paused bytes 合同正确
         correct: true
       - id: b
-        text: cudaFree 必须在 GPU 0 上调用
+        text: CUDA Graph replay 一定比 eager 快
       - id: c
-        text: torch_memory_saver 速度更快
+        text: GPU static buffer 地址已经稳定
       - id: d
-        text: cudaFree 要 sync 整个 stream
+        text: VMM allocator 已经释放真实物理显存
     explanation: |
-      A 对：memory savor 用 CUDA Virtual Memory，pause 时 unmap 物理页但保留虚拟
-      地址范围；resume 时重新 map 物理页，所有指针仍然有效。这样 graph 能照常
-      replay，KV cache pool 也能"原地复活"。
-      cudaFree 直接释放虚拟地址，graph 内部的指针指向悬空内存。
+      A 对。CPU patch 是结构语义验收，不包含真实 GPU timing、data_ptr 或 VMM physical page 证据。
 
-  - id: q3_offload_order
-    prompt: |
-      slime co-locate 的标准切换顺序是什么？
+  - id: q3_memory_savor
+    prompt: 真实 Memory Savor 与普通 `cudaFree` 的关键差异是什么？
     options:
       - id: a
-        text: rollout 完 → savor.pause(rollout) → upload megatron weights →
-              megatron train → offload megatron → savor.resume(rollout)
+        text: Memory Savor 目标是释放物理页并保留恢复所需的虚拟地址语义
         correct: true
       - id: b
-        text: rollout 完 → 直接 train → 然后 reload rollout
+        text: Memory Savor 会自动提高矩阵乘吞吐
       - id: c
-        text: 同时跑两个，让 PyTorch allocator 自己处理
+        text: cudaFree 只能释放 CPU 内存
       - id: d
-        text: rollout 完 → 移除 rollout 进程 → fork train 进程
+        text: 二者对 graph replay 完全等价
     explanation: |
-      A 对：必须先 pause rollout 释放物理显存，才能腾出空间给 megatron weights
-      + activation。训练完反向：先 offload megatron 释放，再 resume rollout。
-      详见 mismatch / weight-update 主线博客。
+      A 对。co-locate 需要让出显存，同时不能让 graph 内部持有的地址语义失效。
+
+  - id: q4_colocate_order
+    prompt: co-locate 阶段切换中最稳的顺序是哪一个？
+    options:
+      - id: a
+        text: rollout 完成 -> pause rollout 显存 -> train -> offload training -> resume rollout
+        correct: true
+      - id: b
+        text: rollout 完成 -> 直接恢复 training 和 rollout 两套权重
+      - id: c
+        text: 先 resume rollout，再 offload training
+      - id: d
+        text: 销毁 rollout 进程即可替代 pause/resume
+    explanation: |
+      A 对。这个顺序避免两套大对象在同一阶段同时占满 GPU，也保留下一轮 rollout 恢复路径。

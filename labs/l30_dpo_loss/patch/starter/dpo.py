@@ -1,4 +1,4 @@
-"""L10.3 Patch · DPO loss + completion log-prob extraction."""
+"""L33 Patch · DPO loss + completion log-prob extraction."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def compute_logps_for_completions(logits: torch.Tensor, labels: torch.Tensor) ->
     # TODO(student): logp = F.log_softmax(logits, dim=-1)
     # TODO(student): gather along V dim using labels.unsqueeze(-1) -> [B, T, 1] -> [B, T]
     # TODO(student): zero-out masked positions, sum along T to produce [B]
-    raise NotImplementedError("L10.3: implement compute_logps_for_completions")
+    raise NotImplementedError("L33: implement compute_logps_for_completions")
 
 
 def dpo_loss(
@@ -39,4 +39,4 @@ def dpo_loss(
     # TODO(student): reward_margin = chosen_reward - rejected_reward
     # TODO(student): loss = -F.logsigmoid(reward_margin).mean()
     # TODO(student): return dict with all four entries (loss as scalar)
-    raise NotImplementedError("L10.3: implement dpo_loss")
+    raise NotImplementedError("L33: implement dpo_loss")

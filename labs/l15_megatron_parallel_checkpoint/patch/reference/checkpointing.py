@@ -1,4 +1,4 @@
-"""Reference solution for L05.8 Patch."""
+"""Reference solution for L16 Patch."""
 
 from __future__ import annotations
 

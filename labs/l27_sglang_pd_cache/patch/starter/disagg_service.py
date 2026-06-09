@@ -1,4 +1,4 @@
-"""L09.5 Patch · SGLang-shaped prefill/decode disaggregation service."""
+"""L28 Patch · SGLang-shaped prefill/decode disaggregation service."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ class DisaggregationService:
         # TODO(student): update worker loads / active request counters.
         # TODO(student): call transfer_kv(..., token_count=prompt_token_count).
         # TODO(student): store and return a DisaggRoute.
-        raise NotImplementedError("L09.5: implement route_request")
+        raise NotImplementedError("L28: implement route_request")
 
     def transfer_kv(
         self,
@@ -76,18 +76,18 @@ class DisaggregationService:
     ) -> KVTransfer:
         # TODO(student): validate request_id/workers and positive token_count.
         # TODO(student): append a KVTransfer and return it.
-        raise NotImplementedError("L09.5: implement transfer_kv")
+        raise NotImplementedError("L28: implement transfer_kv")
 
     def metrics(self) -> dict:
         # TODO(student): return transfer count, transferred tokens, cached-prefix tokens,
         # prefill tokens, active requests, tokens by worker, and current worker loads.
-        raise NotImplementedError("L09.5: implement metrics")
+        raise NotImplementedError("L28: implement metrics")
 
     def transfers_for_request(self, request_id: str) -> list[KVTransfer]:
         # TODO(student): return transfers matching request_id in insertion order.
-        raise NotImplementedError("L09.5: implement transfers_for_request")
+        raise NotImplementedError("L28: implement transfers_for_request")
 
     def complete_request(self, request_id: str) -> None:
         # TODO(student): remove the active route and subtract its worker loads.
         # Unknown request_id should be a no-op, matching idempotent completion paths.
-        raise NotImplementedError("L09.5: implement complete_request")
+        raise NotImplementedError("L28: implement complete_request")

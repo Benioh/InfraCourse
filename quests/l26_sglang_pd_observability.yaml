@@ -1,37 +1,389 @@
 id: l26_sglang_pd_observability
-title: Prometheus Metrics Exporter
-level: L09
+title: L27 · SGLang PD Observability：Prometheus Metrics Exporter
+level: L27
 act: 第 3 章：推理服务
 role: 可观测性学徒
 priority: 核心
-estimated_minutes: 90
+estimated_minutes: 120
 no_gpu_friendly: true
 
 frameworks:
+  - SGLang
+  - Prometheus
+  - MiniInfra
   - Python stdlib
-  - SGLang / Prometheus (对照)
 
 patch:
   description: |
-    实现支持 gauge / counter / hit-rate 的 Prometheus exposition 文本生成器。
-    输出符合 Prometheus 格式，支持 labels（字母序排列）。0 events 时 hit-rate=0.0。
+    实现支持 gauge、counter 和 hit-rate 的 Prometheus exposition 文本生成器。
+    重点检查 metric state、label 排序、TYPE 行、零命中边界和文本稳定性。
   task_md: labs/l26_sglang_pd_observability/patch/task.md
   starter_file: labs/l26_sglang_pd_observability/patch/starter/metrics_exporter.py
   reference_file: labs/l26_sglang_pd_observability/patch/reference/metrics_exporter.py
-  test_command: make patch-test M=l26_sglang_pd_observability
+  test_command: IMPL=reference make patch-test M=l26_sglang_pd_observability
   status_file: labs/l26_sglang_pd_observability/patch/.last_run.json
   test_count: 5
-  test_kind: 行为契约 + 格式校验
+  test_kind: metrics exporter 行为合同与格式校验
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l26_sglang_pd_observability/system_map.md
+    description: L27 在 Serving 观测和 SGLang PD 分离链路中的位置。
+  - title: 主讲义
+    path: labs/l26_sglang_pd_observability/lecture.md
+    description: 从 p99 排障、Prometheus 文本、metric 类型讲到 SGLang PD 指标和证据链。
+  - title: 源码带读讲义
+    path: labs/l26_sglang_pd_observability/source_walkthrough.md
+    description: 按 patch、PD lab、SGLang metrics collector 和 scheduler metrics 主路径组织源码阅读。
 
 source_reading:
-  - title: SGLang scheduler / PD 实现
-    repo_path: github_repo/sglang/python/sglang/srt/managers/
-  - title: Mooncake PD disaggregation paper
-    repo_path: docs/术语表.md
+  - title: Patch starter
+    repo_path: labs/l26_sglang_pd_observability/patch/starter/metrics_exporter.py
+    focus: label 规范化、三张状态表和四个 TODO
+    highlights:
+      - title: label key 和文本格式
+        lines: [18, 28]
+        note: |
+          L18: `_label_key` 接收可选 labels，目标是生成可哈希、可排序的 series key。
+          L19-L21: 空 labels 返回空 tuple，非空 labels 按 key 排序，避免输入 dict 顺序影响状态 key。
+          L24: `_format_labels` 接收 labels，负责生成 Prometheus 样本行里的 `{k="v"}` 部分。
+          L25-L28: 空 labels 不输出花括号，非空 labels 按字母序拼接成稳定文本。
+      - title: exporter 状态表
+        lines: [31, 38]
+        note: |
+          L31: `MetricsExporter` 是本讲 patch 的最小观测对象。
+          L32: 初始化时不依赖 Prometheus client，全部状态保存在本地 dict。
+          L33-L34: gauges 用 `(name, label_key)` 保存当前值。
+          L35-L36: counters 用同样的 key 保存累计值。
+          L37-L38: ratios 用 metric name 保存 `(hits, misses)`。
+      - title: gauge 和 counter TODO
+        lines: [40, 50]
+        note: |
+          L40: `set_gauge` 的输入是 metric name、当前值和可选 labels。
+          L41: 注释给出核心合同：同一 series 的 gauge 应覆盖为最新值。
+          L42: starter 先抛错，学生要补齐写入状态表。
+          L44-L46: `inc_counter` 额外接收增量 `by`。
+          L47-L49: counter 应先取旧值，再累加增量。
+          L50: starter 先抛错，避免未实现代码悄悄通过。
+      - title: ratio TODO
+        lines: [52, 58]
+        note: |
+          L52: `record_event` 接收事件名和 hit 布尔值。
+          L53-L57: 注释说明 hits/misses 的更新方式。
+          L58: 学生要实现 hit 和 miss 两条路径。
+      - title: export TODO docstring
+        lines: [60, 66]
+        note: |
+          L60: `export` 返回 Prometheus exposition 文本。
+          L61-L66: docstring 限定输出格式：按 metric 分组、按 label 排序、包含 TYPE 行。
+  - title: Patch reference
+    repo_path: labs/l26_sglang_pd_observability/patch/reference/metrics_exporter.py
+    focus: 三类 metric 的参考实现和确定性导出
+    highlights:
+      - title: gauge 与 counter 更新
+        lines: [28, 35]
+        note: |
+          L28: `set_gauge` 接收当前值。
+          L29: gauge 直接覆盖 `(name, label_key)` 对应的值。
+          L31-L33: `inc_counter` 接收增量。
+          L34: counter 先生成同样的 series key。
+          L35: counter 在旧值基础上累加。
+      - title: hit/miss 状态
+        lines: [37, 43]
+        note: |
+          L37: `record_event` 只接收事件名和命中布尔值。
+          L38: 没有旧状态时从 `(0, 0)` 开始。
+          L39-L42: hit 增加 hits，miss 增加 misses。
+          L43: ratio 状态保存回 dict，导出时再计算比例。
+      - title: gauges 导出
+        lines: [48, 55]
+        note: |
+          L48: 创建按 metric name 分组的临时结构。
+          L49-L50: 把每条 gauge series 放入对应 metric name。
+          L52: metric name 排序，保证不同 metric 的输出顺序稳定。
+          L53: 每组先输出 `# TYPE <name> gauge`。
+          L54-L55: 同一 metric 内按 label key 排序后输出样本行。
+      - title: counters 和 hit-rate 导出
+        lines: [61, 72]
+        note: |
+          L61: counter metric name 同样排序。
+          L62: counter 的 TYPE 行标明查询语义。
+          L63-L64: counter series 也按 label key 排序输出。
+          L66-L67: ratio metric name 排序后取出 hits/misses。
+          L68-L69: 分母大于 0 才计算比例，否则输出 0.0。
+          L70-L72: ratio 以 `<name>_hit_rate` gauge 形式导出。
+  - title: Patch tests
+    repo_path: labs/l26_sglang_pd_observability/patch/tests/test_patch.py
+    focus: 五个最小行为合同
+    highlights:
+      - title: 实现选择
+        lines: [16, 18]
+        note: |
+          L16: `_impl` 是测试导入实现的入口。
+          L17: `IMPL` 环境变量默认使用 starter。
+          L18: 测试按 `<impl>.metrics_exporter` 导入模块，reference 验证可通过 `IMPL=reference` 指定。
+      - title: gauge 合同
+        lines: [21, 27]
+        note: |
+          L21: `test_gauge_set_and_export` 只检查 gauge 写入和导出。
+          L22-L24: 创建 exporter 并设置 `prefill_queue_depth`。
+          L25: 调用 `export` 生成文本。
+          L26-L27: 断言 TYPE 行和样本值同时存在。
+      - title: counter 合同
+        lines: [30, 39]
+        note: |
+          L30: `test_counter_increment` 检查 counter 累加。
+          L31-L35: 连续增加三次，其中一次增量为 3。
+          L36: 导出当前状态。
+          L37: 断言 metric 类型是 counter。
+          L38-L39: 最终值应为 5。
+      - title: hit-rate 合同
+        lines: [42, 52]
+        note: |
+          L42: `test_hit_rate_calculation` 检查 hits/misses 比例。
+          L43-L48: 记录三次 hit 和一次 miss。
+          L49: 导出当前状态。
+          L50: 断言 hit-rate 以 gauge 类型输出。
+          L51-L52: 3 / 4 的比例应导出为 0.75。
+      - title: miss 边界
+        lines: [55, 62]
+        note: |
+          L55: `test_zero_events_returns_zero` 检查零命中边界。
+          L56-L58: 只记录一次 miss。
+          L59-L60: 导出文本时不能触发除零或 NaN。
+          L61-L62: 0 hit / 1 event 应导出 0.0。
+      - title: label 排序合同
+        lines: [65, 71]
+        note: |
+          L65: `test_labels_sorted` 检查文本稳定性。
+          L66-L68: 输入 labels 顺序是 `z,a,m`。
+          L69: 导出文本。
+          L70-L71: 输出必须按 `a,m,z` 字母序排列。
+  - title: PD lab script
+    repo_path: labs/l26_sglang_pd_observability/scripts/run_pd_lab.py
+    focus: unified 与 PD 配置的模拟指标和 artifact
+    highlights:
+      - title: PD 指标模拟
+        lines: [26, 37]
+        note: |
+          L26: `simulate` 接收配置名、prefill GPU 数和 decode GPU 数。
+          L27-L28: 用资源总数和不平衡度构造 queue wait。
+          L29-L32: 输出记录配置名和资源配比。
+          L33: prefill GPU 越多，模拟 TTFT 越低。
+          L34: decode GPU 越多，模拟 ITL 越低。
+          L35-L37: 输出 queue wait 和 routing errors。
+      - title: run 目录与配置
+        lines: [40, 50]
+        note: |
+          L40: `main` 是本地 drill 的入口。
+          L41-L44: 解析 run id 和模式。
+          L45: 创建可复查 run 目录。
+          L46-L47: 保存命令快照和预测文件。
+          L48-L50: 写入 resolved config，后续 report 可回到配置上下文。
+      - title: 配置循环上半段
+        lines: [51, 58]
+        note: |
+          L51: 初始化 rows，用于收集各配置结果。
+          L52: 依次比较 unified、2P6D 和 4P4D。
+          L53-L55: 从 configs 目录读取 YAML。
+          L56-L58: unified 配置用 TP 一半近似 prefill，一半近似 decode。
+      - title: 配置循环下半段
+        lines: [59, 69]
+        note: |
+          L59-L63: PD 配置直接读取 prefill 和 decode GPU 数。
+          L64: 当前配置结果进入 rows。
+          L65-L68: 每个配置写一行 `metrics.jsonl`。
+          L69: 所有配置结果写入 comparison artifact。
+      - title: report 关键结论
+        lines: [74, 78]
+        note: |
+          L74: 根据 rows 找到最低 TTFT 配置。
+          L75: 根据 rows 找到最低 ITL 配置。
+          L76-L78: 写入 report，把指标结论落成文档。
+  - title: SGLang loads endpoint
+    repo_path: github_repo/sglang/python/sglang/srt/entrypoints/v1_loads.py
+    focus: scheduler load 汇总和 Prometheus 文本导出
+    highlights:
+      - title: 空负载聚合
+        lines: [61, 73]
+        note: |
+          L61: `_compute_aggregate` 接收每个 rank 的 load dict。
+          L62: 函数目标是计算整体负载指标。
+          L63: 没有 load 时返回一组零值。
+          L64-L73: running、waiting、tokens、throughput 和 utilization 都有明确默认值。
+      - title: 非空负载聚合
+        lines: [76, 87]
+        note: |
+          L76: 返回整体聚合结果。
+          L77-L81: running、waiting 和 total requests 跨 rank 求和。
+          L82-L83: used tokens 和 total tokens 跨 rank 求和。
+          L84: token usage 取各 rank 平均值。
+          L85-L86: throughput 和 utilization 也取平均。
+          L87: 聚合结果结束。
+      - title: Prometheus formatter
+        lines: [97, 107]
+        note: |
+          L97: 遍历 `GetLoadsReqOutput` 的 dataclass fields。
+          L98-L99: 只处理带 metric metadata 的字段。
+          L100-L101: metadata 提供 metric 类型和 metric name。
+          L102-L103: 输出 HELP 和 TYPE 行。
+          L104-L107: 每个 DP rank 输出一个带 `dp_rank` label 的 sample。
+      - title: get_loads prometheus 分支
+        lines: [154, 165]
+        note: |
+          L154: include 参数被解析为 section 列表。
+          L156-L160: 从 tokenizer manager 请求 load results。
+          L161-L162: 参数错误转成 HTTP 400。
+          L164-L165: `format=prometheus` 时返回文本 formatter。
+  - title: SGLang metrics collector
+    repo_path: github_repo/sglang/python/sglang/srt/observability/metrics_collector.py
+    focus: SchedulerStats、metric 定义和 log_stats 写入
+    highlights:
+      - title: SchedulerStats 基础字段
+        lines: [77, 86]
+        note: |
+          L77: `SchedulerStats` 是 scheduler 到 collector 的结构化载体。
+          L79-L81: running requests 和 used tokens 是基础状态。
+          L82-L84: token_usage 字段描述 token pool 压力。
+          L85-L86: full attention 和 pending prealloc 也被单独记录。
+      - title: queue 和 cache 字段
+        lines: [89, 95]
+        note: |
+          L89-L90: decode sequence lengths 和 generation throughput 描述 decode 侧状态。
+          L91-L92: waiting queue 和 grammar queue 进入 stats。
+          L93: offline batch running requests 单独记录。
+          L94-L95: prefix cache hit-rate 是 prefill 观测的重要 gauge。
+      - title: PD 字段
+        lines: [109, 115]
+        note: |
+          L109: PD disaggregation 字段从这里开始。
+          L110-L111: prefill 侧区分 prealloc queue 和 inflight queue。
+          L112-L113: decode 侧区分 prealloc queue 和 transfer queue。
+          L114-L115: KV transfer speed 和 latency 进入 stats。
+      - title: 基础 gauges
+        lines: [247, 258]
+        note: |
+          L247-L252: `sglang:gen_throughput` 是 generation throughput gauge。
+          L253-L258: `sglang:num_queue_reqs` 是 waiting queue gauge。
+      - title: cache hit gauge
+        lines: [271, 276]
+        note: |
+          L271-L276: `sglang:cache_hit_rate` 是 prefix cache hit-rate gauge。
+      - title: PD prefill gauges
+        lines: [347, 359]
+        note: |
+          L347: PD metrics 定义开始。
+          L348-L353: prefill prealloc queue 用 gauge 表示当前排队数。
+          L354-L359: prefill inflight queue 也用 gauge 表示当前状态。
+      - title: PD decode gauges 和 failed counter
+        lines: [360, 372]
+        note: |
+          L360-L365: decode prealloc queue 用 gauge 表示当前排队数。
+          L366-L371: decode transfer queue 用 gauge 表示等待 KV 传输的请求数。
+          L372: bootstrap failed requests 用 counter 开始累计失败事件。
+      - title: KV transfer histograms
+        lines: [387, 398]
+        note: |
+          L387-L392: KV transfer speed 用 histogram 记录分布。
+          L393-L398: KV transfer latency 用 histogram 记录长尾。
+      - title: log_stats 基础写入
+        lines: [1019, 1031]
+        note: |
+          L1019: `log_stats` 接收 scheduler 填好的 stats。
+          L1020-L1023: running requests、used tokens、token usage 被写入 gauges。
+          L1024-L1030: pending usage、decode sequence lengths 和 throughput 继续写入。
+          L1031: waiting queue 使用 queue count helper 写入。
+      - title: log_stats PD 写入
+        lines: [1047, 1058]
+        note: |
+          L1047: PD 写入段开始。
+          L1048-L1053: prefill prealloc 和 inflight queue 写入 gauges。
+          L1054-L1058: decode prealloc 和 transfer queue 写入 gauges。
+  - title: SGLang scheduler metrics mixin
+    repo_path: github_repo/sglang/python/sglang/srt/observability/scheduler_metrics_mixin.py
+    focus: scheduler 如何填充 SchedulerStats
+    highlights:
+      - title: metrics label 初始化
+        lines: [123, 135]
+        note: |
+          L123: 只有开启 metrics 时才构造 collector。
+          L124-L126: disaggregation mode 被转成 engine type label。
+          L128-L134: model、engine、tp、pp、moe ep rank 是低基数系统 label。
+          L135: priority scheduling 打开时才加入 priority label。
+      - title: collector 创建
+        lines: [136, 147]
+        note: |
+          L136-L138: priority 和 dp rank 是可选 label。
+          L139-L140: 额外 labels 由 server args 提供。
+          L141-L147: 用 labels 和功能开关创建 `SchedulerMetricsCollector`。
+      - title: prefill cache hit 和 queue
+        lines: [411, 419]
+        note: |
+          L411: 基础 stats 写入段开始。
+          L412: total tokens 包含输入 tokens 和 cache hit tokens。
+          L413-L415: cache hit-rate 由 hit tokens / total tokens 得到。
+          L417-L419: running requests 和 pool stats 写入 stats。
+      - title: prefill queue stats
+        lines: [421, 427]
+        note: |
+          L421: 读取 priority scheduling 开关。
+          L422-L424: waiting queue 被转成 QueueCount。
+          L425: grammar queue 单独记录。
+          L426: cache hit-rate 写入 stats。
+          L427: 最大 token 容量随后写入 stats。
+      - title: PD prefill/decode stats
+        lines: [435, 445]
+        note: |
+          L435: PD stats 分支开始。
+          L436-L444: PREFILL engine 写入 prealloc queue、inflight queue、KV transfer speed 和 latency。
+          L445: DECODE engine 分支开始。
+      - title: stats 输出
+        lines: [445, 457]
+        note: |
+          L445-L451: DECODE engine 写入 prealloc queue 和 transfer queue。
+          L453-L456: 其他利用率、LoRA 和 HiCache stats 随后更新。
+          L457: collector 把 stats 写入 Prometheus metrics。
+      - title: decode 基础 stats
+        lines: [591, 603]
+        note: |
+          L591: decode metrics 写入段开始。
+          L592: 读取 priority scheduling 开关。
+          L594-L597: running requests 和 offline batch 状态写入 stats。
+          L598-L600: pool stats、decode sequence lengths 和 generation throughput 写入 stats。
+          L601-L603: waiting queue 被转成 QueueCount。
+      - title: decode spec 和 retract stats
+        lines: [611, 620]
+        note: |
+          L611: speculative decoding stats 写入段开始。
+          L612-L613: acceptance rate 和 acceptance length 进入 stats。
+          L615-L618: retract 和 paused counters 写入后清零。
+          L620: PD disaggregation 分支开始。
+      - title: decode PD queue stats
+        lines: [621, 633]
+        note: |
+          L621-L627: PREFILL engine 写入 prefill queue。
+          L628-L633: DECODE engine 写入 decode prealloc 和 transfer queue。
+  - title: MiniInfra evidence and disaggregation
+    repo_path: mini_infra/observability/evidence.py
+    focus: run 证据摘要
+    highlights:
+      - title: evidence 摘要上半段
+        lines: [11, 23]
+        note: |
+          L11: `summarize_run` 接收一个 run 目录。
+          L12: 读取该 run 的 `metrics.jsonl`。
+          L13-L18: 返回 run_dir，尽量转成相对 ROOT 的路径。
+          L19-L21: 记录 command、config 和 report 是否存在。
+          L22-L23: 记录 metric_count 和 latest_metric。
+      - title: evidence 摘要下半段
+        lines: [24, 29]
+        note: |
+          L24-L28: 统计 artifacts 目录下的文件数量。
+          L29: run 摘要结束。
 
 mini_infra_targets:
-  - mini_infra/sglang/
-  - mini_infra/observability/
+  - mini_infra/observability/evidence.py
+  - mini_infra/sglang/srt/managers/disagg_service.py
 
 notebooks: []
 
@@ -40,9 +392,285 @@ tickets:
   - sglang_pd_decode_starve_004
   - sglang_metrics_missing_005
 
-prereq: l24_spec_decode
+prereq: l25_serve_eval_lm_eval
 next_lab: l27_sglang_pd_cache
 
 gpu_modes:
-  local: CPU OK
-  cluster: 配合真 SGLang Prometheus + Grafana
+  local: CPU 即可
+  cluster: 可对照真实 SGLang Prometheus endpoint 和 Grafana
+
+lesson:
+  opening: |
+    # 第 27 讲：SGLang PD Observability
+
+    这一讲讲推理服务的可观测性。PD 分离把 prefill、decode 和 KV transfer 拆到不同资源池后，p99、TTFT 或 ITL 异常不能只靠一行日志解释。我们先写一个最小 Prometheus exporter，理解 gauge、counter、hit-rate 和 label 稳定性，再回到 SGLang 的 `/v1/loads`、metrics collector 和 scheduler metrics 路径，学习真实系统如何把运行状态变成可复查指标。
+
+    新版课程按“系统地图 -> 主讲义 -> 源码带读 -> quiz -> patch -> PD lab -> 课后产物”的顺序组织。lab 只检查最小合同：metric state 是否正确更新，导出文本是否稳定。
+  sections:
+    - title: 课程定位：观测链路先于 dashboard
+      plain_explanation: |
+        L27 属于 Serving observability。前一讲 L26 已经建立了服务质量评测证据链；这一讲转向运行时状态证据链：queue、prefill、decode、KV cache、prefix cache、KV transfer 和 failed counters。
+
+        Dashboard 只是展示层。真正影响排障质量的是 metric 类型是否选对，label 是否稳定，run artifact 是否能复查，指标能否回到源码里的状态更新位置。写 patch 前，应该先能说清 `runtime state -> metric state -> Prometheus text -> scrape/report -> debug decision` 这条链。
+      mental_model: |
+        把 exporter 看成运行时账本的打印机。账本先要记对当前值、累计值和命中/未命中，再谈图表如何展示。
+      why_it_matters: |
+        p99 抬高时，只有 HTTP 状态码或平均吞吐很难定位阶段。先建立观测链路，后续讨论 PD 配比、KV transfer 和 cache hit 才有证据。
+      common_confusions:
+        - 把 Grafana 面板当作可观测性本身。
+        - 看到一个 latency 数值就直接判断瓶颈。
+        - 跳过系统地图，直接猜 patch 测试。
+      checkpoint_questions:
+        - L27 要解决的是服务入口、调度策略、指标证据链，还是采样算法？
+        - 一个 run 要可复查，至少应保存哪些文件？
+        - Dashboard 查询错误和服务本身慢，应该如何区分？
+
+    - title: Prometheus 文本：metric name、labels、value
+      plain_explanation: |
+        Prometheus exposition 文本的最小形态是 TYPE 行加样本行。TYPE 行说明 metric 的查询语义，样本行包含 metric name、可选 labels 和数值。labels 描述维度，例如 model、engine_type、rank、stage。label set 会决定 series；label 值过多会增加存储和查询成本。
+
+        L27 patch 要求 label 按字母序输出。这个要求服务于两个目标：相同状态导出为稳定文本，等价 label dict 不因输入顺序产生不同结果。生产中还要避免把 request id、session id、prompt hash 这类高基数字段放进 label。
+      mental_model: |
+        一条样本像一行结构化日志：名字说明测什么，labels 说明在哪个维度下测，value 说明当前观测值。
+      why_it_matters: |
+        文本顺序抖动会污染测试和 artifact diff；高基数 labels 会让 Prometheus series 数量膨胀，排障查询变慢。
+      source_refs:
+        - title: Starter label helpers
+          repo_path: labs/l26_sglang_pd_observability/patch/starter/metrics_exporter.py
+          lines: [18, 28]
+          note: |
+            L18: `_label_key` 定义状态表使用的 label key。
+            L19-L21: labels 为空时返回空 tuple，非空时排序，保证 dict 输入顺序不影响 key。
+            L24: `_format_labels` 定义文本导出入口。
+            L25-L28: labels 为空时不输出花括号，非空时按字母序拼接。
+        - title: SGLang loads Prometheus samples
+          repo_path: github_repo/sglang/python/sglang/srt/entrypoints/v1_loads.py
+          lines: [97, 107]
+          note: |
+            L97: 遍历 dataclass fields。
+            L98-L99: 只处理带 metric metadata 的字段。
+            L100-L103: metadata 决定 metric type、name、HELP 和 TYPE 行。
+            L104-L107: 每个 DP rank 生成一条带 `dp_rank` label 的 sample。
+      common_confusions:
+        - 认为 label 只是展示字符串。
+        - 认为 request id 放进 label 能帮助监控。
+        - 认为 TYPE 行可有可无。
+      checkpoint_questions:
+        - '`requests_total{model="qwen2"} 8421` 中三部分分别是什么？'
+        - 为什么 request id 更适合 trace 或 log，不适合作为 metric label？
+        - 为什么同一个 labels dict 的输出顺序要稳定？
+
+    - title: 三类指标状态：gauge、counter、hit-rate
+      plain_explanation: |
+        Gauge 表示当前状态，可以上升也可以下降。queue depth、running requests、token usage、KV available tokens 都是当前状态。Counter 表示累计事件，适合 requests total、generated tokens total、bootstrap failed total、transfer failed total。Hit-rate 在本讲由 hits/misses 两列状态派生，导出时再计算比例。
+
+        这三类指标的数字看起来都像浮点值，但更新规则不同。把 queue depth 写成 counter，队列清空后图上仍然只会上升；把 failed requests 写成 gauge，重启或覆盖会让累计失败数失真；只保存最后一次 hit/miss，则无法表示一段时间的 cache 命中率。
+      mental_model: |
+        Gauge 像温度计，counter 像里程表，hit-rate 像命中次数除以总尝试次数。
+      why_it_matters: |
+        指标类型选错会让排障方向错误。p99 退化时，团队会根据这些曲线决定扩容、改路由、调 PD 配比或排查 KV transfer。
+      source_refs:
+        - title: Reference gauge and counter
+          repo_path: labs/l26_sglang_pd_observability/patch/reference/metrics_exporter.py
+          lines: [28, 35]
+          note: |
+            L28: `set_gauge` 接收当前值。
+            L29: gauge 覆盖同一 series 的旧值。
+            L31-L33: `inc_counter` 接收增量。
+            L34-L35: counter 读取旧值后累加。
+        - title: Reference hit/miss state
+          repo_path: labs/l26_sglang_pd_observability/patch/reference/metrics_exporter.py
+          lines: [37, 43]
+          note: |
+            L37: `record_event` 接收事件名和 hit 标记。
+            L38: 没有旧状态时从 0 hit、0 miss 开始。
+            L39-L42: hit 和 miss 分别更新不同计数。
+            L43: 保存新的 `(hits, misses)`。
+        - title: SGLang metric definitions
+          repo_path: github_repo/sglang/python/sglang/srt/observability/metrics_collector.py
+          lines: [347, 359]
+          note: |
+            L347: PD metrics 定义开始。
+            L348-L353: prefill prealloc queue 是 gauge。
+            L354-L359: prefill inflight queue 也是 gauge。
+      common_confusions:
+        - 把 counter 当作整数类型，而不是累计语义。
+        - 用 gauge 记录累计失败数。
+        - 只保存最后一次 cache hit 布尔值。
+      checkpoint_questions:
+        - '`num_queue_reqs`、`prompt_tokens_total`、`cache_hit_rate` 应分别如何建模？'
+        - 为什么只有 miss 时 hit-rate 应为 0.0？
+        - 哪些指标需要 histogram 才能解释 p99？
+
+    - title: Exporter 实现：写入时规范化，导出时排序
+      plain_explanation: |
+        Patch reference 的核心路径很短：写入时把 labels 规范化成 tuple，状态表按 `(name, label_key)` 存储；导出时先按 metric name 分组，再按 label key 排序输出样本。ratio 不直接保存文本，也不直接保存最后一次结果，而是在导出时用 hits/misses 计算。
+
+        测试覆盖五个最小风险：gauge 能导出当前值，counter 能累加，hit-rate 计算正确，只有 miss 时没有 NaN，labels 能稳定排序。测试没有覆盖完整 parser、HTTP server、histogram 和多进程 registry，这些属于生产扩展。
+      mental_model: |
+        实现路径是“状态表是事实来源，export 是确定性投影”。不要让文本拼接反过来主导状态设计。
+      why_it_matters: |
+        serving 系统的观测代码如果不稳定，后续性能实验和事故复盘都会失去基准。最小 exporter 的价值是让证据链从第一层就可靠。
+      source_refs:
+        - title: Reference gauges export
+          repo_path: labs/l26_sglang_pd_observability/patch/reference/metrics_exporter.py
+          lines: [48, 55]
+          note: |
+            L48: 创建 metric name 到 series 的分组。
+            L49-L50: 遍历 gauges 状态表并加入分组。
+            L52-L53: metric name 排序后先输出 TYPE 行。
+            L54-L55: 每条 series 按 label key 排序后输出样本。
+        - title: Reference ratios export
+          repo_path: labs/l26_sglang_pd_observability/patch/reference/metrics_exporter.py
+          lines: [66, 72]
+          note: |
+            L66: ratio names 排序，保证输出稳定。
+            L67-L68: 取出 hits/misses 并计算 total。
+            L69: total 大于 0 才计算比例，否则为 0.0。
+            L70-L72: ratio 以 `<name>_hit_rate` gauge 输出。
+        - title: Label sorting test
+          repo_path: labs/l26_sglang_pd_observability/patch/tests/test_patch.py
+          lines: [65, 71]
+          note: |
+            L65: label 排序测试开始。
+            L66-L68: 输入 labels 顺序为 `z,a,m`。
+            L69: 调用 export。
+            L70-L71: 断言输出顺序必须是 `a,m,z`。
+      common_confusions:
+        - 直接遍历 dict，依赖插入顺序。
+        - 只用 metric name 做 key，导致不同 labels 的 series 互相覆盖。
+        - 先拼文本，再从文本推导状态。
+      checkpoint_questions:
+        - 为什么 key 要包含 metric name 和 label key？
+        - 为什么 export 需要两层排序？
+        - 当前测试没有覆盖哪些生产需求？
+
+    - title: PD Lab：把指标放回 prefill/decode 流水线
+      plain_explanation: |
+        PD lab 用三个配置生成模拟指标：unified TP8、2P6D、4P4D。prefill GPU 增加时，模拟 TTFT 下降；decode GPU 增加时，模拟 ITL 下降；prefill/decode 资源不平衡时，queue wait 上升。这个 drill 不给真实性能结论，它训练的是“指标如何解释阶段”的能力。
+
+        真实 PD 排障要同时看 prefill queue、decode queue、KV transfer latency/speed/size、failed counters、cache hit-rate 和 token usage。只看 p99 无法说明慢在首 token 前、后续 token 间隔、KV 交接，还是 scrape 配置。
+      mental_model: |
+        把请求看成流水线：入队、prefill、KV transfer、decode、返回 token。每个阶段都要有指标，才能定位长尾来源。
+      why_it_matters: |
+        PD 分离会改变资源配比和跨 worker 交接成本。观测字段不完整时，很容易把 queue wait、decode starvation 和 KV transfer 慢混为一类问题。
+      source_refs:
+        - title: PD simulation
+          repo_path: labs/l26_sglang_pd_observability/scripts/run_pd_lab.py
+          lines: [26, 37]
+          note: |
+            L26: `simulate` 接收配置名和资源配比。
+            L27-L28: 计算资源不平衡度。
+            L29-L32: 输出配置和 GPU 配比。
+            L33: TTFT 随 prefill GPU 数变化。
+            L34: ITL 随 decode GPU 数变化。
+            L35-L37: queue wait 和 routing errors 进入指标。
+        - title: Metrics artifact write
+          repo_path: labs/l26_sglang_pd_observability/scripts/run_pd_lab.py
+          lines: [59, 69]
+          note: |
+            L59-L63: PD 配置读取 prefill 和 decode GPU 数。
+            L64: 当前结果进入 rows。
+            L65-L68: 每个结果写入 `metrics.jsonl`。
+            L69: comparison artifact 保存所有配置结果。
+        - title: MiniInfra disaggregation metrics
+          repo_path: mini_infra/sglang/srt/managers/disagg_service.py
+          lines: [125, 137]
+          note: |
+            L125: `metrics` 返回 PD 服务当前观测状态。
+            L126-L136: 按 prefill/decode worker 聚合 transfer tokens。
+            L137: 返回 metrics dict 开始。
+      common_confusions:
+        - 把 CPU 模拟数值当作真实性能。
+        - 认为增加 prefill GPU 会同时降低所有延迟指标。
+        - 只看 p99，不拆 TTFT、ITL 和 KV transfer。
+      checkpoint_questions:
+        - 2P6D 和 4P4D 分别更可能影响 TTFT 还是 ITL？
+        - 为什么 queue wait 需要和资源配比一起解释？
+        - 真实 SGLang 中还应补哪些指标才能验证 PD 结论？
+
+    - title: SGLang 对照：loads、collector、scheduler stats
+      plain_explanation: |
+        SGLang `/v1/loads` 可以把 scheduler load 以 JSON 或 Prometheus 文本导出。metrics collector 定义 production metrics，scheduler metrics mixin 在 prefill/decode 阶段填充 `SchedulerStats` 并调用 `log_stats`。这三处代码分别回答：状态如何被聚合，metric 类型如何定义，状态在哪里写入。
+
+        读真实源码时不要只背 metric 名。要问清楚每个字段来自哪个阶段、属于 gauge/counter/histogram 的哪一种、用了哪些 labels、能支持哪类排障判断。
+      mental_model: |
+        `/v1/loads` 是负载视图，collector 是指标注册表，scheduler mixin 是写入路径。三者合起来才是完整观测链路。
+      why_it_matters: |
+        接入真实 SGLang 时，dashboard 异常可能来自 exporter、collector、scheduler 写入、label 查询或 workload。把源码路径分清后，排查可以逐层收敛。
+      source_refs:
+        - title: get_loads prometheus branch
+          repo_path: github_repo/sglang/python/sglang/srt/entrypoints/v1_loads.py
+          lines: [154, 165]
+          note: |
+            L154: include 参数被解析。
+            L156-L160: tokenizer manager 返回 load results。
+            L161-L162: 参数错误转为 HTTP 400。
+            L164-L165: Prometheus 格式走 formatter。
+        - title: SchedulerStats PD fields
+          repo_path: github_repo/sglang/python/sglang/srt/observability/metrics_collector.py
+          lines: [109, 115]
+          note: |
+            L109: PD 字段开始。
+            L110-L111: prefill queue 拆成 prealloc 和 inflight。
+            L112-L113: decode queue 拆成 prealloc 和 transfer。
+            L114-L115: KV transfer speed 和 latency 进入 stats。
+        - title: Scheduler collector labels
+          repo_path: github_repo/sglang/python/sglang/srt/observability/scheduler_metrics_mixin.py
+          lines: [123, 135]
+          note: |
+            L123: enable metrics 时才创建 collector。
+            L124-L126: disaggregation mode 变成 engine type label。
+            L128-L134: model、engine、rank 等低基数 label 被加入。
+            L135: priority label 只在开启优先级调度时加入。
+      common_confusions:
+        - 把 `/v1/loads` 当成只给 router 使用，忽略 Prometheus 格式。
+        - 看到数值就忽略 metric 类型。
+        - 随意增加高基数 labels。
+      checkpoint_questions:
+        - '`/v1/loads?format=prometheus` 的样本为什么带 `dp_rank`？'
+        - '`SchedulerStats` 和 `SchedulerMetricsCollector` 的职责有什么区别？'
+        - model、engine_type、rank 为什么适合做 label？
+
+    - title: Debug 证据链：从指标回到可复查 run
+      plain_explanation: |
+        可观测性最终服务于 debug。一次结论应该能回到命令、配置、workload、metrics、日志、artifact 和 report。MiniInfra evidence 工具会扫描这些文件是否存在，并记录 metrics 数量和最新指标。缺少这些文件时，团队很难判断异常来自代码、配置、workload 还是采集链路。
+
+        PD 故障可按固定顺序排查：先确认 metrics endpoint 和 scrape target，再看 prefill/decode queue，然后看 cache hit-rate、KV capacity 和 KV transfer histograms，最后把 failed counters、routes 和 worker loads 对齐。
+      mental_model: |
+        Debug 是一次可重复实验。命令和配置是变量表，metrics 是观测值，artifact 是原始证据，report 是解释。
+      why_it_matters: |
+        Serving 故障跨越入口、scheduler、KV cache、网络和 worker。没有证据链时，团队只能猜；有证据链时，可以比较哪个变量先变、哪个阶段先异常。
+      source_refs:
+        - title: Evidence summary
+          repo_path: mini_infra/observability/evidence.py
+          lines: [11, 23]
+          note: |
+            L11: `summarize_run` 接收 run 目录。
+            L12: 读取 `metrics.jsonl`。
+            L13-L18: 记录 run_dir。
+            L19-L21: 检查 command、config 和 report。
+            L22-L23: 记录 metric_count 和 latest_metric。
+        - title: PD route start
+          repo_path: mini_infra/sglang/srt/managers/disagg_service.py
+          lines: [74, 85]
+          note: |
+            L74-L81: 校验 request id、重复请求、prompt tokens 和 cached prefix 边界。
+            L83: prefill tokens 等于 prompt tokens 减 cached prefix tokens。
+            L84-L85: 分别选择 prefill 和 decode worker。
+        - title: PD metrics totals
+          repo_path: mini_infra/sglang/srt/managers/disagg_service.py
+          lines: [138, 149]
+          note: |
+            L138-L139: 输出 KV transfer 次数和 token 总量。
+            L140-L145: 输出 prefill tokens 和 cached prefix tokens。
+            L146: 输出当前 active requests。
+            L147-L149: 输出按 worker 聚合的 tokens。
+      common_confusions:
+        - 只保存截图，不保存 metrics 和配置。
+        - 每次实验同时改多个变量。
+        - 指标缺失时直接判断系统没流量。
+      checkpoint_questions:
+        - 一个可复查 run 至少要包含哪些文件？
+        - metrics missing 的排查顺序是什么？
+        - decode starvation 时，你会先看哪三组指标？

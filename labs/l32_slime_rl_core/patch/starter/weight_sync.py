@@ -1,5 +1,5 @@
 """
-L11 Patch · WeightSyncCoordinator
+L36 Patch · WeightSyncCoordinator
 
 填空规则：
 - TODO(student) 必须自己写
@@ -30,7 +30,7 @@ class WeightSyncCoordinator:
         #   self.train_provider = train_state_provider
         #   self.inference_setter = inference_state_setter
         #   self.inference_provider = inference_state_provider
-        raise NotImplementedError("L11: implement __init__")
+        raise NotImplementedError("L36: implement __init__")
 
     def sync(self) -> Dict[str, object]:
         """返回 {bytes_synced, num_tensors, mismatched_keys}.
@@ -71,4 +71,4 @@ class WeightSyncCoordinator:
         #       "num_tensors": len(accepted),
         #       "mismatched_keys": mismatched,
         #   }
-        raise NotImplementedError("L11: implement sync")
+        raise NotImplementedError("L36: implement sync")

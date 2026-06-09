@@ -1,8 +1,10 @@
-"""L09.5 · Drive student's DisaggregationService through a synthetic workload."""
+"""L28 · Drive DisaggregationService through a synthetic workload."""
 
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
 import random
 import sys
 from pathlib import Path
@@ -30,6 +32,9 @@ MISSION_ID = "l27_sglang_pd_cache"
 
 
 def _impl():
+    selected = os.environ.get("IMPL")
+    if selected:
+        return importlib.import_module(f"{selected}.disagg_service"), selected
     try:
         from starter import disagg_service as mod  # type: ignore[import-not-found]
 
@@ -212,7 +217,7 @@ def main() -> None:
 `bench_ttft.py` 打流量，关键指标和本 drill 同名。
 
 ## 11. 下一步
-进入 L10 学 verl RL baseline。
+进入 L29 学 verl RL baseline。
 """,
     )
     print(run_dir)

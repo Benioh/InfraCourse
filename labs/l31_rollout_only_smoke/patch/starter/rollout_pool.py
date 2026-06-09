@@ -1,5 +1,5 @@
 """
-L10.5 Patch · 异步 Rollout Pool
+L35 Patch · Async Rollout Pool
 
 填空规则：
 - TODO(student) 必须自己写
@@ -25,7 +25,7 @@ class RolloutPool:
         # TODO(student):
         #   self.generate_fn = generate_fn
         #   self.max_concurrency = max_concurrency
-        raise NotImplementedError("L10.5: implement __init__")
+        raise NotImplementedError("L35: implement __init__")
 
     async def rollout(self, prompts: List[str]) -> List[str]:
         """并发跑 generate_fn(prompt)，返回保序的结果列表。"""
@@ -39,4 +39,4 @@ class RolloutPool:
         #
         #   tasks = [_bounded(p) for p in prompts]
         #   return await asyncio.gather(*tasks)
-        raise NotImplementedError("L10.5: implement rollout")
+        raise NotImplementedError("L35: implement rollout")

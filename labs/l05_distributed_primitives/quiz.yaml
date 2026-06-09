@@ -1,5 +1,5 @@
 mission: l05_distributed_primitives
-title: L02 Quiz · Tensor Parallel 关键概念
+title: L06 Quiz · Tensor Parallel 关键概念
 pass_threshold: 1.0  # 必须全对才解锁 patch
 description: |
   这 5 题打中 Tensor Parallel 最容易混淆的点。如果有任何一题答错，
@@ -8,21 +8,34 @@ description: |
   之后再答一遍。
 
 prereq_checklist:
-  - title: 读 patch/task.md（必读，10min）
-    kind: read
+  - title: 读系统地图：确认 L06 在并行训练主线中的位置
+    kind: doc
+    path: labs/l05_distributed_primitives/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从张量切分讲到 all-gather / all-reduce
+    kind: doc
+    path: labs/l05_distributed_primitives/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 MiniInfra 和 Megatron TP 路径阅读
+    kind: doc
+    path: labs/l05_distributed_primitives/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l05_distributed_primitives/patch/task.md
-  - title: 跑 notebook n03 · DDP collectives（30min）
-    kind: notebook
-    path: notebooks/n03_ddp_collectives.ipynb
-  - title: 跑 notebook n04 · Tensor Parallel Linear（30min）
-    kind: notebook
-    path: notebooks/n04_tensor_parallel_linear.ipynb
-  - title: 读 MiniInfra 同构 TP 骨架（15min）
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 MiniInfra TP 骨架
     kind: source
     path: mini_infra/megatron/core/tensor_parallel/layers.py
-  - title: 读 Megatron 真实 ColumnParallelLinear（25min）
+    estimate_min: 15
+  - title: 对照 Megatron Tensor Parallel layers
     kind: source
     path: github_repo/Megatron-LM/megatron/core/tensor_parallel/layers.py
+    estimate_min: 25
 
 questions:
   - id: q1_split_dim
@@ -140,7 +153,7 @@ questions:
       完整 weight，再按 TP=M 重新切分。SLiME / vLLM 接 Megatron ckpt 时也都需要
       做这一步。
 
-      课程主线把这件事推迟到 L05（Megatron 扩展）才正面打。
+      课程主线把这件事推迟到 L06（Megatron 扩展）才正面打。
 
   - id: q5_correct_implementation
     prompt: |

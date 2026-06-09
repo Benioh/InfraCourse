@@ -1,46 +1,604 @@
 id: l31_rollout_only_smoke
-title: Async Rollout Pool（带并发上限）
-level: L10.5
+title: L35 · Async Rollout Pool：并发上限、保序返回与 Rollout-only Smoke
+level: L35
 act: 第 4 章：RL 与对齐
 role: RL 系统学徒
 priority: 核心
-estimated_minutes: 60
+estimated_minutes: 80
 no_gpu_friendly: true
-
 frameworks:
   - asyncio
-  - vLLM async engine / SGLang (对照)
+  - vLLM / SGLang 对照
+  - SLiME 对照
 
 patch:
   description: |
     实现 RolloutPool：用 asyncio.Semaphore 限制 generate_fn 并发数；
-    asyncio.gather 保证输出顺序与输入一致；空列表与异常透传。
+    用 asyncio.gather 保证输出顺序与输入一致；空列表直接返回；异常向上传递。
   task_md: labs/l31_rollout_only_smoke/patch/task.md
   starter_file: labs/l31_rollout_only_smoke/patch/starter/rollout_pool.py
   reference_file: labs/l31_rollout_only_smoke/patch/reference/rollout_pool.py
-  test_command: make patch-test M=l31_rollout_only_smoke
+  test_command: IMPL=reference make patch-test M=l31_rollout_only_smoke
   status_file: labs/l31_rollout_only_smoke/patch/.last_run.json
   test_count: 5
   test_kind: 行为契约 + 并发约束
 
+lesson_docs:
+  - title: 系统地图
+    path: labs/l31_rollout_only_smoke/system_map.md
+    description: 本讲在 RL rollout 主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l31_rollout_only_smoke/lecture.md
+    description: 从 rollout 数据流、async 限流、服务端 batching 讲到 SLiME 对照和排查。
+  - title: 源码带读讲义
+    path: labs/l31_rollout_only_smoke/source_walkthrough.md
+    description: 按本地 smoke、patch、vLLM/SGLang 和 SLiME 主路径组织源码阅读。
+
 source_reading:
-  - title: SLiME RolloutController 源码
-    repo_path: github_repo/
-  - title: vLLM async engine
-    repo_path: github_repo/vllm/
+  - title: Rollout-only smoke
+    repo_path: labs/l31_rollout_only_smoke/scripts/run_rollout_only.py
+    focus: 本地 rollout schema、metrics 和 report 边界
+    highlights:
+      - title: mock response 输入
+        lines: [53, 58]
+        note: |
+          L53-L58: 构造本地 mock response，并记录开始时间和文本输出。
+      - title: mock response schema
+        lines: [59, 68]
+        note: |
+          L59-L68: 输出 id、prompt、response、latency、token 估计和 reward-ready 标志。
+      - title: JSONL 写入
+        lines: [71, 75]
+        note: |
+          L71-L75: 逐行写入 rollout artifact，方便后续抽样排查。
+      - title: run 目录
+        lines: [86, 93]
+        note: |
+          L86-L93: 准备 run 目录、命令快照和配置开头。
+      - title: 配置边界
+        lines: [94, 99]
+        note: |
+          L94-L99: 明确 request_count、max_new_tokens、actor_update 和 weight_sync。
+      - title: rollout metrics
+        lines: [110, 122]
+        note: |
+          L110-L122: 写入 rollout-only metrics，包括吞吐、TTFT、token 估计和边界字段。
+      - title: report 实验矩阵
+        lines: [130, 142]
+        note: |
+          L130-L142: 报告说明本地 smoke 的目标、调用链和迁移边界。
+      - title: report 指标和 ticket
+        lines: [144, 155]
+        note: |
+          L144-L155: 报告保存指标结果、debug ticket 和不能迁移的结论。
+
+  - title: MiniInfra rollout
+    repo_path: mini_infra/rl/rollout.py
+    focus: 最小 rollout 行结构和 metrics 写入
+    highlights:
+      - title: rollout 行结构
+        lines: [20, 32]
+        note: |
+          L20-L32: 为每条样本生成 response、target、latency 和 reward 字段。
+      - title: metrics 写入
+        lines: [39, 51]
+        note: |
+          L39-L51: run 入口解析参数、生成 rows，并写 reward_mean 与 rollout_count。
+      - title: artifacts 和报告
+        lines: [57, 61]
+        note: |
+          L57-L61: 保存 rollouts artifact 和 MiniInfra 报告。
+
+  - title: MiniInfra reward parser
+    repo_path: mini_infra/rl/reward.py
+    focus: 最终数字提取和规则 reward
+    highlights:
+      - title: 提取最终数字
+        lines: [12, 18]
+        note: |
+          L12-L18: 从 `####`、final answer 或最后一个数字中提取最终答案。
+      - title: reward 计算
+        lines: [21, 33]
+        note: |
+          L21-L33: prediction 和 target 都能提取数字时按数值相等给 reward。
+
+  - title: Patch starter
+    repo_path: labs/l31_rollout_only_smoke/patch/starter/rollout_pool.py
+    focus: 学生需要补齐的初始化和 rollout 方法
+    highlights:
+      - title: 初始化 TODO
+        lines: [19, 28]
+        note: |
+          L19-L28: 保存 `generate_fn` 和 `max_concurrency`。
+      - title: rollout TODO
+        lines: [30, 42]
+        note: |
+          L30-L42: 空输入、Semaphore、bounded coroutine 和 gather 是实现主路径。
+
+  - title: Patch reference
+    repo_path: labs/l31_rollout_only_smoke/patch/reference/rollout_pool.py
+    focus: Semaphore 限流和 gather 保序
+    highlights:
+      - title: 保存状态
+        lines: [9, 16]
+        note: |
+          L9-L16: reference 保存生成函数和并发上限。
+      - title: 限流与保序
+        lines: [18, 28]
+        note: |
+          L18-L28: 空列表直接返回，`async with sem` 限流，`gather` 按任务顺序返回。
+
+  - title: Patch tests
+    repo_path: labs/l31_rollout_only_smoke/patch/tests/test_patch.py
+    focus: 基本输出、保序、限流、空输入和异常透传
+    highlights:
+      - title: 基本输出
+        lines: [23, 31]
+        note: |
+          L23-L31: `generate_fn` 的返回值必须按输入顺序进入输出列表。
+      - title: 保序测试
+        lines: [34, 46]
+        note: |
+          L34-L46: 不同 sleep 时间制造完成顺序差异，输出仍要保序。
+      - title: 并发计数
+        lines: [49, 59]
+        note: |
+          L49-L59: lock 和 counter 记录同时运行的 coroutine 数。
+      - title: 并发断言
+        lines: [60, 66]
+        note: |
+          L60-L66: 完成后断言最大并发不超过上限。
+      - title: 空输入
+        lines: [69, 77]
+        note: |
+          L69-L77: 空 prompt 列表必须返回空列表。
+      - title: 异常透传
+        lines: [80, 90]
+        note: |
+          L80-L90: `"bad"` prompt 触发异常，`rollout` 要继续向外抛。
+
+  - title: vLLM AsyncLLM
+    repo_path: github_repo/vllm/vllm/v1/engine/async_llm.py
+    focus: async request 进入引擎并从 queue 返回
+    highlights:
+      - title: add_request 签名
+        lines: [280, 292]
+        note: |
+          L280-L292: `add_request` 接收 request id、prompt、sampling params 和调度参数。
+      - title: engine 错误
+        lines: [299, 305]
+        note: |
+          L299-L305: engine 出错时直接失败。
+      - title: 请求冲突校验
+        lines: [306, 313]
+        note: |
+          L306-L313: fast prefill 与 prompt logprob 的冲突会提前报错。
+      - title: output collector
+        lines: [367, 379]
+        note: |
+          L367-L379: 启动 output handler，创建 request output collector，并把请求加入引擎。
+      - title: generate 入口
+        lines: [521, 531]
+        note: |
+          L521-L531: `generate` 是返回 AsyncGenerator 的请求入口。
+      - title: generate 文档
+        lines: [538, 550]
+        note: |
+          L538-L550: docstring 说明请求进入引擎和输出返回调用者的路径。
+      - title: 调用 add_request
+        lines: [553, 565]
+        note: |
+          L553-L565: `generate` 内部先调用 `add_request`。
+      - title: 从 queue yield
+        lines: [568, 580]
+        note: |
+          L568-L580: 从 per-request queue 读取输出，并按 finished 状态 yield。
+      - title: 取消处理
+        lines: [583, 591]
+        note: |
+          L583-L591: 客户端断开或 generator 被取消时 abort request。
+      - title: 错误传播
+        lines: [599, 611]
+        note: |
+          L599-L611: ValueError 和 input stream error 会向上传播。
+
+  - title: vLLM OutputProcessor
+    repo_path: github_repo/vllm/vllm/v1/engine/output_processor.py
+    focus: RequestOutput 进入对应 queue
+    highlights:
+      - title: 构造 RequestOutput
+        lines: [643, 651]
+        note: |
+          L643-L651: 根据 token、finish reason 和 KV transfer 信息生成 request output。
+      - title: 输出回到 queue
+        lines: [655, 660]
+        note: |
+          L655-L660: AsyncLLM 路径把输出放进对应 request queue。
+
+  - title: SGLang scheduler
+    repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+    focus: waiting queue、running batch 和 scheduler loop
+    highlights:
+      - title: running 状态
+        lines: [993, 999]
+        note: |
+          L993-L999: 初始化 waiting queue、running batch、cur batch 和 last batch。
+      - title: normal loop 接收请求
+        lines: [1468, 1475]
+        note: |
+          L1468-L1475: normal event loop 接收请求、处理输入，并检查 engine pause。
+      - title: normal loop 运行 batch
+        lines: [1479, 1486]
+        note: |
+          L1479-L1486: 取下一批 batch，运行并处理结果。
+      - title: last batch 状态
+        lines: [1491, 1495]
+        note: |
+          L1491-L1495: 更新 last batch，并可选执行严格内存检查。
+      - title: overlap loop 取 batch
+        lines: [1508, 1518]
+        note: |
+          L1508-L1518: overlap loop 接收请求并选择下一批 batch。
+      - title: overlap loop 运行 batch
+        lines: [1520, 1528]
+        note: |
+          L1520-L1528: 判断是否处理上一批结果，然后运行当前 batch。
+
+  - title: SLiME async train
+    repo_path: github_repo/slime/train_async.py
+    focus: rollout manager、actor/critic train 和 weight sync
+    highlights:
+      - title: 创建 rollout manager
+        lines: [17, 29]
+        note: |
+          L17-L29: 创建 rollout manager、actor/critic，并先推送 actor 权重。
+      - title: 提前启动 rollout
+        lines: [34, 43]
+        note: |
+          L34-L43: 当前 rollout 取回后，下一轮 generation 提前启动。
+      - title: actor / critic train
+        lines: [45, 53]
+        note: |
+          L45-L53: actor 和 critic 根据配置训练当前 rollout 数据。
+      - title: weight sync
+        lines: [69, 79]
+        note: |
+          L69-L79: 更新权重前等待 generation，同步后继续 eval 和清理。
+
+  - title: SLiME SGLang rollout
+    repo_path: github_repo/slime/slime/rollout/sglang_rollout.py
+    focus: semaphore、task、gather、reward 和样本排序
+    highlights:
+      - title: semaphore
+        lines: [94, 96]
+        note: |
+          L94-L96: 并发上限来自 server concurrency 和 rollout GPU 数。
+      - title: 创建 generation task
+        lines: [136, 143]
+        note: |
+          L136-L143: 每组样本创建 generation task。
+      - title: pending 计数
+        lines: [144, 149]
+        note: |
+          L144-L149: task 加入 pending 集合，并更新剩余 batch 计数。
+      - title: generate_and_rm 入口
+        lines: [239, 245]
+        note: |
+          L239-L245: `generate_and_rm` 处理单样本或样本组的生成和 reward。
+      - title: semaphore 内生成
+        lines: [257, 263]
+        note: |
+          L257-L263: 进入全局 state，并在 semaphore 内检查 abort。
+      - title: 调用 generate
+        lines: [265, 277]
+        note: |
+          L265-L277: 选择 custom generate 或默认 SGLang generate。
+      - title: group gather
+        lines: [323, 333]
+        note: |
+          L323-L333: 同组样本创建 task，并用 gather 收集结果。
+      - title: rollout async 提交
+        lines: [420, 429]
+        note: |
+          L420-L429: 持续提交 generation task，并等待先完成的 pending。
+      - title: rollout async 过滤
+        lines: [430, 442]
+        note: |
+          L430-L442: 读取完成 task，记录首个样本，并收集所有输出。
+      - title: rollout async 接受样本
+        lines: [443, 452]
+        note: |
+          L443-L452: dynamic filter 决定样本是否进入训练数据。
+      - title: 排序和 reset
+        lines: [460, 470]
+        note: |
+          L460-L470: abort 未完成请求，按样本 index 排序，并重置全局状态。
+
+  - title: SLiME HTTP utilities
+    repo_path: github_repo/slime/slime/utils/http_utils.py
+    focus: HTTP 连接上限和 distributed POST
+    highlights:
+      - title: HTTP client limit
+        lines: [201, 213]
+        note: |
+          L201-L213: 根据 rollout concurrency 创建 AsyncClient 连接上限。
+      - title: distributed actor
+        lines: [239, 251]
+        note: |
+          L239-L251: distributed POST actor 内部也使用 AsyncClient。
+      - title: actor concurrency
+        lines: [255, 266]
+        note: |
+          L255-L266: 把总连接并发分配给多个 actor。
+      - title: post 调度
+        lines: [275, 286]
+        note: |
+          L275-L286: 分布式 POST 路径选择 actor，并直接 await ObjectRef。
+      - title: fallback post
+        lines: [287, 293]
+        note: |
+          L287-L293: 非分布式路径使用本地 AsyncClient。
 
 mini_infra_targets:
   - mini_infra/rl/
-
 notebooks: []
-
 tickets:
   - slime_rollout_bottleneck_001
   - slime_reward_collapse_002
-
 prereq: l29_verl_rl_baseline
 next_lab: l32_slime_rl_core
-
 gpu_modes:
   local: CPU OK
-  cluster: 真 vLLM async endpoint 验证（可选）
+  cluster: 真 vLLM/SGLang async endpoint 验证（可选）
+
+lesson:
+  opening: |
+    L35 讲 RL rollout 的请求侧控制。训练侧需要 prompt、response、latency、reward-ready 字段和样本顺序；客户端需要并发提交请求，又不能把 vLLM/SGLang server 压垮。本讲用一个 CPU-safe 的 `RolloutPool` patch 讲清 `asyncio.Semaphore`、`asyncio.gather`、保序返回和异常透传，再用 rollout-only smoke 建立 artifacts 与 metrics 证据链。
+  sections:
+    - title: Rollout 的系统位置
+      plain_explanation: |
+        rollout 是 RL 训练的数据生产阶段。它从 prompt 开始，调用当前 policy 生成 response，再把样本交给 reward、logprob、KL 和 advantage 计算。L35 不做完整 PPO/GRPO，只处理 rollout 请求如何安全并发提交，以及输出如何保持样本对齐。
+
+        本地 smoke 会写 `rollouts.jsonl`、`metrics.jsonl`、`rl.log` 和 `report.md`。这些 artifact 能证明 schema 和指标字段闭合，不能证明真实训练已经稳定。
+      mental_model: |
+        把 rollout 看成样本生产线：prompt 进入，response 出来，latency 和 reward-ready 字段让这批样本日后能被检查。
+      why_it_matters: |
+        如果 prompt/response 顺序错位，reward、KL 和 advantage 会绑定到错误样本。这个问题比请求失败更隐蔽，必须从客户端保序开始防住。
+      source_refs:
+        - title: mock response schema
+          repo_path: labs/l31_rollout_only_smoke/scripts/run_rollout_only.py
+          lines: [59, 68]
+          note: |
+            L59-L68: rollout 样本保存 id、prompt、response、latency 和 reward-ready 字段。
+        - title: smoke metrics
+          repo_path: labs/l31_rollout_only_smoke/scripts/run_rollout_only.py
+          lines: [110, 122]
+          note: |
+            L110-L122: metrics 明确 mock_server、actor_update 和 weight_sync 边界。
+      common_confusions:
+        - 只看吞吐数字，不保存 rollout 样本。
+        - 把 rollout-only smoke 当成完整 RL 训练。
+        - 忽略 prompt/response 对齐。
+      checkpoint_questions:
+        - 一条 rollout 样本至少需要哪些字段？
+        - 本地 smoke 能证明什么，不能证明什么？
+        - 样本错位会污染哪些后续计算？
+
+    - title: Async、限流和保序
+      plain_explanation: |
+        客户端并发提交 prompt，让服务端推理引擎有足够请求可调度。`max_concurrency` 限制的是客户端在途请求数，不等于服务端 GPU batch size。服务端 vLLM/SGLang 会根据 queue、KV cache、decode slot 和 finished 状态组织真实 batch。
+
+        `asyncio.Semaphore` 控制同时进入 `generate_fn` 的协程数；`asyncio.gather` 按传入任务顺序返回结果。因此即使较短请求先完成，输出列表仍和输入 prompt 对齐。
+      mental_model: |
+        Semaphore 是入口闸门，gather 是结果归位器。一个管压力，一个管顺序。
+      why_it_matters: |
+        串行请求会让服务端缺少 batch；无上限并发会让 queue、连接池或 KV cache 先出问题。限流和保序是 rollout 客户端最基础的两个合同。
+      source_refs:
+        - title: reference 限流
+          repo_path: labs/l31_rollout_only_smoke/patch/reference/rollout_pool.py
+          lines: [18, 28]
+          note: |
+            L18-L28: 参考实现用 semaphore 包住 `generate_fn`，再用 gather 返回结果。
+        - title: vLLM generate 返回
+          repo_path: github_repo/vllm/vllm/v1/engine/async_llm.py
+          lines: [568, 580]
+          note: |
+            L568-L580: vLLM 从 per-request queue 读取输出并 yield 给调用者。
+      common_confusions:
+        - 把 `max_concurrency` 当作训练 batch size。
+        - 用完成顺序直接构造训练数据。
+        - 在 semaphore 外调用 `generate_fn`。
+      checkpoint_questions:
+        - "`Semaphore` 和 `gather` 分别保证什么？"
+        - 为什么客户端不手动固定 GPU batch？
+        - 如果 `generate_fn` 在 semaphore 外调用，会发生什么？
+
+    - title: Patch 实现路径
+      plain_explanation: |
+        `__init__` 保存生成函数和并发上限。`rollout` 先处理空输入，然后创建 semaphore 和内部 `_bounded` coroutine。`_bounded` 在 `async with sem` 内调用 `await self.generate_fn(prompt)`。最后用 `asyncio.gather(*tasks)` 收集结果。
+
+        异常应向上传递。L35 不在 pool 内重试、吞异常或写占位 response。上层 driver 可以根据 endpoint、错误类型和 run 策略决定重试或中止。
+      mental_model: |
+        这是一个很小的状态机：保存配置，给每次 rollout 创建闸门，提交任务，按输入顺序收结果。
+      why_it_matters: |
+        真实 SLiME/vLLM/SGLang 路径会复杂很多，但客户端合同仍是限流、保序和错误可见。小 patch 把这个合同固定下来。
+      source_refs:
+        - title: starter 初始化
+          repo_path: labs/l31_rollout_only_smoke/patch/starter/rollout_pool.py
+          lines: [19, 28]
+          note: |
+            L19-L28: 学生需要保存 `generate_fn` 和 `max_concurrency`。
+        - title: starter rollout
+          repo_path: labs/l31_rollout_only_smoke/patch/starter/rollout_pool.py
+          lines: [30, 42]
+          note: |
+            L30-L42: TODO 已列出空输入、semaphore、bounded coroutine 和 gather。
+        - title: reference 状态
+          repo_path: labs/l31_rollout_only_smoke/patch/reference/rollout_pool.py
+          lines: [9, 16]
+          note: |
+            L9-L16: reference 只保存生成函数和并发上限。
+      common_confusions:
+        - 认为 `asyncio.create_task` 是必须项；本关 coroutine 列表交给 gather 也能运行。
+        - 返回 `as_completed` 的完成顺序结果。
+        - 捕获异常后返回空字符串。
+      checkpoint_questions:
+        - 空输入为什么要直接返回？
+        - "`generate_fn` 抛错时为什么不应该吞掉？"
+        - 参考实现里哪个位置真正限制了并发？
+
+    - title: 测试闭环
+      plain_explanation: |
+        五个测试覆盖基本输出、保序、并发上限、空输入和异常透传。保序测试用不同 sleep 时间制造完成顺序差异；限流测试用 lock 和 counter 记录最大同时运行数量；异常测试要求 `"bad"` prompt 抛出的 `ValueError` 继续被调用者看到。
+
+        这些测试只证明客户端合同。它们不验证真实 HTTP endpoint、server queue、KV cache、reward model 或 weight sync。
+      mental_model: |
+        单元测试给 async pool 放上五把尺子：内容、顺序、压力、边界输入和错误信号。
+      why_it_matters: |
+        async bug 很容易在少量样本里隐藏。先用测试锁住并发和顺序，后续接真实 endpoint 时才能把问题定位到 server、网络或 reward。
+      source_refs:
+        - title: 保序测试
+          repo_path: labs/l31_rollout_only_smoke/patch/tests/test_patch.py
+          lines: [34, 46]
+          note: |
+            L34-L46: 不同延迟下结果仍要按输入顺序返回。
+        - title: 限流计数
+          repo_path: labs/l31_rollout_only_smoke/patch/tests/test_patch.py
+          lines: [49, 59]
+          note: |
+            L49-L59: counter 记录同时运行数量。
+        - title: 限流断言
+          repo_path: labs/l31_rollout_only_smoke/patch/tests/test_patch.py
+          lines: [60, 66]
+          note: |
+            L60-L66: 断言最大并发不超过上限。
+        - title: 异常测试
+          repo_path: labs/l31_rollout_only_smoke/patch/tests/test_patch.py
+          lines: [80, 90]
+          note: |
+            L80-L90: `"bad"` prompt 触发异常，调用者必须看到。
+      common_confusions:
+        - 认为能返回结果就说明并发正确。
+        - 认为保序测试不影响训练。
+        - 认为异常应在 pool 内消化。
+      checkpoint_questions:
+        - 为什么保序测试要设置不同 sleep 时间？
+        - 限流测试为什么需要 lock？
+        - patch-test 没覆盖哪些真实服务分支？
+
+    - title: vLLM / SGLang 服务端对照
+      plain_explanation: |
+        vLLM 的 `generate` 会调用 `add_request`，为请求创建 output collector，再从 request queue 中 yield 输出。output processor 会把 engine core 的结果放回对应 request queue。
+
+        SGLang scheduler 维护 waiting queue、running batch、cur batch 和 last batch。normal loop 接收请求、处理输入、取下一批 batch、运行 batch 并处理结果。overlap loop 进一步拆分 CPU 处理和 GPU 计算。
+      mental_model: |
+        客户端负责把请求送到门口并限流；服务端 scheduler 负责把这些请求组织成真正的推理批次。
+      why_it_matters: |
+        调 `max_concurrency` 时不能只看客户端。TTFT、queue、KV cache、running batch 和 stop token 都在服务端决定最终吞吐与延迟。
+      source_refs:
+        - title: vLLM add_request
+          repo_path: github_repo/vllm/vllm/v1/engine/async_llm.py
+          lines: [280, 292]
+          note: |
+            L280-L292: `add_request` 接收请求 id、prompt 和 sampling params。
+        - title: vLLM output queue
+          repo_path: github_repo/vllm/vllm/v1/engine/output_processor.py
+          lines: [655, 660]
+          note: |
+            L655-L660: AsyncLLM 路径把输出放进 request queue。
+        - title: SGLang running 状态
+          repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+          lines: [993, 999]
+          note: |
+            L993-L999: scheduler 保存 waiting queue、running batch 和当前 batch。
+        - title: SGLang normal loop 接收
+          repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+          lines: [1468, 1475]
+          note: |
+            L1468-L1475: loop 接收请求并处理输入。
+        - title: SGLang normal loop 运行
+          repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler.py
+          lines: [1479, 1486]
+          note: |
+            L1479-L1486: 取 batch、运行 batch 并处理结果。
+      common_confusions:
+        - 认为 async pool 已经完成 continuous batching。
+        - 只调客户端并发，不看 server queue。
+        - 把 TTFT 变大误判成 reward 计算慢。
+      checkpoint_questions:
+        - vLLM 的 request output 如何回到对应请求？
+        - SGLang waiting queue 和 running batch 各代表什么？
+        - "`max_concurrency` 升高时应该同时看哪些服务端指标？"
+
+    - title: SLiME 对照
+      plain_explanation: |
+        SLiME 的 async train loop 会提前启动下一轮 rollout，在当前 rollout 数据上训练 actor/critic，并按 interval 更新 rollout 侧权重。更新前先等待正在生成的任务结束，避免 generation 中途切换 policy。
+
+        SGLang rollout 代码里，`GenerateState` 创建 semaphore；`generate_and_rm` 在 semaphore 内生成并调用 reward；`generate_and_rm_group` 用 task 和 gather 处理同组样本；`generate_rollout_async` 持续提交任务、等待先完成的 task、过滤样本，最后按样本 index 排序。
+      mental_model: |
+        L35 是单进程 toy driver；SLiME 是生产版 rollout driver。它多了 Ray、HTTP、reward、过滤、abort 和 weight sync，但限流、保序和样本身份仍是主线。
+      why_it_matters: |
+        读 SLiME 时先找 familiar pieces，可以避免被框架层淹没：semaphore 控并发，gather 收组内样本，index 排序保训练数据身份。
+      source_refs:
+        - title: SLiME async train
+          repo_path: github_repo/slime/train_async.py
+          lines: [34, 43]
+          note: |
+            L34-L43: 当前 rollout 取回后，下一轮 generation 提前启动。
+        - title: SLiME semaphore
+          repo_path: github_repo/slime/slime/rollout/sglang_rollout.py
+          lines: [94, 96]
+          note: |
+            L94-L96: semaphore 上限来自 server concurrency 和 rollout GPU 数。
+        - title: SLiME group gather
+          repo_path: github_repo/slime/slime/rollout/sglang_rollout.py
+          lines: [323, 333]
+          note: |
+            L323-L333: 同组样本创建 task，并用 gather 收集结果。
+        - title: SLiME sort
+          repo_path: github_repo/slime/slime/rollout/sglang_rollout.py
+          lines: [460, 470]
+          note: |
+            L460-L470: abort 未完成请求，按样本 index 排序，并重置状态。
+      common_confusions:
+        - 把 Ray remote 和 Python coroutine 混成同一层。
+        - 看到 FIRST_COMPLETED 就认为最终顺序无关。
+        - 认为 weight sync 可以在 generation 中途随时发生。
+      checkpoint_questions:
+        - SLiME 为什么提前启动下一轮 rollout？
+        - SLiME 在哪里限制 SGLang 请求并发？
+        - 为什么最终还要按样本 index 排序？
+
+    - title: 排障路线
+      plain_explanation: |
+        rollout 慢先拆阶段：客户端连接和并发、服务端 queue、生成长度、reward 后处理、weight sync、artifact 写入。reward collapse 先抽样本，看 response 是否有最终答案、reward-ready 字段是否为 true、parser 是否能解析，再看 KL、entropy 和 policy version。
+
+        接真实 endpoint 后，一次实验只改一个变量。比如固定 prompt 集，只改 `max_concurrency`；或者固定并发，只改 `max_new_tokens`。失败 run 要保留可复现证据，不要伪造 metrics，也不要把异常改成空 response。
+      mental_model: |
+        先看链路，再看数字。链路断了，吞吐和 reward 曲线都没有解释价值。
+      why_it_matters: |
+        rollout 慢和 reward 崩溃会拖累整个 RL 训练。把客户端、服务端、reward、sync 和 artifact 分层后，修复动作才会可验证。
+      source_refs:
+        - title: HTTP client limit
+          repo_path: github_repo/slime/slime/utils/http_utils.py
+          lines: [201, 213]
+          note: |
+            L201-L213: HTTP client 连接上限来自 rollout concurrency。
+        - title: distributed post
+          repo_path: github_repo/slime/slime/utils/http_utils.py
+          lines: [255, 266]
+          note: |
+            L255-L266: distributed POST 把连接并发分配给多个 actor。
+        - title: direct ObjectRef await
+          repo_path: github_repo/slime/slime/utils/http_utils.py
+          lines: [275, 286]
+          note: |
+            L275-L286: 分布式 POST 直接 await ObjectRef，避免轮询尾延迟。
+      common_confusions:
+        - rollout 慢时只加 GPU。
+        - reward 全 0 时先调 learning rate。
+        - 为了让训练继续而吞掉 rollout 异常。
+      checkpoint_questions:
+        - 定位 rollout 慢时，应该先拆哪几个阶段？
+        - reward collapse 时为什么先抽样本？
+        - 接真实 endpoint 后，为什么一次实验只改一个变量？

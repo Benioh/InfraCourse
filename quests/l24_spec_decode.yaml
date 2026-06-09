@@ -1,48 +1,640 @@
 id: l24_spec_decode
-title: Speculative Decoding · Greedy Verify
-level: L08.7
+title: L25 · Speculative Decoding Greedy Verify
+level: L25
 act: 第 3 章：推理服务
-role: 推理加速学徒
+role: Spec Decode 调试学员
 priority: 核心
-estimated_minutes: 60
+estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
-  - PyTorch
-  - vLLM / SGLang spec decode (对照)
-
+- PyTorch
+- MiniInfra
+- vLLM
+- SGLang
 patch:
   description: |
-    实现 greedy spec decode 的 verify 步骤：target 一次 forward 算出每个位置的
-    argmax，与 draft 比对；首个 mismatch 之后用 target argmax 当 bonus token。
+    实现 greedy spec decode 的 verify 步骤：target 一次 forward 计算 k+1 个位置的 argmax，
+    与 draft token 从左到右比对；首个 mismatch 用 target argmax 接管，全接受时追加 bonus token。
   task_md: labs/l24_spec_decode/patch/task.md
   starter_file: labs/l24_spec_decode/patch/starter/spec_decode.py
   reference_file: labs/l24_spec_decode/patch/reference/spec_decode.py
   test_command: make patch-test M=l24_spec_decode
   status_file: labs/l24_spec_decode/patch/.last_run.json
   test_count: 5
-  test_kind: 行为契约（边界情况完备）
-
+  test_kind: Greedy verify 行为合同验证
 source_reading:
-  - title: vLLM speculative decoding
-    repo_path: github_repo/vllm/
-  - title: Medusa / EAGLE paper
-    repo_path: docs/术语表.md
-
+- title: Patch starter
+  repo_path: labs/l24_spec_decode/patch/starter/spec_decode.py
+  focus: 学生需要补齐的 greedy verify 合同
+  highlights:
+  - title: 函数签名和返回语义
+    lines:
+    - 20
+    - 29
+    note: |
+      L20-L23: `greedy_verify` 接收 draft token 列表和 target logits。
+      L24-L29: docstring 说明返回列表长度和 accepted draft 数的范围。
+  - title: target argmax
+    lines:
+    - 30
+    - 32
+    note: |
+      L30-L32: `k` 来自 draft 长度，`target_argmax` 长度应为 `k+1`。
+  - title: TODO 合同
+    lines:
+    - 34
+    - 45
+    note: |
+      L34-L41: TODO 要求逐位比较，mismatch 立刻返回 target argmax。
+      L42-L45: 全接受时追加 `target_argmax[k]`，未实现时显式失败。
+- title: Patch reference
+  repo_path: labs/l24_spec_decode/patch/reference/spec_decode.py
+  focus: 连续前缀接受、mismatch 接管和全接受 bonus
+  highlights:
+  - title: setup
+    lines:
+    - 10
+    - 16
+    note: |
+      L10-L15: reference 与 starter 使用同一签名，并一次性取出 target argmax。
+      L16: `accepted` 只保存连续通过 target 检查的 draft token。
+  - title: loop and bonus
+    lines:
+    - 17
+    - 23
+    note: |
+      L17-L21: 循环遇到第一处 mismatch 时返回 target argmax 和已接受数量。
+      L22-L23: 全接受时追加第 k 行 argmax，并返回 accepted draft 数 k。
+- title: Patch tests
+  repo_path: labs/l24_spec_decode/patch/tests/test_patch.py
+  focus: 全接受、中间 mismatch、k=0、首错和返回类型
+  highlights:
+  - title: 实现选择和人工 logits
+    lines:
+    - 17
+    - 28
+    note: |
+      L17-L19: `IMPL` 让同一套测试可跑 starter 或 reference。
+      L22-L28: `_make_logits` 固定每行 argmax，便于手算行为。
+  - title: 全接受
+    lines:
+    - 31
+    - 37
+    note: |
+      L31-L37: k=4 全接受时返回 5 个 token，accepted draft 数为 4。
+  - title: 中间 mismatch
+    lines:
+    - 40
+    - 47
+    note: |
+      L40-L47: 位置 2 mismatch 时返回 `[3, 7, 99]`，accepted draft 数为 2。
+  - title: k=0
+    lines:
+    - 50
+    - 55
+    note: |
+      L50-L55: k=0 时仍返回 target 的一个 bonus token。
+  - title: 首错
+    lines:
+    - 58
+    - 64
+    note: |
+      L58-L64: 首个 draft mismatch 时只返回 target 位置 0 的 argmax。
+  - title: 返回类型
+    lines:
+    - 67
+    - 74
+    note: |
+      L67-L74: 返回值必须是 Python `list[int]` 和 `int`，不能泄漏 tensor。
+- title: MiniInfra draft runner
+  repo_path: mini_infra/vllm/spec_decode/draft_runner.py
+  focus: 候选生成、连续接受、KV rollback 计数和 summary 指标
+  highlights:
+  - title: verify candidates
+    lines:
+    - 29
+    - 40
+    note: |
+      L29-L34: 函数说明 target 一次验证 K 个候选，并只接受连续前缀。
+      L35-L40: 第一处不一致后停止，返回 accepted count。
+  - title: draft step 输入
+    lines:
+    - 43
+    - 50
+    note: |
+      L43-L50: n-gram 或模拟 draft mode 生成候选。
+  - title: draft step 输出
+    lines:
+    - 51
+    - 57
+    note: |
+      L51-L57: 返回 proposed、accepted、rollback token 数和候选列表。
+  - title: summary setup
+    lines:
+    - 60
+    - 72
+    note: |
+      L60-L69: summary 固定 prompt、future 和 domain，构造 acceptance tracker。
+      L70-L72: 一轮 draft_step 的 accepted/proposed 进入窗口统计。
+  - title: summary metrics
+    lines:
+    - 73
+    - 84
+    note: |
+      L73-L84: 输出 speedup、TTFT、ITL p50/p99、draft latency 和 draft memory。
+  - title: summary domain
+    lines:
+    - 85
+    - 86
+    note: |
+      L85-L86: domain 写入结果，便于区分 in-domain 与 out-of-domain。
+- title: MiniInfra acceptance tracker
+  repo_path: mini_infra/vllm/spec_decode/acceptance_tracker.py
+  focus: accepted/proposed 窗口统计和教学版 speedup 估算
+  highlights:
+  - title: tracker state
+    lines:
+    - 22
+    - 30
+    note: |
+      L22-L27: tracker 用滑动窗口存储 spec decode 事件。
+      L28-L30: 每个事件是 accepted/proposed 二元组。
+  - title: rate and speedup
+    lines:
+    - 32
+    - 42
+    note: |
+      L32-L38: `rate()` 汇总窗口中的 accepted 和 proposed。
+      L40-L42: `expected_speedup()` 用 draft cost ratio 得到近似收益。
+  - title: summary
+    lines:
+    - 45
+    - 56
+    note: |
+      L45-L50: summary 用示例 accepted 序列填充 tracker。
+      L51-L56: 输出 window、acceptance_rate、speedup 和 proposed_per_step。
+- title: MiniInfra ngram proposer
+  repo_path: mini_infra/vllm/spec_decode/ngram.py
+  focus: prompt lookup 候选器和零 draft GPU memory 边界
+  highlights:
+  - title: ngram input
+    lines:
+    - 18
+    - 27
+    note: |
+      L18-L24: `ngram_candidates` 从 prompt 和 suffix 中寻找候选。
+      L25-L27: suffix 为空时返回空列表，避免伪造候选。
+  - title: prompt lookup
+    lines:
+    - 28
+    - 32
+    note: |
+      L28-L32: 找到 suffix 后返回其后最多 `max_tokens` 个 token。
+  - title: summary
+    lines:
+    - 35
+    - 46
+    note: |
+      L35-L40: summary 构造 prompt、tokens、suffix 和 candidates。
+      L41-L46: 输出 mode、acceptance 估计和 `draft_gpu_mem_gb=0.0`。
+- title: vLLM SpeculativeConfig
+  repo_path: github_repo/vllm/vllm/config/speculative.py
+  focus: method、K、draft model、prompt lookup 和 parallel drafting 配置
+  highlights:
+  - title: core fields
+    lines:
+    - 73
+    - 85
+    note: |
+      L73-L85: 配置保存 `num_speculative_tokens`、draft model 名称和 speculative method。
+  - title: ngram and draft TP
+    lines:
+    - 91
+    - 95
+    note: |
+      L91-L95: n-gram 需要 prompt lookup 参数，draft TP 只能取受支持的并行度。
+  - title: draft quant
+    lines:
+    - 100
+    - 104
+    note: |
+      L100-L104: draft model 可声明自己的 quantization。
+  - title: draft backend
+    lines:
+    - 105
+    - 113
+    note: |
+      L105-L113: draft model 的 MoE 和 attention backend 可与 target 分开配置。
+  - title: advanced controls
+    lines:
+    - 126
+    - 136
+    note: |
+      L126-L131: EAGLE 等路径可能受 padded drafter batch 控制影响。
+      L132-L136: greedy draft selection 可使用 local argmax reduction 降低通信。
+  - title: prompt lookup
+    lines:
+    - 138
+    - 144
+    note: |
+      L138-L144: prompt lookup 配置控制 n-gram window。
+  - title: alternative drafting
+    lines:
+    - 146
+    - 154
+    note: |
+      L146-L154: tree 和 parallel drafting 改变候选结构与训练要求。
+- title: vLLM spec decode metrics
+  repo_path: github_repo/vllm/vllm/v1/spec_decode/metrics.py
+  focus: acceptance rate、mean acceptance length 和 Prometheus counter
+  highlights:
+  - title: stats fields
+    lines:
+    - 18
+    - 30
+    note: |
+      L18-L24: stats 聚合每个 scheduler step 的 spec decoding 数据。
+      L26-L30: 字段保存 drafts、draft tokens、accepted tokens 和 per-position 计数。
+  - title: stats init
+    lines:
+    - 32
+    - 37
+    note: |
+      L32-L37: `new()` 初始化 per-position accepted 数组。
+  - title: observe draft
+    lines:
+    - 39
+    - 45
+    note: |
+      L39-L45: `observe_draft()` 累加 draft token 和 accepted token，并更新位置计数。
+  - title: throughput
+    lines:
+    - 74
+    - 86
+    note: |
+      L74-L79: log 聚合 drafts、draft tokens 和 accepted tokens。
+      L83-L86: elapsed time 用于计算 drafted 与 accepted throughput。
+  - title: acceptance formulas
+    lines:
+    - 88
+    - 99
+    note: |
+      L88-L92: draft acceptance rate 等于 accepted tokens / draft tokens。
+      L94-L99: mean acceptance length 包含 bonus，per-position acceptance 按位置聚合。
+  - title: Prometheus formulas
+    lines:
+    - 121
+    - 133
+    note: |
+      L121-L133: 注释给出 acceptance rate 和 mean acceptance length 的 PromQL 公式。
+  - title: Prometheus per-position
+    lines:
+    - 134
+    - 140
+    note: |
+      L134-L140: 注释给出 per-position acceptance rate 的 PromQL 公式。
+  - title: Prometheus observe counters
+    lines:
+    - 200
+    - 211
+    note: |
+      L200-L211: observe 把 drafts、draft tokens 和 accepted tokens 写入 counter。
+  - title: Prometheus observe positions
+    lines:
+    - 212
+    - 215
+    note: |
+      L212-L215: per-position accepted counter 逐个位置递增。
+- title: SGLang scheduler output processor
+  repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler_output_processor_mixin.py
+  focus: accept_lens、accepted draft count 和 KV committed length
+  highlights:
+  - title: accept lens
+    lines:
+    - 351
+    - 361
+    note: |
+      L351-L357: 函数处理 speculative decoding with overlap 的 padding next token ids。
+      L358-L361: `accept_lens` 包含 bonus，因此 accepted draft 数要减请求数。
+  - title: committed length
+    lines:
+    - 363
+    - 372
+    note: |
+      L363-L368: stride 来自 draft token 数，KV committed length 增加 `accept_lens[i]-1`。
+      L369-L372: predict tokens 按 accept length 从 next token buffer 中切出。
+  - title: histogram
+    lines:
+    - 374
+    - 378
+    note: |
+      L374-L378: accepted draft 数进入 request 级累计值和 histogram。
+- title: SGLang request spec state
+  repo_path: github_repo/sglang/python/sglang/srt/managers/schedule_batch.py
+  focus: request 级 spec 计数、overallocated KV 和 acceptance histogram
+  highlights:
+  - title: request counters
+    lines:
+    - 842
+    - 851
+    note: |
+      L842-L846: request 记录 verify 次数和 accepted draft token 总数。
+      L848-L851: histogram 以 accepted token 数为索引，记录每类轮次数量。
+  - title: overallocated KV
+    lines:
+    - 937
+    - 947
+    note: |
+      L937-L943: speculative decoding 可能分配超过 committed length 的 KV。
+      L944-L947: 释放时返回 committed length 和 allocated length 的范围。
+  - title: histogram update
+    lines:
+    - 949
+    - 959
+    note: |
+      L949-L954: update 函数接收本轮 accepted draft token 数。
+      L955-L959: histogram 不够长时扩展，然后给对应桶加 1。
+- title: Bench concurrency script
+  repo_path: labs/l24_spec_decode/scripts/bench_concurrency.py
+  focus: 按 batch 输出 n-gram 和 draft 两种 spec decode 指标行
+  highlights:
+  - title: rows
+    lines:
+    - 12
+    - 20
+    note: |
+      L12-L15: CLI 接收 servers 和 batches。
+      L16-L20: 每个 batch 输出 n-gram 与 draft 两行 summary。
+lesson_docs:
+- title: 系统地图
+  path: labs/l24_spec_decode/system_map.md
+  description: L25 在 Serving decode 加速路径中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l24_spec_decode/lecture.md
+  description: 从 decode step 成本、greedy verify 合同、acceptance 账本讲到生产排查。
+- title: 源码带读讲义
+  path: labs/l24_spec_decode/source_walkthrough.md
+  description: 按 patch、MiniInfra、vLLM metrics 和 SGLang KV 主路径组织的源码阅读路线。
 mini_infra_targets:
-  - mini_infra/serving/
-
+- mini_infra/vllm/spec_decode/draft_runner.py
+- mini_infra/vllm/spec_decode/acceptance_tracker.py
+- mini_infra/vllm/spec_decode/ngram.py
 notebooks:
-  - notebooks/n18_spec_decode_acceptance.ipynb
-
+- notebooks/n18_spec_decode_acceptance.ipynb
 tickets:
-  - spec_low_acceptance_001
-  - spec_draft_oom_002
-  - spec_unstable_p99_003
-
+- spec_low_acceptance_001
+- spec_draft_oom_002
+- spec_unstable_p99_003
 prereq: l23_quant_serving
-next_lab: l26_sglang_pd_observability
-
+next_lab: l25_serve_eval_lm_eval
 gpu_modes:
-  local: CPU OK
-  cluster: 实测 acceptance + speedup（可选）
+  local: CPU patch、smoke 和 MiniInfra bench 可完成合同与字段验证
+  cluster: 真实速度、p99 和显存结论需要目标 GPU、真实模型和固定 workload
+lesson:
+  opening: |
+    # 第 25 讲：Speculative Decoding Greedy Verify
+
+    本讲处理 decode 阶段 target step 成本。draft proposer 先给出 k 个候选 token，target 一次 verify forward 产生 k+1 行 logits；greedy verify 只接受连续前缀，在第一处 mismatch 用 target argmax 接管，全接受时追加 bonus token。L25 先用 CPU-safe patch 写清这个合同，再对照 MiniInfra 指标、vLLM speculative 配置和 SGLang KV 提交边界。
+
+    课程按“系统地图 -> 主讲义 -> 源码带读 -> notebook -> quiz -> patch -> smoke/bench -> 课后产物”的顺序组织。lab 只检查 greedy verify 的最小合同，生产结论还要结合 draft 成本、K、并发、显存、p99 和输出质量。
+  sections:
+  - title: 课程定位：spec decode 要先写清 verify 合同
+    plain_explanation: |
+      L25 属于 Serving systems 的 decode 加速路径。它连接 L21 的 KV 调度、L24 的显存预算和 L26 的评测闭环。推理服务打开 spec decode 后，一轮 target verify 可能提交多个 token，也可能只提交一个 target token；这个差别会影响吞吐、KV committed length、acceptance 指标和长尾延迟。
+
+      本讲先把 greedy verify 合同写成 patch。proposer 的类型可以换成 n-gram、draft model、Medusa 或 EAGLE，但 target verify 必须回答同一个问题：从第 0 个候选开始，target 连续接受了多少 draft，并由哪个 target token 接管下一步。
+    mental_model: |
+      把 spec decode 看成三段：便宜 proposer 提案、target 一次验收、scheduler 提交有效前缀并回收无效候选。
+    why_it_matters: |
+      verify 合同不清楚时，acceptance、mean acceptance length、KV 提交长度和 p99 分析都会偏移。
+    source_refs:
+    - title: 函数签名和返回语义
+      repo_path: labs/l24_spec_decode/patch/starter/spec_decode.py
+      lines:
+      - 20
+      - 29
+      note: |
+        L20-L23: 函数接收 draft token 和 target logits。
+        L24-L29: 返回列表长度和 accepted draft 数在 docstring 里明确区分。
+    - title: verify candidates
+      repo_path: mini_infra/vllm/spec_decode/draft_runner.py
+      lines:
+      - 29
+      - 40
+      note: |
+        L29-L34: MiniInfra 用连续前缀接受模拟 target verify。
+        L35-L40: 第一处不一致后停止计数。
+    common_confusions:
+    - 把 proposer 写对当成 spec decode 全链路正确。
+    - 把返回 token 数和 accepted draft 数混成同一个指标。
+    checkpoint_questions:
+    - 为什么 target verify 是 spec decode 的语义边界？
+    - L25 与 L24 的显存预算有什么关系？
+  - title: Greedy verify：连续接受、mismatch 接管、全接受 bonus
+    plain_explanation: |
+      `draft_tokens` 的长度是 k，`target_logits` 的 shape 是 `(k+1, vocab)`。实现时先计算 `target_argmax = target_logits.argmax(dim=-1).tolist()`，再从左到右比较 `target_argmax[i]` 和 `draft_tokens[i]`。相等就把 draft token 追加到 accepted；第一处不相等就返回 accepted 前缀加 `target_argmax[i]`，accepted draft 数是前缀长度。
+
+      如果 k 个 draft 都匹配，说明 target 接受完整候选链。这时第 k 行 logits 给出 bonus token，要追加到返回列表；accepted draft 数仍然是 k。k=0 时没有 draft 可验，但 target logits 仍有第 0 行，所以返回一个 target token 和 accepted draft 数 0。
+    mental_model: |
+      `target_argmax` 是标准答案序列。draft 必须从第一题开始连续答对；第一题错了就由标准答案接管，全对时还能拿到下一题答案。
+    why_it_matters: |
+      少 append bonus 会少算每轮输出；把 bonus 计入 accepted draft 会抬高 acceptance；mismatch 后继续看后面的 draft 会改变 greedy decode 路径。
+    source_refs:
+    - title: loop and bonus
+      repo_path: labs/l24_spec_decode/patch/reference/spec_decode.py
+      lines:
+      - 17
+      - 23
+      note: |
+        L17-L21: mismatch 分支返回 target argmax 和已接受数量。
+        L22-L23: 全接受时追加 `target_argmax[k]`。
+    - title: 中间 mismatch
+      repo_path: labs/l24_spec_decode/patch/tests/test_patch.py
+      lines:
+      - 40
+      - 47
+      note: |
+        L40-L47: target 在位置 2 给出 99，返回前两个 draft 加 99。
+    common_confusions:
+    - mismatch 分支返回 draft token。
+    - 全接受分支只返回 draft 列表。
+    - k=0 时返回空列表。
+    checkpoint_questions:
+    - '`target_argmax=[3,7,99,0,0]`、`draft=[3,7,11,23]` 时返回什么？'
+    - 为什么 `num_accepted_drafts` 不包含 bonus？
+  - title: Acceptance 和 speedup：收益要覆盖 draft 成本
+    plain_explanation: |
+      Acceptance rate 是 accepted draft tokens / proposed draft tokens。投机一轮平均产出 `1 + α*k` 个 token，其中 1 是 target bonus。若 draft 成本很高，或者 α 很低，额外 draft forward 会吃掉 target step 减少带来的收益。
+
+      L25 的 MiniInfra 用 `AcceptanceTracker` 维护滑动窗口，并给出教学版 speedup 估计。真实报告里不能只写 speedup，必须同时写 baseline、tokens/s、ITL p50/p99、draft latency、draft memory、K、method、采样参数和质量指标。
+    mental_model: |
+      spec decode 是一张成本账：target verify 是固定成本，draft 是额外成本，只有被接受的候选足够多，平均成本才会下降。
+    why_it_matters: |
+      高平均吞吐不能掩盖 p99、显存或质量问题；低 acceptance 还可能让服务比 baseline 更慢。
+    source_refs:
+    - title: rate and speedup
+      repo_path: mini_infra/vllm/spec_decode/acceptance_tracker.py
+      lines:
+      - 32
+      - 42
+      note: |
+        L32-L38: `rate()` 汇总 accepted/proposed。
+        L40-L42: `expected_speedup()` 使用 draft cost ratio 估计收益。
+    - title: rows
+      repo_path: labs/l24_spec_decode/scripts/bench_concurrency.py
+      lines:
+      - 12
+      - 20
+      note: |
+        L12-L15: CLI 接收 servers 和 batches。
+        L16-L20: 每个 batch 输出 n-gram 与 draft 两组指标。
+    common_confusions:
+    - 只看 acceptance，不看 draft latency 和显存。
+    - 只看 p50，不看 reject burst 对 p99 的影响。
+    checkpoint_questions:
+    - acceptance rate 高但 draft model 很大时，速度为什么仍可能变差？
+    - 报告 spec decode 至少要列哪些 baseline 字段？
+  - title: Proposer 家族：ngram、draft model、Medusa/EAGLE
+    plain_explanation: |
+      n-gram proposer 从 prompt 中查找当前 suffix 的历史出现位置，并把后续 token 当候选。它几乎没有额外 GPU 显存，但只适合 prompt 内重复明显的场景。独立 draft model 更通用，但需要额外权重、KV、forward 成本和配置对齐。
+
+      Medusa/EAGLE 把候选生成接到 target 的 hidden state 或专门 head 上，目标是降低 draft 成本并提高候选质量。vLLM `SpeculativeConfig` 把 method、model、K、draft TP、prompt lookup、tree 和 parallel drafting 分成不同字段，读配置时要把这些成本项分开。
+    mental_model: |
+      proposer 负责提出候选，target 负责验收。不同 proposer 改变成本和候选质量，不改变 verify 合同。
+    why_it_matters: |
+      线上排查时，低 acceptance、draft OOM 和 p99 抖动经常来自 proposer 选型或配置，而非 verify 函数本身。
+    source_refs:
+    - title: prompt lookup
+      repo_path: mini_infra/vllm/spec_decode/ngram.py
+      lines:
+      - 28
+      - 32
+      note: |
+        L28-L32: n-gram 找到 suffix 后返回其后的 token 作为候选。
+    - title: core fields
+      repo_path: github_repo/vllm/vllm/config/speculative.py
+      lines:
+      - 73
+      - 85
+      note: |
+        L73-L85: 配置保存 K、draft model 名称和 method。
+    - title: prompt lookup
+      repo_path: github_repo/vllm/vllm/config/speculative.py
+      lines:
+      - 138
+      - 144
+      note: |
+        L138-L144: prompt lookup 控制 n-gram window。
+    - title: alternative drafting
+      repo_path: github_repo/vllm/vllm/config/speculative.py
+      lines:
+      - 146
+      - 154
+      note: |
+        L146-L154: tree 和 parallel drafting 改变候选结构。
+    common_confusions:
+    - 把 n-gram 当成小模型。
+    - 把 Medusa/EAGLE 当成普通独立 draft model。
+    checkpoint_questions:
+    - n-gram 为什么额外 GPU memory 接近 0？
+    - 独立 draft model 需要额外记录哪些资源项？
+  - title: KV 和 scheduler：bonus 推进输出，accepted draft 进入统计
+    plain_explanation: |
+      Verify forward 可能临时计算多个候选位置的 KV，但最终有效序列只包含被接受的 draft 前缀和一个 target bonus。接受 m 个 draft 时，输出长度增加 `m+1`。mismatch 之后的候选 KV 需要通过 length、page table、slot mapping 或 overallocated KV 回收处理。
+
+      SGLang 的 `accept_lens` 包含 bonus token，所以 accepted draft 数等于 `accept_lens - 1`。这个关系连接 patch 返回值和真实 scheduler：bonus 推进输出和 KV committed length，accepted draft count 进入 acceptance histogram。
+    mental_model: |
+      KV 像临时铺好的候选轨道。验证通过的前缀和 bonus 变成正式轨道，拒绝后的轨道要收回或忽略。
+    why_it_matters: |
+      计数边界一旦错，KV committed length、accepted draft histogram 和 mean acceptance length 都会错。
+    source_refs:
+    - title: committed length
+      repo_path: github_repo/sglang/python/sglang/srt/managers/scheduler_output_processor_mixin.py
+      lines:
+      - 363
+      - 372
+      note: |
+        L363-L368: KV committed length 按 `accept_lens[i]-1` 推进。
+        L369-L372: predict tokens 按 accept length 从 buffer 中切出。
+    - title: overallocated KV
+      repo_path: github_repo/sglang/python/sglang/srt/managers/schedule_batch.py
+      lines:
+      - 937
+      - 947
+      note: |
+        L937-L943: spec decode 可能分配超过 committed length 的 KV。
+        L944-L947: 释放时返回 committed 与 allocated 范围。
+    common_confusions:
+    - 把 bonus 计入 accepted draft tokens。
+    - reject 后认为需要重新 prefill 全部上下文。
+    checkpoint_questions:
+    - 接受 2 个 draft 时，输出长度增加多少？
+    - 为什么 SGLang 统计 accepted draft 时要减 1？
+  - title: Metrics 和 debug：从 patch 返回值到生产判断
+    plain_explanation: |
+      vLLM 的 spec decode metrics 聚合 draft 数、draft token 数、accepted token 数和 per-position acceptance。mean acceptance length 通常包含 bonus，acceptance rate 使用 accepted draft tokens / draft tokens。报告里要同时记录 drafted throughput、accepted throughput、ITL 分位数和 draft memory。
+
+      Debug 时按三张账本走：概率账本看 acceptance 和 per-position 分布，资源账本看 draft 权重、draft KV、target KV 和临时 buffer，延迟账本看 p50/p99、accept=0 占比和 mixed workload。
+    mental_model: |
+      patch 是单轮语义检查，metrics 是批量服务账本。两者通过 accepted draft count 和 returned token count 相连。
+    why_it_matters: |
+      只有 patch-test 通过，不能说明真实 spec decode 值得上线；上线判断要能复查成本、收益和尾部风险。
+    source_refs:
+    - title: acceptance formulas
+      repo_path: github_repo/vllm/vllm/v1/spec_decode/metrics.py
+      lines:
+      - 88
+      - 99
+      note: |
+        L88-L92: draft acceptance rate 等于 accepted tokens / draft tokens。
+        L94-L99: mean acceptance length 包含 bonus，并计算 per-position acceptance。
+    - title: Prometheus observe counters
+      repo_path: github_repo/vllm/vllm/v1/spec_decode/metrics.py
+      lines:
+      - 200
+      - 211
+      note: |
+        L200-L211: drafts、draft tokens 和 accepted tokens 写入 counter。
+    - title: Prometheus observe positions
+      repo_path: github_repo/vllm/vllm/v1/spec_decode/metrics.py
+      lines:
+      - 212
+      - 215
+      note: |
+        L212-L215: per-position accepted counter 逐位置递增。
+    common_confusions:
+    - 只写 tokens/s，不写 baseline 和质量指标。
+    - 把 notebook 公式当成真实硬件结论。
+    checkpoint_questions:
+    - vLLM 中哪些 counter 可以计算 acceptance rate？
+    - spec decode p99 抖动时应该按哪些维度分桶？
+  - title: Lab 验收：最小合同和下一步实验
+    plain_explanation: |
+      patch 只验收 `greedy_verify` 的行为合同。测试覆盖全接受、中间 mismatch、k=0、首错和返回类型。通过 patch 后，还要跑 smoke 和 bench，把一轮返回值映射到 acceptance、speedup、ITL p50/p99、draft latency 和 draft memory。
+
+      写实验报告时先列 baseline，再列 spec method、K、draft cost、acceptance、per-position acceptance、显存、p99 和质量指标。没有这些字段时，不能把局部现象写成生产结论。
+    mental_model: |
+      先证明单轮 verify 语义正确，再证明一批请求的指标账本划算。
+    why_it_matters: |
+      这能防止学生把 patch-test 当成课程终点，也能把下一讲的评测闭环接上。
+    source_refs:
+    - title: 返回类型
+      repo_path: labs/l24_spec_decode/patch/tests/test_patch.py
+      lines:
+      - 67
+      - 74
+      note: |
+        L67-L74: 测试要求返回 Python list 和 int，避免 tensor 泄漏到上层。
+    - title: summary metrics
+      repo_path: mini_infra/vllm/spec_decode/draft_runner.py
+      lines:
+      - 73
+      - 84
+      note: |
+        L73-L84: summary 输出 speedup、TTFT、ITL、draft latency 和 draft memory。
+    common_confusions:
+    - patch-test 通过后不跑 bench，也不写 baseline。
+    - 忽略输出质量，只讨论速度。
+    checkpoint_questions:
+    - L25 patch-test 覆盖了哪些边界？
+    - CPU smoke 能证明什么，不能证明什么？

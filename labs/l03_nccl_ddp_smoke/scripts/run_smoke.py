@@ -92,7 +92,7 @@ def main() -> None:
             "fallback_used": payload.get("fallback_used", False),
         },
     )
-    write_text(run_dir / "train.log", f"[{utc_now()}] L01.5 smoke 完成：{payload}\n")
+    write_text(run_dir / "train.log", f"[{utc_now()}] L04 smoke 完成：{payload}\n")
     write_text(
         run_dir / "report.md",
         f"""# Mission Report：{MISSION_ID}
@@ -120,7 +120,7 @@ def main() -> None:
 建议练习 `dist_wrong_world_size_001`，证据路径为 `artifacts/ddp_hello.json` 和 `train.log`。
 
 ## 6. 迁移判断
-本关只验证 rank/process group 边界；进入 L02 后才把 collective 直觉迁移到 TP/PP toy。若 fallback_used=True，本次结果只能作为 validation-only。
+本关只验证 rank/process group 边界；进入 L06 后才把 collective 直觉迁移到 TP/PP toy。若 fallback_used=True，本次结果只能作为 validation-only。
 """,
     )
     print(run_dir)

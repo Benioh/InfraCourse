@@ -81,7 +81,7 @@ def main() -> None:
         run_dir / "train.log",
         "\n".join(
             [
-                f"[{utc_now()}] L02 分布式原语 smoke 完成",
+                f"[{utc_now()}] L06 分布式原语 smoke 完成",
                 f"collectives={collectives}",
                 f"ddp={ddp}",
                 f"tensor_parallel={tp}",

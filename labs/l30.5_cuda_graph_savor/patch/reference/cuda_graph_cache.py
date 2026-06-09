@@ -1,4 +1,4 @@
-"""Reference solution for L30.5 Patch · CUDA Graph + Memory Savor."""
+"""Reference solution for L34 Patch · CUDA Graph + Memory Savor."""
 
 from __future__ import annotations
 

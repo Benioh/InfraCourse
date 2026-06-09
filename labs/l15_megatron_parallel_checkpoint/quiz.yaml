@@ -1,84 +1,103 @@
 mission: l15_megatron_parallel_checkpoint
-title: L05.8 Quiz · Distributed checkpoint 与 resume
-pass_threshold: 1.0
+title: L16 Quiz · Megatron Parallel Checkpoint
+pass_threshold: 0.8
 description: |
-  确认学习者理解 Megatron checkpoint 不只是 model weights，还包含 optimizer、
-  scheduler 和 parallel_state 的 resume 合同。
+  这 5 题检查 L16 的关键边界：完整 resume 状态、latest marker、
+  parallel_state 兼容性、strict / non-strict load，以及 optimizer/scheduler state。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图
+    kind: doc
+    path: labs/l15_megatron_parallel_checkpoint/system_map.md
+    href: "#lesson"
+  - title: 读主讲义
+    kind: doc
+    path: labs/l15_megatron_parallel_checkpoint/lecture.md
+    href: "#lesson"
+  - title: 读源码带读
+    kind: doc
+    path: labs/l15_megatron_parallel_checkpoint/source_walkthrough.md
+    href: "#lesson"
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l15_megatron_parallel_checkpoint/patch/task.md
-  - title: 读 MiniInfra checkpointing
-    kind: source
-    path: mini_infra/megatron/training/checkpointing.py
-  - title: 读 Megatron checkpointing
+    href: "#patch"
+  - title: 对照 Megatron checkpointing
     kind: source
     path: github_repo/Megatron-LM/megatron/training/checkpointing.py
 
 questions:
-  - id: q1_checkpoint_contents
-    prompt: 恢复训练时，checkpoint 至少应该恢复哪些状态？
+  - id: q1_resume_state
+    prompt: 无缝恢复训练时，checkpoint 至少要覆盖哪些状态？
     options:
       - id: a
-        text: model、optimizer、scheduler/global step、parallel_state
+        text: model、optimizer、scheduler/global step、parallel_state，生产里还要关注 RNG 和数据进度
         correct: true
       - id: b
-        text: 只恢复 model weights
+        text: 只保存 model weights
       - id: c
-        text: 只恢复 tokenizer
+        text: 只保存 tokenizer vocab
       - id: d
-        text: 只恢复日志文件
-    explanation: "少了 optimizer/scheduler/parallel_state，resume 语义就不连续。"
-  - id: q2_parallel_state
-    prompt: load checkpoint 时为什么要校验 parallel_state？
+        text: 只保存日志目录
+    explanation: |
+      model 只决定当前位置。optimizer、scheduler、RNG、数据进度和并行拓扑决定下一步训练是否延续中断前状态。
+
+  - id: q2_latest_marker
+    prompt: 为什么 loader 应该先读 `latest_checkpointed_iteration.txt`？
     options:
       - id: a
-        text: 因为 TP/PP/DP/EP 等并行配置会影响权重和优化器状态的切片语义
+        text: marker 是框架确认最近成功 checkpoint 的入口，比按文件名排序猜最新文件更可靠
         correct: true
       - id: b
-        text: 因为 tokenizer 一定改变
+        text: marker 用来保存 tokenizer
       - id: c
-        text: 因为 JSONL 文件会消失
+        text: marker 只影响 README 渲染
       - id: d
-        text: 因为 Python 不能加载旧文件
-    explanation: "并行切片语义是 checkpoint compatibility 的一部分。"
-  - id: q3_scheduler_state
-    prompt: 为什么 scheduler_state 也要保存？
+        text: marker 会自动转换 TP shard
+    explanation: |
+      目录里可能有多个 iteration，也可能有半成品文件。latest marker 把恢复入口显式写出来。
+
+  - id: q3_parallel_state
+    prompt: 为什么 load checkpoint 时要校验 `parallel_state`？
     options:
       - id: a
-        text: resume 后 LR 必须从正确 step 继续，否则训练曲线会跳变
+        text: TP/PP/DP/EP 等拓扑决定权重和 optimizer state 的 shard 坐标，改变后旧 shard 可能不兼容
         correct: true
       - id: b
-        text: HTTP response
+        text: 因为 JSON 只能在同一台机器读取
       - id: c
-        text: tokenizer vocab
+        text: 因为 scheduler_state 不需要保存
       - id: d
-        text: README
-    explanation: "LR schedule 是 step-based 状态，不是纯配置。"
-  - id: q4_strict_load
-    prompt: strict=True 加载时发现 parallel_state 不匹配，正确行为是什么？
+        text: 因为 checkpoint 文件名必须包含 GPU 型号
+    explanation: |
+      world size 相同也不够。TP、PP、EP 的组合变化会改变 tensor shape、rank 路径和 optimizer shard 语义。
+
+  - id: q4_strict
+    prompt: strict=True 时发现 TP mismatch，正确行为是什么？
     options:
       - id: a
-        text: 直接报错，阻止错误 resume
+        text: 抛 `CheckpointError`，阻止错误 resume
         correct: true
       - id: b
-        text: 静默忽略
+        text: 静默忽略 mismatch
       - id: c
-        text: 自动改 tokenizer
+        text: 自动把 TP=2 checkpoint 变成 TP=4
       - id: d
-        text: 删除 checkpoint
-    explanation: "strict load 的意义就是尽早暴露不兼容状态。"
-  - id: q5_debug
-    prompt: 加载 checkpoint 报 tensor shape mismatch，最应该先核对什么？
+        text: 删除 latest marker
+    explanation: |
+      strict resume 的目标是继续同一个训练状态。拓扑不兼容时继续训练风险高，应该尽早失败。
+
+  - id: q5_scheduler_optimizer
+    prompt: 只加载 model weights，跳过 optimizer 和 scheduler，最适合哪类场景？
     options:
       - id: a
-        text: 模型结构、TP/PP/EP/DP 配置和 checkpoint 元数据
+        text: 权重 smoke 或 finetune 起点；它不能证明完整 resume 连续性
         correct: true
       - id: b
-        text: 浏览器缓存
+        text: 完整恢复中断前训练
       - id: c
-        text: markdown 标题
+        text: 验证 optimizer shard 兼容
       - id: d
-        text: OpenAI API key
-    explanation: "shape mismatch 多数来自模型结构或并行切片语义不一致。"
+        text: 验证 LR schedule 没有跳变
+    explanation: |
+      `--no-load-optim` 或 finetune 权重加载可以验证模型权重可读，但 optimizer 动量和 scheduler step 已经不再延续。

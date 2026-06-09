@@ -1,4 +1,4 @@
-"""Reference solution for L05 Patch · BucketedManualDDP."""
+"""Reference solution for L12 Patch · BucketedManualDDP."""
 
 from __future__ import annotations
 

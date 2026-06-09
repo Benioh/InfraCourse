@@ -1,4 +1,4 @@
-# L01.5 Patch · 手写 ManualDDP
+# L04 Patch · 手写 ManualDDP
 
 ## 你要交付什么
 
@@ -56,5 +56,5 @@ make patch-test M=l03_nccl_ddp_smoke
 ## 写完之后你能做什么
 
 - 解释为什么 PyTorch DDP 默认用 25MB bucket；为什么大模型用 100MB+。
-- 在 L05 给 Megatron 加 gradient bucket overlap 时知道改哪一行。
+- 在 L06 给 Megatron 加 gradient bucket overlap 时知道改哪一行。
 - 调试"DDP loss 偏大 world_size 倍"——经典 bug：忘了除以 world_size。

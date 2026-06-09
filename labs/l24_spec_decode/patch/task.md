@@ -1,4 +1,4 @@
-# L08.7 Patch · Speculative Decoding（Greedy Verify）
+# L25 Patch · Speculative Decoding Greedy Verify
 
 ## 你要交付什么
 
@@ -71,6 +71,6 @@ make patch-test M=l24_spec_decode
 
 ## 写完之后你能做什么
 
-- 解释 vLLM / SGLang 的 spec decode 加速比公式：speedup ≈ 1 + α·k 然后再除以 (1 + k·draft_cost / target_cost)。
-- 在 Capstone 推理服务里启用 spec decode（target=Qwen2.5-0.5B + draft=Qwen2.5-0.5B-distilled-tiny）。
-- 看懂 Medusa / EAGLE 等 tree-based spec decode 的入口逻辑。
+- 解释 speculative decoding 的收益来自 target verify 次数下降，以及 draft cost 和 acceptance 的权衡。
+- 用 `accepted_tokens` 与 `num_accepted_drafts` 判断 KV 有效长度和回滚边界。
+- 看懂 n-gram、draft model、Medusa/EAGLE 这几类 proposer 的入口差异。

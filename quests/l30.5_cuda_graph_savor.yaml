@@ -1,44 +1,530 @@
 id: l30.5_cuda_graph_savor
-title: CUDA Graph Cache + Memory Savor（co-locate RL 双件套）
-level: L10.7
+title: L34 · CUDA Graph Cache + Memory Savor：RL co-locate 的显存与 replay 边界
+level: L34
 act: 第 4 章：RL 与对齐
 role: GPU 调优学徒
 priority: 进阶
-estimated_minutes: 75
+estimated_minutes: 80
 no_gpu_friendly: true
-
 frameworks:
-  - PyTorch
-  - SGLang torch_memory_saver / Megatron CuMemAllocator (对照)
-
+- PyTorch
+- Megatron-LM 对照
+- SLiME 对照
 patch:
   description: |
-    实现两个 RL co-locate 必备件：GraphCache（CUDA Graph capture/replay）
-    与 MemorySavor（pause/resume tensor 数据）。CPU 模拟语义，API 与
-    SGLang/Megatron 真实对应组件一致。
+    实现两个 CPU-safe primitive：GraphCache 按输入 shape/dtype/scalar 缓存 capture
+    路径，MemorySavor 用 handle 池模拟 pause/resume 和 paused bytes 统计。
   task_md: labs/l30.5_cuda_graph_savor/patch/task.md
   starter_file: labs/l30.5_cuda_graph_savor/patch/starter/cuda_graph_cache.py
   reference_file: labs/l30.5_cuda_graph_savor/patch/reference/cuda_graph_cache.py
   test_command: make patch-test M=l30.5_cuda_graph_savor
   status_file: labs/l30.5_cuda_graph_savor/patch/.last_run.json
   test_count: 8
-  test_kind: 行为契约 + 数值正确性
-
+  test_kind: capture/replay + pause/resume 行为合同
+lesson_docs:
+- title: 系统地图
+  path: labs/l30.5_cuda_graph_savor/system_map.md
+  description: 本讲在 RL co-locate 主线中的位置、局部系统图、概念依赖和易混点。
+- title: 主讲义
+  path: labs/l30.5_cuda_graph_savor/lecture.md
+  description: 从 CUDA Graph launch overhead、地址稳定、Memory Savor 讲到 co-locate 切换和验收边界。
+- title: 源码带读讲义
+  path: labs/l30.5_cuda_graph_savor/source_walkthrough.md
+  description: 按 patch 合同、pytest 边界、Megatron CUDA Graph 和 SLiME memory utility 组织的源码阅读路线。
 source_reading:
-  - title: 基于 torch-memory-saver 浅析 CUDA Graph
-    repo_path: github_repo/Awesome-ML-SYS-Tutorial/torch/cuda-graph/readme.md
-  - title: 再探 CUDA Graph - Dual AR 模型的统一覆盖优化
-    repo_path: github_repo/Awesome-ML-SYS-Tutorial/torch/cuda-graph/readme-2.md
-
+- title: Patch starter：GraphCache 与 MemorySavor TODO
+  repo_path: labs/l30.5_cuda_graph_savor/patch/starter/cuda_graph_cache.py
+  focus: 学生要补齐的 cache key、capture/replay 和 handle 状态机
+  highlights:
+  - title: GraphCache 状态
+    lines:
+    - 20
+    - 30
+    note: |
+      L20-L30: `GraphCache` 保存 captured function 字典、capture_count 和 replay_count。
+  - title: shape key
+    lines:
+    - 32
+    - 36
+    note: |
+      L32-L36: tensor key 包含 shape 和 dtype，scalar key 包含类型和值。
+  - title: capture key TODO
+    lines:
+    - 38
+    - 45
+    note: |
+      L38-L45: TODO 先把 args 和排序后的 kwargs 变成 cache key。
+  - title: capture branch TODO
+    lines:
+    - 46
+    - 53
+    note: |
+      L46-L53: key miss 时保存函数并计 capture，key hit 时调用已保存函数并计 replay。
+  - title: MemorySavor 状态
+    lines:
+    - 56
+    - 64
+    note: |
+      L56-L64: `MemorySavor` 保存 paused handle 池和下一个 handle id。
+  - title: pause TODO
+    lines:
+    - 65
+    - 74
+    note: |
+      L65-L74: TODO 要保存 shape、dtype 和 tensor clone，并返回 handle。
+  - title: resume TODO
+    lines:
+    - 76
+    - 87
+    note: |
+      L76-L87: TODO 要 pop handle、返回数据 clone，并统计 paused bytes。
+  - title: is_paused TODO
+    lines:
+    - 89
+    - 91
+    note: |
+      L89-L91: `is_paused` 应只检查 handle 是否仍在 `_paused` 中。
+- title: Patch reference：最小正确状态机
+  repo_path: labs/l30.5_cuda_graph_savor/patch/reference/cuda_graph_cache.py
+  focus: cache key、计数器、handle 和 bytes 统计的最小实现
+  highlights:
+  - title: GraphCache key
+    lines:
+    - 10
+    - 20
+    note: |
+      L10-L20: reference 定义 graph 字典、计数器和 `_shape_key`。
+  - title: capture/replay 实现
+    lines:
+    - 22
+    - 31
+    note: |
+      L22-L31: key miss 保存函数并计 capture，key hit 计 replay 并调用缓存函数。
+  - title: pause 实现
+    lines:
+    - 39
+    - 47
+    note: |
+      L39-L47: pause 生成 handle，保存 metadata 和 CPU clone。
+  - title: resume/bytes 实现
+    lines:
+    - 49
+    - 57
+    note: |
+      L49-L57: resume pop 掉 handle，bytes 统计遍历 `_paused`。
+- title: Patch tests：行为合同
+  repo_path: labs/l30.5_cuda_graph_savor/patch/tests/test_patch.py
+  focus: 8 个 capture/replay 与 pause/resume 测试
+  highlights:
+  - title: 实现选择
+    lines:
+    - 17
+    - 19
+    note: |
+      L17-L19: `IMPL` 环境变量允许切换 starter 或 reference。
+  - title: first capture
+    lines:
+    - 22
+    - 29
+    note: |
+      L22-L29: 第一次调用 capture_count 为 1，replay_count 为 0。
+  - title: second replay
+    lines:
+    - 32
+    - 40
+    note: |
+      L32-L40: 第二次同 shape 调用 replay_count 为 1。
+  - title: shape bucket
+    lines:
+    - 43
+    - 52
+    note: |
+      L43-L52: 不同 shape 触发第二次 capture，同 shape 再次命中 replay。
+  - title: eager equality
+    lines:
+    - 55
+    - 65
+    note: |
+      L55-L65: capture 与 replay 输出都要和 eager 函数一致。
+  - title: pause handle
+    lines:
+    - 68
+    - 74
+    note: |
+      L68-L74: pause 后 handle 应处于 paused 状态。
+  - title: resume data
+    lines:
+    - 76
+    - 83
+    note: |
+      L76-L83: resume 返回的数据必须等于 pause 前 tensor。
+  - title: bytes accounting
+    lines:
+    - 86
+    - 93
+    note: |
+      L86-L93: paused bytes 按两个 float32 tensor 的存储量求和。
+  - title: resume removes handle
+    lines:
+    - 96
+    - 104
+    note: |
+      L96-L104: resume 后 handle 消失，bytes 归零。
+- title: Megatron CUDA Graph internals
+  repo_path: github_repo/Megatron-LM/megatron/core/transformer/cuda_graphs.py
+  focus: 真实 CUDA Graph metadata、地址记录和 buffer reuse pool
+  highlights:
+  - title: capture query
+    lines:
+    - 84
+    - 91
+    note: |
+      L84-L91: helper 提供 capture 状态查询，并在 start 时置位。
+  - title: capture end
+    lines:
+    - 92
+    - 98
+    note: |
+      L92-L98: capture 结束时清除全局状态。
+  - title: buffer metadata
+    lines:
+    - 118
+    - 130
+    note: |
+      L118-L130: metadata 记录 graph 输入输出、use count 和 buffer 复用计数。
+  - title: ArgMetadata
+    lines:
+    - 138
+    - 148
+    note: |
+      L138-L148: tensor metadata 保存 shape、dtype、device、data_ptr 和梯度需求。
+  - title: reuse pool purpose
+    lines:
+    - 161
+    - 166
+    note: |
+      L161-L166: reuse pool 保留强引用，避免 graph buffer 被 allocator 释放。
+  - title: owns check
+    lines:
+    - 184
+    - 190
+    note: |
+      L184-L190: pool 通过 data_ptr 判断 tensor 是否由自己创建。
+  - title: pool get
+    lines:
+    - 193
+    - 201
+    note: |
+      L193-L201: pool 按 shape/dtype/device 复用 buffer，找不到就新建。
+- title: Megatron CUDA Graph arguments
+  repo_path: github_repo/Megatron-LM/megatron/training/arguments.py
+  focus: 生产配置中的 CUDA Graph、decode-only 和 RL KV cache 边界
+  highlights:
+  - title: graph setup
+    lines:
+    - 1643
+    - 1650
+    note: |
+      L1643-L1650: 启用 CUDA Graph 时会打开相关 RNG tracker。
+  - title: allocator warning
+    lines:
+    - 1651
+    - 1658
+    note: |
+      L1651-L1658: 参数校验处理 CUDA Graph、NCCL register 和 allocator 的兼容风险。
+  - title: graph count
+    lines:
+    - 1918
+    - 1926
+    note: |
+      L1918-L1926: 动态推理可配置要 capture 的 CUDA Graph 数量。
+  - title: decode-only
+    lines:
+    - 1937
+    - 1939
+    note: |
+      L1937-L1939: `--decode-only-cuda-graphs` 只对 decode step 使用 CUDA Graph。
+  - title: RL suspend
+    lines:
+    - 2418
+    - 2426
+    note: |
+      L2418-L2426: RL KV cache 管理和 suspend 时是否保留 CUDA Graph 是独立配置。
+- title: SLiME memory utility
+  repo_path: github_repo/slime/slime/utils/memory_utils.py
+  focus: co-locate 排障中的显存快照和清理入口
+  highlights:
+  - title: clear memory
+    lines:
+    - 11
+    - 17
+    note: |
+      L11-L17: 工具函数同步 CUDA、GC、empty_cache，并可清理 host cache。
+  - title: memory info
+    lines:
+    - 19
+    - 29
+    note: |
+      L19-L29: `available_memory` 读取 GPU total/free/allocated/reserved。
+  - title: memory log
+    lines:
+    - 41
+    - 49
+    note: |
+      L41-L49: `print_memory` 按 rank 写出 memory snapshot，支持阶段切换排查。
 mini_infra_targets:
-  - mini_infra/sglang/
-
+- mini_infra/sglang/
 notebooks:
-  - notebooks/n20_cuda_graph_replay.ipynb
-
+- notebooks/n20_cuda_graph_replay.ipynb
 prereq: l30_dpo_loss
 next_lab: l31_rollout_only_smoke
-
 gpu_modes:
   local: CPU OK（语义模拟）
-  cluster: 真 GPU 上对照 torch.cuda.graphs 验证 capture/replay 时间差
+  cluster: 真 GPU 上对照 `torch.cuda.graph`、static buffer 地址和 replay 时间
+lesson:
+  opening: |
+    本讲处理 RL co-locate 中两个相互牵制的系统约束：rollout decode 想用 CUDA Graph replay 降低 launch overhead，training 阶段又要腾出显存给权重、optimizer state 和 activation。若直接释放 rollout 显存，graph 内部地址可能失效；若两边显存同时常驻，阶段切换处容易 OOM。
+
+    本关 patch 是 CPU 语义模拟。GraphCache 验证 shape-key cache、capture/replay 计数和缓存函数语义；MemorySavor 验证 handle-based pause/resume 和 paused bytes 统计。真实 GPU 加速、地址稳定和 VMM physical page 都要额外验证。
+  sections:
+  - title: 目标和边界
+    plain_explanation: |
+      本讲先讲 CUDA Graph 减少的 CPU launch overhead，再讲 replay 为什么要求 static buffer 和稳定地址，随后进入 co-locate 中的 Memory Savor。patch 的边界很小：`GraphCache.capture_or_replay(fn, *args, **kwargs)` 按 shape/dtype/scalar 生成 key；`MemorySavor.pause(tensor)` 保存数据并返回 handle；`resume(handle)` 恢复数据并移除 handle。
+
+      CPU patch 不能证明真实 CUDA Graph 加速，也不能证明 GPU 虚拟地址稳定。它只证明 cache key、计数器、handle、bytes 和数据恢复这些结构语义。
+    mental_model: |
+      GraphCache 是按输入画像索引的剧本缓存；MemorySavor 是按 handle 管理的临时仓库。一个减少重复排练，一个记录哪些资源被暂停。
+    why_it_matters: |
+      co-locate 的 OOM 和 graph replay bug 往往发生在阶段切换处。先把结构语义讲清，才能设计 GPU 证据和生产排查日志。
+    source_refs:
+    - title: Starter graph state
+      repo_path: labs/l30.5_cuda_graph_savor/patch/starter/cuda_graph_cache.py
+      lines:
+      - 20
+      - 30
+      note: |
+        L20-L30: GraphCache 的核心状态是 `_graphs`、capture_count 和 replay_count。
+    - title: Starter savor state
+      repo_path: labs/l30.5_cuda_graph_savor/patch/starter/cuda_graph_cache.py
+      lines:
+      - 56
+      - 64
+      note: |
+        L56-L64: MemorySavor 的核心状态是 `_paused` 和递增 handle。
+    common_confusions:
+    - 把 CPU patch 通过当成 CUDA Graph 性能成立。
+    - 认为 shape 相同就足以 replay，忽略地址稳定。
+    - 把 MemorySavor 简化成普通 clone，忽略真实 VMM 地址语义。
+    checkpoint_questions:
+    - 本讲 patch 能验证哪些结构语义？
+    - 哪些结论必须用 GPU 证据验证？
+    - GraphCache 和 MemorySavor 在 co-locate 中分别解决什么问题？
+  - title: CUDA Graph 与地址稳定
+    plain_explanation: |
+      decode 阶段每次只生成一个 token，小 kernel 多，CPU launch overhead 占比高。CUDA Graph 把固定操作序列录成可 replay 对象，replay 时 CPU 只提交一次 graph launch。
+
+      真实 replay 要求 capture 时记录的地址仍然有效。生产 runner 通常把动态输入 copy 到 static input buffer，再 replay graph；输出也写入 static output buffer。动态数据可以进入 graph，但不能通过新分配 tensor 改变 graph 内部地址。
+    mental_model: |
+      graph 录下的是固定地址上的路线。新请求把值写进旧地址，再沿旧路线执行。
+    why_it_matters: |
+      很多 replay 崩溃或随机输出并非公式错，而是临时 tensor、动态分配或地址生命周期破坏了 graph 假设。
+    source_refs:
+    - title: ArgMetadata data_ptr
+      repo_path: github_repo/Megatron-LM/megatron/core/transformer/cuda_graphs.py
+      lines:
+      - 138
+      - 148
+      note: |
+        L138-L148: Megatron metadata 保存 tensor shape、dtype、device 和 data_ptr。
+    - title: Buffer metadata
+      repo_path: github_repo/Megatron-LM/megatron/core/transformer/cuda_graphs.py
+      lines:
+      - 118
+      - 130
+      note: |
+        L118-L130: cudagraph metadata 记录输入输出和 buffer reuse 计数。
+    - title: Decode-only option
+      repo_path: github_repo/Megatron-LM/megatron/training/arguments.py
+      lines:
+      - 1937
+      - 1939
+      note: |
+        L1937-L1939: Megatron 提供只对 decode step 使用 CUDA Graph 的配置。
+    common_confusions:
+    - CUDA Graph 会加速大 GEMM 本身；它主要减少 launch 提交开销。
+    - 新分配同 shape tensor 可以安全 replay；地址可能已经不同。
+    - prefill 和 decode 的 graph 命中率相同；prefill shape 更动态。
+    checkpoint_questions:
+    - decode 为什么更容易受 launch overhead 影响？
+    - static input buffer 在 replay 前做什么？
+    - 为什么生产系统常提供 decode-only graph 选项？
+  - title: GraphCache 的实现合同
+    plain_explanation: |
+      `GraphCache` 的 `_shape_key` 对 tensor 记录 shape 和 dtype，对 scalar 记录类型和值。`capture_or_replay` 把 args 和排序后的 kwargs 组成 key。key miss 时保存函数、增加 capture_count 并执行函数；key hit 时增加 replay_count，调用首次保存的函数。
+
+      key 设计有取舍：太粗会错误复用，太细会频繁 miss。当前 patch 把 shape、dtype 和 scalar 值放进 key，是为了让测试能覆盖不同 shape 和 replay 语义。
+    mental_model: |
+      每种输入画像对应一份剧本。画像第一次出现就登记，之后同画像请求只重放登记过的剧本。
+    why_it_matters: |
+      真实 graph cache 的稳定性首先取决于 key。错用 graph 比 miss 更危险，因为它可能读写错误 buffer。
+    source_refs:
+    - title: shape key
+      repo_path: labs/l30.5_cuda_graph_savor/patch/starter/cuda_graph_cache.py
+      lines:
+      - 32
+      - 36
+      note: |
+        L32-L36: `_shape_key` 区分 tensor 和 scalar 的 key 组成。
+    - title: Reference replay
+      repo_path: labs/l30.5_cuda_graph_savor/patch/reference/cuda_graph_cache.py
+      lines:
+      - 22
+      - 31
+      note: |
+        L22-L31: reference 展示 key miss capture 与 key hit replay。
+    - title: Shape test
+      repo_path: labs/l30.5_cuda_graph_savor/patch/tests/test_patch.py
+      lines:
+      - 43
+      - 52
+      note: |
+        L43-L52: 不同 shape 触发新 capture，同 shape 再次 replay。
+    common_confusions:
+    - 命中 cache 后调用本次传入的新函数；本讲应调用缓存函数。
+    - kwargs 不排序；同一语义的调用可能生成不同 key。
+    - 只统计 capture，不统计 replay；排查需要两者同时记录。
+    checkpoint_questions:
+    - key 里为什么要包含 dtype？
+    - kwargs 为什么要排序？
+    - replay 时应调用哪个函数引用？
+  - title: MemorySavor 的实现合同
+    plain_explanation: |
+      `MemorySavor.pause` 生成 handle，把 tensor 的 shape、dtype 和 CPU clone 存到 `_paused`。`resume` 用 handle 弹出 metadata 并返回 clone。`total_paused_bytes` 统计池内所有数据的 `numel * element_size`。`is_paused` 判断 handle 是否还在池中。
+
+      resume 后 handle 必须消失，因为它表示一次暂停资源已被消费。若 resume 后 handle 仍存在，bytes 统计和资源状态都会失真。
+    mental_model: |
+      pause 是入库登记，resume 是按单号出库并注销。库存 bytes 必须随入库出库变化。
+    why_it_matters: |
+      co-locate 排查不能只知道“省显存”。还要知道哪些资源已 pause、占多少 bytes、何时 resume、是否重复 resume。
+    source_refs:
+    - title: Reference pause
+      repo_path: labs/l30.5_cuda_graph_savor/patch/reference/cuda_graph_cache.py
+      lines:
+      - 39
+      - 47
+      note: |
+        L39-L47: pause 保存 handle、shape、dtype 和 data clone。
+    - title: Reference resume
+      repo_path: labs/l30.5_cuda_graph_savor/patch/reference/cuda_graph_cache.py
+      lines:
+      - 49
+      - 57
+      note: |
+        L49-L57: resume pop handle，并用池内数据统计 bytes。
+    - title: Bytes test
+      repo_path: labs/l30.5_cuda_graph_savor/patch/tests/test_patch.py
+      lines:
+      - 86
+      - 93
+      note: |
+        L86-L93: 两个 float32 tensor 的 paused bytes 应为 4096+2048。
+    - title: Remove handle test
+      repo_path: labs/l30.5_cuda_graph_savor/patch/tests/test_patch.py
+      lines:
+      - 96
+      - 104
+      note: |
+        L96-L104: resume 后 handle 不再 paused，bytes 归零。
+    common_confusions:
+    - 把 `total_paused_bytes` 当真实释放的 GPU 显存；CPU patch 只统计池内数据规模。
+    - resume 后保留 handle；正确语义是消费并移除。
+    - 忽略 dtype 对 bytes 的影响。
+    checkpoint_questions:
+    - pause 需要保存哪些 metadata？
+    - resume 为什么使用 `pop`？
+    - bytes 统计如何从 tensor 数据计算？
+  - title: co-locate 切换与生产配置
+    plain_explanation: |
+      co-locate 常见顺序是 rollout 完成后 pause rollout 显存，training 阶段使用释放出的显存，训练结束后先 offload training 状态，再 resume rollout。顺序错误会让两套大对象在同一时刻重叠。
+
+      生产配置会把这些边界显式化。Megatron 参数里有动态推理 CUDA Graph 数量、decode-only graph、RL KV cache persist/offload/recompute，以及 inference engine suspend 时是否保留 CUDA Graph。
+    mental_model: |
+      co-locate 是同一块场地分时复用。pause 清场，train 使用场地，offload 后再 resume 原来的布置。
+    why_it_matters: |
+      OOM 常出现在阶段切换点。没有阶段化 memory snapshot 和 graph 状态，很难判断是 cache miss、graph 重建还是显存重叠。
+    source_refs:
+    - title: Graph count args
+      repo_path: github_repo/Megatron-LM/megatron/training/arguments.py
+      lines:
+      - 1918
+      - 1926
+      note: |
+        L1918-L1926: 动态推理可配置要 capture 的 CUDA Graph 数量。
+    - title: RL suspend args
+      repo_path: github_repo/Megatron-LM/megatron/training/arguments.py
+      lines:
+      - 2418
+      - 2426
+      note: |
+        L2418-L2426: RL KV cache 管理和 suspend 时是否保留 CUDA Graph 是配置项。
+    - title: Memory snapshot
+      repo_path: github_repo/slime/slime/utils/memory_utils.py
+      lines:
+      - 19
+      - 29
+      note: |
+        L19-L29: memory utility 读取 total/free/allocated/reserved 显存指标。
+    common_confusions:
+    - co-locate 等于训练和推理同时跑；本讲讨论阶段化复用。
+    - suspend inference 时一定保留 graph；生产配置可能选择删除并重建。
+    - 只记录最终 OOM，不记录每个阶段的 memory snapshot。
+    checkpoint_questions:
+    - co-locate 阶段切换的安全顺序是什么？
+    - decode-only graph 解决什么问题？
+    - 为什么 `allocated` 和 `reserved` 都要记录？
+  - title: 验收和报告边界
+    plain_explanation: |
+      本讲 8 个 pytest 足以验证 CPU 行为合同，但不能证明真实 CUDA Graph 速度或 VMM 语义。报告要分清 CPU 已验证和 GPU 待验证：CPU 写 capture/replay 计数、paused bytes 和测试结果；GPU 写 static buffer `data_ptr()`、eager/replay latency、graph bucket 命中率和显存高水位。
+
+      若要在真实 GPU 上继续验证，至少要确认 replay 前后 input/output buffer 地址不变，graph replay latency 低于 eager，对不同 batch bucket 的 capture 数量和 memory pool 高水位有记录。
+    mental_model: |
+      CPU patch 是结构验收，GPU 实验是性能和地址验收。两类证据都需要，不能互相替代。
+    why_it_matters: |
+      把结构测试当性能结论会误导系统设计；跳过结构测试直接上 GPU，又会把基础状态机 bug 淹没在复杂环境里。
+    source_refs:
+    - title: Eager equality test
+      repo_path: labs/l30.5_cuda_graph_savor/patch/tests/test_patch.py
+      lines:
+      - 55
+      - 65
+      note: |
+        L55-L65: capture 和 replay 输出都必须与 eager 函数一致。
+    - title: Tensor pool owns
+      repo_path: github_repo/Megatron-LM/megatron/core/transformer/cuda_graphs.py
+      lines:
+      - 184
+      - 190
+      note: |
+        L184-L190: reuse pool 通过 data_ptr 判断 tensor 是否属于自己。
+    - title: Pool get
+      repo_path: github_repo/Megatron-LM/megatron/core/transformer/cuda_graphs.py
+      lines:
+      - 193
+      - 201
+      note: |
+        L193-L201: pool 按 shape/dtype/device 复用 buffer 或新建 buffer。
+    - title: Memory log
+      repo_path: github_repo/slime/slime/utils/memory_utils.py
+      lines:
+      - 41
+      - 49
+      note: |
+        L41-L49: `print_memory` 按 rank 写 memory snapshot。
+    common_confusions:
+    - patch 通过就写 CUDA Graph 已加速。
+    - 只看 replay_count，不看地址和 timing。
+    - 只记录一次显存，不记录阶段切换前后。
+    checkpoint_questions:
+    - 8 个 pytest 分别覆盖哪些合同？
+    - GPU 验证至少要记录哪些地址和 timing？
+    - 报告怎样区分 CPU 已验证与 GPU 待验证？

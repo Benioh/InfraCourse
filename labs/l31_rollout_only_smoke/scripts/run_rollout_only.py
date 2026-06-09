@@ -133,7 +133,7 @@ def main() -> None:
 只验证 rollout prompt/response/latency/schema；本关不接 Megatron actor、Ray 训练循环或 weight sync。
 
 ## 2. 源码调用链
-`make smoke` → `scripts/run_rollout_only.py` → `artifacts/rollouts.jsonl` → `metrics.jsonl` → `report.md`。
+`python labs/l31_rollout_only_smoke/scripts/run_rollout_only.py` → `artifacts/rollouts.jsonl` → `metrics.jsonl` → `report.md`。
 
 ## 3. 实验矩阵
 | run_id | 只改变的变量 | 关键指标 | 结论 |

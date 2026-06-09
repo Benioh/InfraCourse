@@ -1,4 +1,4 @@
-"""L05 Patch tests · 2-rank gloo CPU."""
+"""L12 Patch tests · 2-rank gloo CPU."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 
 from .conftest import parallel_run
 
-WORLD_SIZE = int(os.environ.get("L05_WORLD_SIZE", "2"))
+WORLD_SIZE = int(os.environ.get("L12_WORLD_SIZE", "2"))
 
 
 def test_grads_match_pytorch_ddp():

@@ -8,13 +8,13 @@ from mini_infra.observability.evidence import scan
 from mini_infra.observability.io import ROOT, write_json, write_text
 
 
-REQUIRED_HALF_MISSIONS = [
-    "l01_7_gpu_kernel",
-    "l04_5_long_context_cp",
-    "l05_5_moe_ep",
-    "l06_3_data_engineering",
-    "l08_5_quant_serving",
-    "l08_7_spec_decode",
+REQUIRED_CAPSTONE_MISSIONS = [
+    "l04_gpu_kernel",
+    "l09_long_context_cp",
+    "l13_moe_ep",
+    "l18_data_engineering",
+    "l23_quant_serving",
+    "l24_spec_decode",
 ]
 
 
@@ -32,14 +32,14 @@ def build_delivery(source: Path, output: Path) -> dict[str, int]:
         lines.append(
             f"| `{row['run_dir']}` | {row['metric_count']} | {row['has_report']} | {row['artifact_count']} |"
         )
-    lines.extend(["", "## Required Half Missions", ""])
+    lines.extend(["", "## Required Capstone Missions", ""])
     present = {
         row["run_dir"].split("/")[1]
         if row["run_dir"].startswith("runs/") and len(row["run_dir"].split("/")) > 2
         else row["run_dir"]
         for row in rows
     }
-    for mission in REQUIRED_HALF_MISSIONS:
+    for mission in REQUIRED_CAPSTONE_MISSIONS:
         status = "present" if mission in present else "missing"
         lines.append(f"- `{mission}`: {status}")
     write_text(output / "final_readme.md", "\n".join(lines) + "\n")
@@ -48,7 +48,7 @@ def build_delivery(source: Path, output: Path) -> dict[str, int]:
         "# MiniInfra Risk Register\n\n"
         "- 缺 command/config/report 的 run 不能作为交付证据。\n"
         "- simulated backend 不能作为真实性能结论。\n"
-        "- L12 evidence index 必须检查 L01.7/L04.5/L05.5/L06.3/L08.5/L08.7 六个新增半关是否 present。\n",
+        "- final evidence index 必须检查 required capstone missions 是否 present。\n",
     )
     return {"run_count": len(rows), "artifact_count": len(list(output.rglob("*")))}
 

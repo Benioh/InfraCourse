@@ -1,4 +1,4 @@
-"""Reference solution for L02.5 Patch · Memory Snapshot."""
+"""Reference solution for L03 Patch · Memory Snapshot."""
 
 from __future__ import annotations
 

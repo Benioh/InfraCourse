@@ -1,0 +1,218 @@
+mission: l01.5_gpu_execution_model
+title: L01.5 Quiz · GPU 执行模型与硬件基础
+pass_threshold: 1.0
+description: |
+  这 6 题验证你对 GPU 执行模型的核心理解：dispatch 异步性、硬件层级、内存带宽、
+  Tensor Core 和 Stream。如果答不对，说明你后面看 profiler 和写 kernel 时会缺少
+  正确的心智模型。先回去读 lecture.md。
+
+prereq_checklist:
+  - title: 读系统地图：确认 L01.5 在课程中的位置
+    kind: doc
+    path: labs/l01.5_gpu_execution_model/system_map.md
+    href: "#lesson"
+    estimate_min: 5
+  - title: 读主讲义：从 dispatch 链路讲到 GPU 硬件层级
+    kind: doc
+    path: labs/l01.5_gpu_execution_model/lecture.md
+    href: "#lesson"
+    estimate_min: 45
+  - title: 读源码带读：CUDA stream 与 sync 实验
+    kind: doc
+    path: labs/l01.5_gpu_execution_model/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 20
+  - title: 读 patch/task.md
+    kind: task
+    path: labs/l01.5_gpu_execution_model/patch/task.md
+    href: "#patch"
+    estimate_min: 5
+
+questions:
+  - id: q1_async_execution
+    prompt: |
+      下面代码测量的时间代表什么？
+      ```python
+      start = time.time()
+      C = torch.matmul(A, B)  # A, B 在 GPU 上
+      elapsed = time.time() - start
+      ```
+    options:
+      - id: a
+        text: GPU 执行 matmul 的完整时间
+      - id: b
+        text: CPU 端 dispatch + kernel launch 的时间，GPU 可能还没算完
+        correct: true
+      - id: c
+        text: CPU 到 GPU 的数据传输时间
+      - id: d
+        text: 代码有 bug，time.time() 不能用于 GPU 计算
+    explanation: |
+      GPU 执行是异步的。`torch.matmul(A, B)` 在 CPU 侧只做了 dispatch 和 kernel
+      launch（把 kernel 提交到 GPU 命令队列），然后 CPU 立即继续执行下一行。
+
+      要测 GPU 真实执行时间，必须：
+      ```python
+      torch.cuda.synchronize()  # 等 GPU 完成所有已提交 kernel
+      start = time.time()
+      C = torch.matmul(A, B)
+      torch.cuda.synchronize()  # 等这个 matmul 完成
+      elapsed = time.time() - start
+      ```
+
+      或者更精确地用 CUDA Event：
+      ```python
+      start_event = torch.cuda.Event(enable_timing=True)
+      end_event = torch.cuda.Event(enable_timing=True)
+      start_event.record()
+      C = torch.matmul(A, B)
+      end_event.record()
+      torch.cuda.synchronize()
+      elapsed_ms = start_event.elapsed_time(end_event)
+      ```
+
+  - id: q2_warp_size
+    prompt: |
+      NVIDIA GPU 中，一个 Warp 包含多少个 Thread？这个数字是可以配置的吗？
+    options:
+      - id: a
+        text: 32 个 Thread，硬件固定不可配置
+        correct: true
+      - id: b
+        text: 64 个 Thread，硬件固定不可配置
+      - id: c
+        text: 32 个 Thread，可以通过 launch 参数改成 16 或 64
+      - id: d
+        text: 取决于 Block Size，Block Size / SM 数量 = Warp Size
+    explanation: |
+      Warp 是 NVIDIA GPU 的 SIMT 执行单位，硬件固定为 32 个 thread。
+      同一个 warp 内的 32 个 thread 在同一时钟周期执行相同的指令（但操作不同数据）。
+
+      这是 GPU 编程中很多"魔法数字"的来源：
+      - Block size 通常是 32 的倍数（避免浪费 warp 中的 thread）
+      - 内存访问要求 coalesced（连续地址），因为同一 warp 的 thread 同时访问内存
+      - 分支（if/else）在 warp 内导致"warp divergence"——两个分支都要执行
+
+      Triton 的 BLOCK_SIZE 也必须是 2 的幂且 ≥ 32，背后就是这个约束。
+
+  - id: q3_memory_hierarchy
+    prompt: |
+      H100 GPU 上，以下内存层级的带宽从高到低排列正确的是？
+    options:
+      - id: a
+        text: Register > Shared Memory > L2 Cache > HBM
+        correct: true
+      - id: b
+        text: HBM > L2 Cache > Shared Memory > Register
+      - id: c
+        text: Shared Memory > Register > HBM > L2 Cache
+      - id: d
+        text: HBM > Shared Memory > L2 Cache > Register
+    explanation: |
+      GPU 内存层级（从快到慢、从小到大）：
+
+      | 层级 | 带宽（等效） | 容量 | 作用域 |
+      |---|---|---|---|
+      | Register | ~20 TB/s | ~256KB/SM | per-thread |
+      | Shared Memory / L1 | ~100 TB/s | 164-228KB/SM | per-block (SM 内) |
+      | L2 Cache | ~12 TB/s | 50MB | 全局 |
+      | HBM (Global Memory) | 3.35 TB/s | 80GB | 全局 |
+
+      FlashAttention 的核心思想就是：把 attention 中间结果（QK^T 矩阵）保持在
+      Shared Memory（SRAM）中，避免写回 HBM 再读回来。HBM 带宽只有 SRAM 的 1/30，
+      这就是为什么 naive attention 是 memory bound 而 FlashAttention 快 2-4 倍。
+
+  - id: q4_tensor_core
+    prompt: |
+      关于 Tensor Core，下面哪个说法是**正确**的？
+    options:
+      - id: a
+        text: Tensor Core 可以加速任何 FP32 矩阵乘法
+      - id: b
+        text: Tensor Core 只能做矩阵乘法，且要求输入是 FP16/BF16/TF32/FP8 等低精度格式
+        correct: true
+      - id: c
+        text: Tensor Core 和 CUDA Core 是一回事，只是营销名字不同
+      - id: d
+        text: 使用 Tensor Core 需要手写 CUDA 代码，PyTorch 无法自动使用
+    explanation: |
+      Tensor Core 是独立于 CUDA Core 的专用硬件单元，专门做小矩阵乘加（MMA）：
+      D = A × B + C，其中 A、B 是 FP16/BF16/TF32/FP8/INT8 等格式。
+
+      H100 上的性能对比：
+      - FP32 CUDA Core: 67 TFLOPS
+      - TF32 Tensor Core: 989 TFLOPS (14.7×)
+      - FP16/BF16 Tensor Core: 1979 TFLOPS (29.5×)
+      - FP8 Tensor Core: 3958 TFLOPS (59×)
+
+      PyTorch 自动使用 Tensor Core 的条件：
+      1. `torch.matmul` 的输入是 FP16 或 BF16
+      2. 或者在 `torch.cuda.amp.autocast()` 下，matmul 自动转为 TF32/FP16
+      3. 矩阵维度建议是 8 或 16 的倍数（否则需要 padding，有一定开销）
+
+      这就是为什么混合精度训练（AMP）能让训练快 2-3×——不仅是省显存，
+      更是因为 Tensor Core 的算力远超 FP32 CUDA Core。
+
+  - id: q5_compute_vs_memory_bound
+    prompt: |
+      以下哪个 op 最可能是 **memory bound**？
+    options:
+      - id: a
+        text: 大矩阵乘法 torch.matmul(A, B)，A 和 B 都是 4096×4096
+      - id: b
+        text: Element-wise 操作 C = A + B，A 和 B 都是 4096×4096
+        correct: true
+      - id: c
+        text: 批量矩阵乘法 torch.bmm(A, B)，batch=64, size=2048×2048
+      - id: d
+        text: 卷积 torch.nn.Conv2d(512, 512, 3)(input)，input 很大
+    explanation: |
+      判断 compute bound vs memory bound 的关键是 **Arithmetic Intensity**
+      （计算密度 = FLOPs / Bytes）。
+
+      Element-wise add `C = A + B`：
+      - 计算：每个元素 1 次加法 → N 个 FLOPs
+      - 内存：读 A (N×4B) + 读 B (N×4B) + 写 C (N×4B) → 12N Bytes
+      - Arithmetic Intensity = N / 12N ≈ 0.08 FLOPs/Byte
+      - 远低于 ridge point（~295 FLOPs/Byte on H100）→ **Memory bound**
+
+      MatMul `C = A × B`（4096×4096）：
+      - 计算：2×4096³ ≈ 137B FLOPs
+      - 内存：3×4096²×4B ≈ 201MB
+      - Arithmetic Intensity ≈ 682 FLOPs/Byte
+      - 高于 ridge point → **Compute bound**
+
+      这就是为什么 LayerNorm、ReLU、Softmax 这些 element-wise 操作
+      适合做 kernel fusion——它们单独跑时大部分时间在等 HBM 读写，
+      fusion 后可以共享数据在 register/shared memory 中。
+
+  - id: q6_cuda_stream
+    prompt: |
+      关于 CUDA Stream，以下哪个说法是**错误**的？
+    options:
+      - id: a
+        text: 同一 Stream 内的 kernel 按提交顺序执行
+      - id: b
+        text: 不同 Stream 上的 kernel 可以并发执行
+      - id: c
+        text: 不同 Stream 上的 kernel 一定会并发执行
+        correct: true
+      - id: d
+        text: DDP 的 gradient all-reduce 利用了 Stream 并发来实现计算与通信 overlap
+    explanation: |
+      Stream 提供的是**并发的可能性**，不是保证。
+
+      不同 stream 上的 kernel 可能并发，但也可能不并发：
+      - 如果 GPU 的 SM 资源已经被一个 kernel 占满，另一个 stream 的 kernel 要等
+      - 如果两个 kernel 都需要大量 shared memory，SM 可能放不下两个 block
+      - 硬件调度器决定实际并行度
+
+      正确理解：
+      - 同一 stream：保证顺序（强约束）
+      - 不同 stream：允许并发（如果硬件有余量）
+
+      工程中利用 stream 并发的典型场景：
+      1. DDP backward 时：compute stream 做当前层的 grad 计算，
+         comm stream 同时做上一层的 all-reduce
+      2. Data pipeline：copy stream 做 H2D 传输，compute stream 做当前 batch 的前向
+      3. Serving：不同 request 放在不同 stream 上

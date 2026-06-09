@@ -1,49 +1,559 @@
 id: l29_verl_rl_baseline
-title: Adaptive KL Controller (PPO)
-level: L10
+title: L31 · verl / SLiME RL Baseline：Adaptive KL Controller
+level: L31
 act: 第 4 章：RL 与对齐
-role: RL 学徒
+role: RL 系统学徒
 priority: 核心
-estimated_minutes: 60
+estimated_minutes: 80
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - verl / TRL (对照)
+  - verl / SLiME 对照
 
 patch:
   description: |
     实现 InstructGPT App C 风格的 adaptive KL coefficient controller：
-    根据 current_kl / target_kl 的偏差自动调节 KL penalty 系数，clip 到
-    ±0.2 防止单步剧变。
+    根据 current_kl / target_kl 的偏差调节 KL penalty 系数，并把 proportional
+    error 限制在 [-0.2, 0.2]。
   task_md: labs/l29_verl_rl_baseline/patch/task.md
   starter_file: labs/l29_verl_rl_baseline/patch/starter/kl_controller.py
   reference_file: labs/l29_verl_rl_baseline/patch/reference/kl_controller.py
-  test_command: make patch-test M=l29_verl_rl_baseline
+  test_command: IMPL=reference make patch-test M=l29_verl_rl_baseline
   status_file: labs/l29_verl_rl_baseline/patch/.last_run.json
   test_count: 5
-  test_kind: 行为契约 + 数值校验
+  test_kind: 行为契约 + 数值边界
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l29_verl_rl_baseline/system_map.md
+    description: 本讲在 RLHF / rollout systems 主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l29_verl_rl_baseline/lecture.md
+    description: 从 KL penalty、ratio clip、controller 公式讲到 reward smoke 和生产排查。
+  - title: 源码带读讲义
+    path: labs/l29_verl_rl_baseline/source_walkthrough.md
+    description: 按 patch controller、reward parser、run lab 和 SLiME 主路径组织的源码阅读路线。
 
 source_reading:
-  - title: verl PPO core_algos
-    repo_path: github_repo/verl/
-  - title: InstructGPT paper App C
-    repo_path: docs/术语表.md
+  - title: Patch starter：控制器骨架
+    repo_path: labs/l29_verl_rl_baseline/patch/starter/kl_controller.py
+    focus: 公式注释、初始化状态、更新方法和读取方法
+    highlights:
+      - title: Controller 公式注释
+        lines: [16, 22]
+        note: |
+          L16-L22: docstring 给出 proportional error、clip 和乘法更新公式。
+      - title: 初始化 TODO
+        lines: [24, 29]
+        note: |
+          L24-L29: `__init__` 需要保存当前系数、目标 KL 和 horizon。
+      - title: update / get_coef TODO
+        lines: [31, 41]
+        note: |
+          L31-L41: `update` 改变状态，`get_coef` 只读取最新系数。
+
+  - title: Patch reference：最小参考实现
+    repo_path: labs/l29_verl_rl_baseline/patch/reference/kl_controller.py
+    focus: 公式如何落成状态机
+    highlights:
+      - title: 保存状态
+        lines: [6, 9]
+        note: |
+          L6-L9: `self.value` 和 `self.target_kl` 是控制器的主要数值状态。
+      - title: 乘法更新
+        lines: [12, 18]
+        note: |
+          L12-L18: 先算相对误差，再限幅，最后按 `n_steps / horizon` 缩放后更新系数。
+
+  - title: Patch tests：数值合同
+    repo_path: labs/l29_verl_rl_baseline/patch/tests/test_patch.py
+    focus: 初始、增大、减小、不变和 clip 边界
+    highlights:
+      - title: 选择实现
+        lines: [16, 18]
+        note: |
+          L16-L18: `IMPL` 环境变量允许在 starter 和 reference 之间切换。
+      - title: 初始系数
+        lines: [21, 24]
+        note: |
+          L21-L24: 初始系数必须等于 `init_kl_coef`。
+      - title: 增大与减小方向
+        lines: [27, 38]
+        note: |
+          L27-L31: KL 高于目标时增大惩罚。
+          L34-L38: KL 低于目标时减小惩罚。
+      - title: 稳定点
+        lines: [41, 45]
+        note: |
+          L41-L45: KL 等于目标时不改变系数。
+      - title: 极端 KL clip
+        lines: [48, 59]
+        note: |
+          L48-L59: 极端 KL 经过 clip 后，`horizon=10` 时只增长 2%。
+
+  - title: Toy GSM8K 数据
+    repo_path: labs/l29_verl_rl_baseline/scripts/download_gsm8k.py
+    focus: 本地 smoke 的离线数据入口
+    highlights:
+      - title: 写入 toy 数据
+        lines: [5, 17]
+        note: |
+          L5-L17: 写入四条 toy GSM8K 样本，避免本地 smoke 依赖网络下载。
+
+  - title: Prompt 构造
+    repo_path: labs/l29_verl_rl_baseline/scripts/prepare_gsm8k_prompts.py
+    focus: 从问题样本生成 prompt / target JSONL
+    highlights:
+      - title: 读取样本
+        lines: [5, 16]
+        note: |
+          L5-L16: 从 `train.jsonl` 读取题目，并把 answer 保留为 target。
+      - title: 写 prompts
+        lines: [17, 20]
+        note: |
+          L17-L20: 输出 prompt/target JSONL，供 reward parser 和后续 rollout 使用。
+
+  - title: Reward parser
+    repo_path: labs/l29_verl_rl_baseline/scripts/reward_math.py
+    focus: 最终数字提取、奖励计算和 self-test
+    highlights:
+      - title: 提取最终数字
+        lines: [23, 30]
+        note: |
+          L23-L30: 优先匹配 `####`、final answer 和中文答案标记，失败时退回最后一个数字。
+      - title: 计算 reward
+        lines: [33, 38]
+        note: |
+          L33-L38: prediction 或 target 缺数字时返回 0，否则按数值相等给奖励。
+      - title: 解释 reward 输入
+        lines: [41, 48]
+        note: |
+          L41-L48: 记录提取出的 prediction 和 target 数字。
+      - title: 解释失败原因
+        lines: [49, 56]
+        note: |
+          L49-L56: 失败时区分 `missing_number` 和 `answer_mismatch`。
+      - title: self-test cases
+        lines: [59, 66]
+        note: |
+          L59-L66: 覆盖正确答案、错误答案、逗号数字和缺失答案。
+      - title: self-test 汇总
+        lines: [76, 88]
+        note: |
+          L76-L88: 逐条运行 reward，并把 observed、expected、passed 和解释信息写入结果。
+
+  - title: Run lab smoke
+    repo_path: labs/l29_verl_rl_baseline/scripts/run_verl_lab.py
+    focus: run 目录、reward self-test、metrics 和 report
+    highlights:
+      - title: 参数和 run_dir
+        lines: [31, 40]
+        note: |
+          L31-L40: 读取 run 参数、配置和 run 目录。
+      - title: 配置快照
+        lines: [41, 44]
+        note: |
+          L41-L44: 写入解析后的配置，固定复盘现场。
+      - title: 数据和 reward artifact
+        lines: [45, 55]
+        note: |
+          L45-L55: 生成 toy 数据、prompt，并把 reward self-test 写入 artifact。
+      - title: metrics 元数据
+        lines: [56, 64]
+        note: |
+          L56-L64: 每步写入时间戳、step 和 RL 指标类型。
+      - title: metrics 数值
+        lines: [65, 74]
+        note: |
+          L65-L74: 记录 reward、KL、entropy、长度、rollout/update 时间和吞吐。
+      - title: 日志和报告标题
+        lines: [75, 82]
+        note: |
+          L75-L82: 写 `rl.log` 和报告标题。
+      - title: 报告配置
+        lines: [83, 88]
+        note: |
+          L83-L88: 报告记录目标、verl 可用性和关键配置。
+      - title: 报告结果
+        lines: [97, 99]
+        note: |
+          L97-L99: 报告记录 reward self-test 状态和最终 reward。
+
+  - title: SLiME PPO utils
+    repo_path: github_repo/slime/slime/utils/ppo_utils.py
+    focus: KL estimator、ratio clip 和 KL penalty 进入 returns/advantages 的位置
+    highlights:
+      - title: KL estimator 输入
+        lines: [12, 17]
+        note: |
+          L12-L17: `compute_approx_kl` 接收当前 logprob、base logprob 和 estimator 类型。
+      - title: KL estimator 分支
+        lines: [28, 39]
+        note: |
+          L28-L39: k1、k2、k3 和 low_var_kl 分支决定如何把 log ratio 变成 KL 观测。
+      - title: estimator 边界
+        lines: [40, 51]
+        note: |
+          L40-L51: 未知 estimator 报错，low_var_kl 会额外 clamp。
+      - title: PPO ratio clip
+        lines: [124, 136]
+        note: |
+          L124-L136: `ratio` 和 `eps_clip` 构造 PPO policy loss 的局部约束。
+      - title: dual clip 分支
+        lines: [137, 148]
+        note: |
+          L137-L148: dual clip 只在负 advantage 分支改变 policy loss。
+      - title: returns 接收 kl_coef
+        lines: [217, 229]
+        note: |
+          L217-L229: `kl_coef` 作为 returns 计算的输入。
+      - title: returns 中的 KL penalty
+        lines: [253, 258]
+        note: |
+          L253-L258: per-token KL 乘以 `-kl_coef` 后进入 token-level reward。
+      - title: advantages 接收 kl_coef
+        lines: [281, 286]
+        note: |
+          L281-L286: baseline advantage 函数接收 `kl_coef`。
+      - title: advantages 中的 KL penalty
+        lines: [302, 308]
+        note: |
+          L302-L308: reward 减去 `kl_coef * kl_tensor` 后得到 unwhitened advantages。
+
+  - title: SLiME async train
+    repo_path: github_repo/slime/train_async.py
+    focus: rollout、actor/critic train 和 weight sync 主循环
+    highlights:
+      - title: 创建 rollout manager
+        lines: [11, 23]
+        note: |
+          L11-L19: 配置日志、placement group，并创建 rollout manager。
+          L21-L23: rollout server 的 metrics endpoint 接入 tracking。
+      - title: 创建训练模型
+        lines: [25, 29]
+        note: |
+          L25-L29: 创建 actor/critic，并在开始训练前把 actor 权重推给 rollout。
+      - title: async rollout
+        lines: [34, 43]
+        note: |
+          L34-L43: 当前 rollout 取回后，下一轮 generation 提前启动。
+      - title: actor / critic update
+        lines: [45, 53]
+        note: |
+          L45-L53: critic 和 actor 的异步训练根据配置交替执行。
+      - title: weight sync
+        lines: [69, 79]
+        note: |
+          L69-L79: 按 interval 同步 rollout 权重、运行 eval，并在结束时清理资源。
+
+  - title: SLiME PPO arguments
+    repo_path: github_repo/slime/slime/utils/arguments.py
+    focus: PPO clip、KL reward shaping、KL loss 和 advantage 配置
+    highlights:
+      - title: ratio clip 参数
+        lines: [765, 773]
+        note: |
+          L765-L773: `eps_clip`、`eps_clip_high` 和 dual clip 参数控制 PPO ratio clip。
+      - title: reward shaping KL
+        lines: [775, 779]
+        note: |
+          L775-L779: `kl_coef` 作用在 advantage 计算前的 reward shaping。
+      - title: KL estimator 类型
+        lines: [800, 805]
+        note: |
+          L800-L805: `kl_loss_type` 选择 k1、k2、k3 或 low_var_kl。
+      - title: loss KL 参数
+        lines: [846, 853]
+        note: |
+          L846-L853: `use_kl_loss` 和 `kl_loss_coef` 控制是否把 KL 加进最终 PPO loss。
+      - title: reference 和 advantage
+        lines: [861, 869]
+        note: |
+          L861-L869: reference 更新、entropy、gamma/lambda 和 advantage normalization 都会影响曲线解释。
 
 mini_infra_targets:
   - mini_infra/rl/
-
 notebooks:
   - notebooks/n10_rl_kl_reward.ipynb
-
 tickets:
   - verl_kl_explosion_002
   - verl_reward_parse_001
   - verl_rollout_slow_003
-
-prereq: l27_sglang_pd_cache
-next_lab: l31_rollout_only_smoke
-
+prereq: l28.5_multiturn_chat_mask
+next_lab: l29.5_train_infer_mismatch
 gpu_modes:
   local: CPU OK
   cluster: 完整 RL 训练验证（可选）
+
+lesson:
+  opening: |
+    L31 讲 Adaptive KL Controller。RLHF/PPO 训练不能只看 reward：policy 偏离 reference 太远时，reward 可能上升，但输出会重复、格式投机或利用 reward parser 漏洞。本讲把 KL coefficient controller 单独拆出来，先写清公式和状态机，再用 toy GSM8K reward smoke 检查数据、奖励和指标闭环，最后对照 SLiME 源码理解真实 RL infra 的完整路径。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        KL controller 位于 KL estimate 和 actor loss 之间。它不生成 token，不计算 reward，也不做 optimizer step。它接收 `current_kl`，把它和 `target_kl` 比较，然后输出新的 KL penalty 系数。
+
+        这个位置决定了排障顺序。KL 异常时，先确认 reference logprob、KL estimator 和 mask 没错，再看 controller。reward 异常时，先确认 reward parser 自测通过。rollout 慢时，先拆 `rollout_time_sec` 和 `update_time_sec`。
+      mental_model: |
+        把 RLHF 更新看成一条信号链：rollout 产生样本，reference 给锚点，reward 给方向，KL controller 调惩罚强度，actor loss 消费这些信号。
+      why_it_matters: |
+        训练曲线混在一起看时，很容易把 reward、KL、rollout 和 optimizer 的问题混成一个故障。先定位 controller 的链路位置，才能缩小排查范围。
+      source_refs:
+        - title: run lab 指标元数据
+          repo_path: labs/l29_verl_rl_baseline/scripts/run_verl_lab.py
+          lines: [56, 64]
+          note: |
+            L56-L64: metrics 每步写入 RL 指标类型和 step。
+        - title: run lab 指标数值
+          repo_path: labs/l29_verl_rl_baseline/scripts/run_verl_lab.py
+          lines: [65, 74]
+          note: |
+            L65-L74: reward、KL、entropy、长度、rollout/update 时间一起落盘。
+      common_confusions:
+        - 只看 reward_mean，忽略 KL、entropy 和长度。
+        - 把 rollout 慢归因到 KL controller。
+        - patch-test 通过后就认为真实 PPO 稳定。
+      checkpoint_questions:
+        - KL controller 在 RLHF 信号链中接收什么、输出什么？
+        - reward 异常时为什么先跑 parser self-test？
+        - rollout 慢时至少要拆哪两个时间指标？
+
+    - title: PPO/RLHF 的约束分工
+      plain_explanation: |
+        policy 是训练对象，reference 是锚点，reward 给方向。PPO ratio clip 限制新旧 policy 的单次更新幅度，KL penalty 限制当前 policy 相对 reference 的漂移。
+
+        这两类约束工作在不同层级。ratio clip 主要处理一次 update 中的 importance ratio；KL penalty 让多轮更新后 policy 仍留在 reference 附近。reward、ratio clip 和 KL penalty 需要一起看，才能判断训练是否健康。
+      mental_model: |
+        reward 是目标方向，ratio clip 是单步限速器，KL penalty 是相对 reference 的拉力。
+      why_it_matters: |
+        如果把 ratio clip 和 KL penalty 混为一个机制，调参时会误判：单步更新过猛、reference 漂移过大、reward parser 错误分别需要不同证据。
+      source_refs:
+        - title: KL estimator
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [12, 17]
+          note: |
+            L12-L17: KL estimator 接收当前 logprob、base logprob 和 estimator 类型。
+        - title: ratio clip
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [124, 136]
+          note: |
+            L124-L136: PPO policy loss 用 ratio 和 clip 限制单次 update。
+      common_confusions:
+        - 认为 ratio clip 已经覆盖 KL penalty。
+        - 把 reference model 当成训练对象。
+        - reward 上升时不检查 KL 和 entropy。
+      checkpoint_questions:
+        - ratio clip 限制哪一类变化？
+        - KL penalty 依赖 reference model 的哪种输出？
+        - reward 上升但 KL 和 entropy 异常时，应该先怀疑哪些入口？
+
+    - title: 控制器公式
+      plain_explanation: |
+        每次 update 先计算 `current_kl / target_kl - 1`。这个相对误差表示当前 KL 比目标高多少或低多少。随后把误差限制在 `[-0.2, 0.2]`，再乘以 `n_steps / horizon`，最后用乘法更新 `kl_coef`。
+
+        `horizon` 是响应速度。horizon 越大，每次变化越小；`n_steps` 表示这次统计覆盖多少训练步。clip 限制的是 proportional error，不能把它理解成 `kl_coef` 的上下界。
+      mental_model: |
+        公式按四步运行：量偏差、限幅、按时间尺度缩放、乘到当前系数上。
+      why_it_matters: |
+        KL 爆炸可能来自 controller 反应太慢、初始系数太低、target 设置不合理，也可能来自 reward outlier 或 reference 错配。理解公式后，学生能用曲线解释配置。
+      source_refs:
+        - title: Starter 公式
+          repo_path: labs/l29_verl_rl_baseline/patch/starter/kl_controller.py
+          lines: [16, 22]
+          note: |
+            L16-L22: starter docstring 写出 proportional error、clip 和乘法更新。
+        - title: Reference update
+          repo_path: labs/l29_verl_rl_baseline/patch/reference/kl_controller.py
+          lines: [12, 18]
+          note: |
+            L12-L18: 参考实现把公式直接落到 `update` 和 `get_coef`。
+      common_confusions:
+        - 用 `current_kl - target_kl` 做绝对误差。
+        - 把 horizon 当成训练总步数。
+        - 把 clip 当作 `kl_coef` 的取值范围。
+      checkpoint_questions:
+        - "`current_kl == target_kl` 时比例误差是多少？"
+        - 极端 KL 为什么不会让系数瞬间翻倍？
+        - horizon 变小会让 controller 反应更快还是更慢？
+
+    - title: Patch 实现路径
+      plain_explanation: |
+        `__init__` 保存 `self.value`、`self.target_kl` 和 `self.horizon`。`update` 读取 `current_kl`，计算相对误差、clip 和乘法更新。`get_coef` 只返回当前状态。
+
+        这段代码短，但状态语义很重要。不要在 update 里重置初值，不要把 `horizon / n_steps` 写反，也不要用加法替代乘法。
+      mental_model: |
+        controller 是一个有记忆的状态机：初始化一次，多次观测 KL，多次微调同一个系数。
+      why_it_matters: |
+        真实框架里 controller 往往藏在配置和训练循环里。写一次最小实现后，学生能把公式错误、KL estimator 错误和 reward 错误分开。
+      source_refs:
+        - title: 初始化状态
+          repo_path: labs/l29_verl_rl_baseline/patch/starter/kl_controller.py
+          lines: [24, 29]
+          note: |
+            L24-L29: `__init__` 的 TODO 对应三个内部状态。
+        - title: update TODO
+          repo_path: labs/l29_verl_rl_baseline/patch/starter/kl_controller.py
+          lines: [31, 41]
+          note: |
+            L31-L41: `update` 负责状态变化，`get_coef` 负责读取。
+        - title: reference 状态机
+          repo_path: labs/l29_verl_rl_baseline/patch/reference/kl_controller.py
+          lines: [6, 18]
+          note: |
+            L6-L9: 参考实现保存当前系数和目标 KL。
+            L12-L18: update 后 `get_coef` 返回最新状态。
+      common_confusions:
+        - 每次 update 后把系数重置成初始值。
+        - 把 error 直接赋给 `kl_coef`。
+        - 忽略 `n_steps` 对调节幅度的影响。
+      checkpoint_questions:
+        - "`__init__`、`update`、`get_coef` 分别承担什么职责？"
+        - 为什么用乘法更新系数？
+        - 如果公式写成 `self.horizon / n_steps`，方向会错在哪里？
+
+    - title: 测试闭环
+      plain_explanation: |
+        patch tests 覆盖初始、增大、减小、不变和 clip 五个合同。最关键的是 clip 测试：`current_kl` 是 target 的 100 倍时，误差先被限制到 0.2；`horizon=10` 时单步只增长 2%。
+
+        这些测试只证明 controller 的局部数学。它们不覆盖真实 rollout、reference forward、KL estimator、advantage normalization 或 optimizer。
+      mental_model: |
+        五个测试把 controller 放进五个固定场景，分别观察它的方向、稳定点和极端输入反应。
+      why_it_matters: |
+        controller bug 往往不会立刻报错，而是在训练曲线上表现为 KL 异常。小测试先锁住公式，后续 debug 才能聚焦其他层。
+      source_refs:
+        - title: 初始系数测试
+          repo_path: labs/l29_verl_rl_baseline/patch/tests/test_patch.py
+          lines: [21, 24]
+          note: |
+            L21-L24: 初始系数测试检查 `get_coef`。
+        - title: 方向测试
+          repo_path: labs/l29_verl_rl_baseline/patch/tests/test_patch.py
+          lines: [27, 38]
+          note: |
+            L27-L38: KL 高低分别触发增罚和减罚。
+        - title: 稳定点测试
+          repo_path: labs/l29_verl_rl_baseline/patch/tests/test_patch.py
+          lines: [41, 45]
+          note: |
+            L41-L45: 目标处不更新。
+        - title: clip 测试
+          repo_path: labs/l29_verl_rl_baseline/patch/tests/test_patch.py
+          lines: [48, 59]
+          note: |
+            L48-L59: 极端 KL 更新后必须精确接近 1.02。
+      common_confusions:
+        - 认为方向对就够了，忽略 exact clip 数值。
+        - 把 patch-test 当成真实 PPO 验证。
+        - 忽略 target 处不变的稳定性合同。
+      checkpoint_questions:
+        - 五个测试分别覆盖什么行为？
+        - 为什么 extreme KL case 的结果是 1.02？
+        - patch-test 通过后，还需要哪些 smoke 证据？
+
+    - title: Reward 和本地 Smoke
+      plain_explanation: |
+        L31 的本地 smoke 先生成 toy GSM8K 数据，再构造 prompt/target JSONL，随后运行 reward parser self-test，并把结果写到 run 目录。`metrics.jsonl` 会记录 reward、KL、entropy、response length、rollout/update time 和吞吐。
+
+        这条链路的目标是固定 debug 证据格式。它能证明数据、reward parser 和指标落盘闭合；真实 PPO 是否稳定，还需要 GPU 环境里的 rollout、reference logprob 和 actor update 证据。
+      mental_model: |
+        CPU smoke 是训练前的体检：先确认评分入口和指标出口，再把问题交给真实训练栈。
+      why_it_matters: |
+        reward parser 错误会污染所有 RL 指标。先做 self-test，可以避免把评分入口错误当成 KL 或 PPO 问题。
+      source_refs:
+        - title: toy 数据
+          repo_path: labs/l29_verl_rl_baseline/scripts/download_gsm8k.py
+          lines: [5, 17]
+          note: |
+            L5-L17: 写入四条离线 GSM8K toy 样本。
+        - title: prompt/target 构造
+          repo_path: labs/l29_verl_rl_baseline/scripts/prepare_gsm8k_prompts.py
+          lines: [5, 16]
+          note: |
+            L5-L16: 读取 toy 数据并构造 prompt/target。
+        - title: prompt/target 写入
+          repo_path: labs/l29_verl_rl_baseline/scripts/prepare_gsm8k_prompts.py
+          lines: [17, 20]
+          note: |
+            L17-L20: 写出 `prompts.jsonl`。
+        - title: reward parser
+          repo_path: labs/l29_verl_rl_baseline/scripts/reward_math.py
+          lines: [23, 30]
+          note: |
+            L23-L30: 提取 prediction 和 target 的最终数字。
+        - title: reward 计算
+          repo_path: labs/l29_verl_rl_baseline/scripts/reward_math.py
+          lines: [33, 38]
+          note: |
+            L33-L38: 按数值相等返回 reward。
+        - title: reward self-test
+          repo_path: labs/l29_verl_rl_baseline/scripts/reward_math.py
+          lines: [76, 88]
+          note: |
+            L76-L88: self-test 记录 observed、expected、passed 和失败解释。
+        - title: smoke run
+          repo_path: labs/l29_verl_rl_baseline/scripts/run_verl_lab.py
+          lines: [45, 55]
+          note: |
+            L45-L55: run lab 生成数据、prompt，并写 reward self-test artifact。
+      common_confusions:
+        - CPU smoke 通过后就认为长训稳定。
+        - reward parser 没自测就开始调 KL。
+        - 只记录 reward，不记录 KL、entropy、长度和时间。
+      checkpoint_questions:
+        - reward self-test 能排除哪类错误？
+        - "`metrics.jsonl` 哪些字段用于判断 KL 和输出质量？"
+        - 本地 smoke 和真实 GPU PPO 验证的边界是什么？
+
+    - title: SLiME 对照和生产排查
+      plain_explanation: |
+        SLiME 的 PPO utils 展示 KL estimator、ratio clip 和 `kl_coef` 进入 returns/advantages 的位置。async train loop 展示 rollout manager、actor/critic 训练、weight sync 和 eval。小 controller 只是这条链路里的一个调节器。
+
+        生产排查按三类问题拆开：KL 爆炸看 reference、tokenizer、mask、KL estimator、controller 和 PPO 参数；reward parse 错误看 parser self-test 和样本；rollout 慢看生成引擎、并发、长度、stop token、prefix cache、tokenizer CPU 和 weight sync。
+      mental_model: |
+        controller 是一个旋钮，完整 RL infra 还包含 rollout、reward、logprob、loss、权重同步和指标系统。
+      why_it_matters: |
+        真实故障通常跨多层。用 SLiME 对照后，学生能把 `kl_coef`、`kl_loss_coef`、`eps_clip`、reference update 和 rollout time 放回同一张系统图。
+      source_refs:
+        - title: returns 接收 kl_coef
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [217, 229]
+          note: |
+            L217-L229: returns 函数接收 `kl_coef`。
+        - title: returns KL penalty
+          repo_path: github_repo/slime/slime/utils/ppo_utils.py
+          lines: [253, 258]
+          note: |
+            L253-L258: per-token KL 乘以负系数后进入 token-level reward。
+        - title: PPO ratio 参数
+          repo_path: github_repo/slime/slime/utils/arguments.py
+          lines: [765, 773]
+          note: |
+            L765-L773: PPO ratio clip 参数控制 update 局部约束。
+        - title: PPO KL 参数
+          repo_path: github_repo/slime/slime/utils/arguments.py
+          lines: [775, 779]
+          note: |
+            L775-L779: `kl_coef` 作用于 reward shaping。
+        - title: async rollout loop
+          repo_path: github_repo/slime/train_async.py
+          lines: [34, 43]
+          note: |
+            L34-L43: 下一轮 rollout 提前启动。
+        - title: actor / critic loop
+          repo_path: github_repo/slime/train_async.py
+          lines: [45, 53]
+          note: |
+            L45-L53: actor 和 critic 根据配置执行训练。
+        - title: weight sync
+          repo_path: github_repo/slime/train_async.py
+          lines: [69, 79]
+          note: |
+            L69-L79: 按 interval 同步权重、eval，并清理资源。
+      common_confusions:
+        - 看到 `kl_coef` 就忽略 estimator、mask 和 reference 版本。
+        - 把 `kl_coef` 和 `kl_loss_coef` 混成一个配置。
+        - rollout 慢时只加 GPU，不检查 stop token 和长度。
+      checkpoint_questions:
+        - KL estimator 位于 controller 前还是后？
+        - "`kl_coef`、`kl_loss_coef` 和 `eps_clip` 分别约束什么？"
+        - KL 爆炸时为什么要先检查 step 0 KL？

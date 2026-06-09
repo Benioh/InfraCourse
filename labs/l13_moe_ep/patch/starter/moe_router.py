@@ -1,5 +1,5 @@
 """
-L05.5 Patch · MoE Top-2 Router
+L14 Patch · MoE Top-2 Router
 
 填空规则：
 - TODO(student) 必须自己写
@@ -32,7 +32,7 @@ def top2_router(
 
     # 1. softmax → 每个 token 在 num_experts 上的概率分布
     # TODO(student): probs = torch.softmax(logits, dim=-1)
-    raise NotImplementedError("L05.5: implement softmax")
+    raise NotImplementedError("L14: implement softmax")
 
     # 2. top-2: 每行选概率最大的 2 个 expert（同时拿到对应权重）
     # TODO(student):
@@ -71,4 +71,4 @@ def top2_router(
     # 注意：aux_loss 用 probs（softmax 输出）算 fraction_prob，而不是 normalized_vals。
 
     # TODO(student): 完成上面 5 步并 return (dispatch_mask, combine_weights, aux_loss)
-    raise NotImplementedError("L05.5: implement top2_router body")
+    raise NotImplementedError("L14: implement top2_router body")

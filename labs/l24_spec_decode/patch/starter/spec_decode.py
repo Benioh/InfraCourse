@@ -1,5 +1,5 @@
 """
-L08.7 Patch · Greedy Speculative Decoding Verify
+L25 Patch · Greedy Speculative Decoding Verify
 
 填空规则：
 - TODO(student) 必须自己写
@@ -42,4 +42,4 @@ def greedy_verify(
     #   # 全部接受：position k 的 argmax 是免费 bonus
     #   accepted.append(target_argmax[k])
     #   return accepted, k
-    raise NotImplementedError("L08.7: implement greedy_verify")
+    raise NotImplementedError("L25: implement greedy_verify")

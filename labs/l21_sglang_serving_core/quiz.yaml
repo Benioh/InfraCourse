@@ -1,192 +1,104 @@
 mission: l21_sglang_serving_core
-title: L08 Quiz · RadixCache 与 prefix sharing
-pass_threshold: 1.0
+title: L22 Quiz · SGLang RadixCache Prefix Reuse
+pass_threshold: 0.8
 description: |
-  这 5 题打中前缀缓存系统设计最容易混淆的点：什么时候命中 / 不命中、
-  与 PagedAttention 的关系、多轮对话如何复用、capacity 满时的策略。
+  这 5 题检查 L22 的关键边界：prefix hit 的判定对象、RadixCache
+  与 PagedAttention 的分工、LRU 叶子驱逐、namespace 隔离，以及
+  repeated-prefix benchmark 的 validation-only 边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图
+    kind: doc
+    path: labs/l21_sglang_serving_core/system_map.md
+    href: "#lesson"
+  - title: 读主讲义
+    kind: doc
+    path: labs/l21_sglang_serving_core/lecture.md
+    href: "#lesson"
+  - title: 读源码带读
+    kind: doc
+    path: labs/l21_sglang_serving_core/source_walkthrough.md
+    href: "#lesson"
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l21_sglang_serving_core/patch/task.md
-  - title: 跑 notebook n09 · prefix cache
-    kind: notebook
-    path: notebooks/n09_prefix_cache.ipynb
-  - title: 读 SGLang RadixCache 真实源码
+    href: "#patch"
+  - title: 对照真实 SGLang RadixCache
     kind: source
-    path: github_repo/sglang/python/sglang/srt/managers/
+    path: github_repo/sglang/python/sglang/srt/mem_cache/radix_cache.py
 
 questions:
-  - id: q1_when_cache_hit
-    prompt: |
-      多轮 chat：第一轮 prompt = `[sys, user1]`，第二轮 prompt = `[sys, user1, asst1, user2]`。
-      第二轮 prefill 时 RadixCache 给多少 tokens 命中？
+  - id: q1_prefix_hit_key
+    prompt: RadixCache 判断 prefix hit 时，最直接比较的对象是什么？
     options:
       - id: a
-        text: 0（每轮都重新算）
-      - id: b
-        text: len([sys, user1])（前缀完全匹配第一轮的 prompt 部分）
+        text: token id 序列加可选 namespace / extra_key
         correct: true
+      - id: b
+        text: prompt 字符串的语义相似度
       - id: c
-        text: len([sys])（只系统 prompt）
+        text: HTTP header
       - id: d
-        text: 全部命中（聊天 history 都缓存）
+        text: 输出 token 的文本
     explanation: |
-      RadixCache 在每个 prefill 后会把 KV 缓存到 trie。第一轮结束后 trie 里
-      存了 `[sys, user1, asst1]` 的整条路径（包括 assistant 自己生成的）。
-
-      第二轮 prompt = `[sys, user1, asst1, user2]`：
-        - 匹配前缀 `[sys, user1, asst1]` → 命中长度 = 该路径长度
-        - 然后 prefill 只需算 `[user2]` 一个 token
-
-      Capability：
-        - **多轮对话**：N 轮聊天，第 N 轮 prefill 只算最后一段 user input
-        - **共享 system prompt**：同一 system prompt 多用户共享 KV
-        - **结构化生成**（SGLang 原生场景）：parallel branch 复用前缀
-
-      面试金句："RadixCache 的命中率与多轮 chat 长度成正比——越深的对话越赚。"
+      Prefix cache 复用的是已经计算过的 KV。KV 对应 tokenized prompt，因此命中必须按 token id 前缀判断。`extra_key` 可以把不同 adapter、cache version 或 retrieval context 隔离开。
 
   - id: q2_radix_vs_paged
-    prompt: |
-      PagedAttention 和 RadixCache 是同一个东西吗？
+    prompt: RadixCache 和 PagedAttention 的分工是什么？
     options:
       - id: a
-        text: 对，都是缓存
-      - id: b
-        text: 不是。PagedAttention 是**显存管理**（KV cache 怎么分配 page）；
-              RadixCache 是**内容索引**（哪些 token 序列已经被算过 KV）。生产中两者结合用
+        text: RadixCache 按 token 前缀索引可复用 KV，PagedAttention 管 KV page 的显存分配和访问
         correct: true
+      - id: b
+        text: 二者完全等价，只是 SGLang 和 vLLM 的命名不同
       - id: c
-        text: PagedAttention 是 vLLM 的，RadixCache 是 SGLang 的，等价
+        text: RadixCache 只负责 HTTP 路由，PagedAttention 只负责 tokenizer
       - id: d
-        text: RadixCache 已经替代 PagedAttention
+        text: PagedAttention 会自动解决所有 prefix cache miss
     explanation: |
-      两者解决不同问题，可以叠加：
+      RadixCache 回答“哪些 token 前缀已经算过 KV”；PagedAttention/KV manager 回答“这些 KV page 在显存里怎么分配、引用和释放”。生产系统通常把两层结合起来。
 
-      **PagedAttention**：
-        - 解决：KV cache 显存碎片
-        - 方法：每个 sequence 的 KV 切成 16-token 的 page，按需分配
-        - 效果：显存利用率从 30% → 90%
-        - 替代不了"重复计算同一前缀"
-
-      **RadixCache** (SGLang)：
-        - 解决：相同 prefix 重复 prefill
-        - 方法：trie 索引"哪些 token 序列已经有 KV"
-        - 效果：prefix 命中时 prefill 时间 ≈ 0
-        - 替代不了"显存碎片"
-
-      生产配置（SGLang / vLLM 0.6+）：
-        - 底层用 PagedAttention 管显存（page = 16 token KV chunk）
-        - 上层用 RadixCache 管 prefix（trie 节点指向 page id）
-        - 一个 page 可被多个 sequence 引用（reference count）
-        - evict 时减引用，count=0 才真释放 page
-
-      面试金句："PagedAttention 是 OS-level 显存管理，RadixCache 是 application-level
-      prefix dedup。生产用必须两者配合。"
-
-  - id: q3_eviction_strategy
-    prompt: |
-      RadixCache 容量满时，最合理的 evict 策略是？
+  - id: q3_lru_leaf
+    prompt: 教学版 `evict(num_tokens)` 为什么要从 LRU 叶子节点开始删？
     options:
       - id: a
-        text: FIFO（最先插入的删）
-      - id: b
-        text: LRU（最久未访问的删）— 类似 OS page cache
+        text: 叶子没有子路径，删除它不会破坏仍被其它序列共享的前缀
         correct: true
+      - id: b
+        text: 叶子一定占用最多显存
       - id: c
-        text: 随机
+        text: 删除 root 可以一次释放全部 cache
       - id: d
-        text: 删最长的 sequence
+        text: LRU 只适用于 tokenizer，不适用于 cache
     explanation: |
-      LRU 最合理，原因：
-        - **Locality**：最近用过的前缀很可能再被请求（多轮 chat、popular system prompt）
-        - **Cost-benefit**：保留 hot prefix → 后续命中省 prefill 时间
-        - **Implementation**：每次 match/insert 更新 last_access 时间戳就够
+      `[1,2,3]` 和 `[1,2,4]` 共享 `[1,2]`。如果直接删除共享前缀，两个请求的缓存路径都会坏掉。教学版每次删最冷叶子，再重新收集叶子。
 
-      实际策略细节：
-        - 只 evict **叶子节点**（无 children 的）→ 不破坏共享前缀
-        - 多个叶子时按 last_access 升序排，先删最老的
-        - evict 一个叶子后父节点可能变成新叶子，下一次可被 evict
-        - 与 PagedAttention 配合：evict 时减 page reference count
-
-      为什么不用其他策略：
-        - LFU（最少被访问）：需要 counter，对 burst pattern 敏感
-        - 随机：简单但 hit rate 下降明显
-        - FIFO：忽略 access pattern，hit rate 最差
-
-      实测：SGLang 论文显示 LRU 比随机 hit rate 高 15-30%（在 multi-turn workload 上）。
-
-  - id: q4_prefix_cache_overhead
-    prompt: |
-      Prefix cache 的开销主要来自？
+  - id: q4_match_prefix_updates_access
+    prompt: "`match_prefix` 为什么也要更新 `last_access`？"
     options:
       - id: a
-        text: 显存（额外的 trie 数据结构）
-      - id: b
-        text: trie 数据结构本身（数 KB）+ KV cache 的占用（GB 级，与缓存的 token 数成正比）
+        text: 命中表示这段前缀刚被使用，LRU 应把它视为热数据
         correct: true
+      - id: b
+        text: 否则 token id 会自动改变
       - id: c
-        text: CPU 时间（trie 操作慢）
+        text: 因为 `last_access` 决定 HTTP 状态码
       - id: d
-        text: 网络（多 rank 同步 trie）
+        text: 只有 insert 更新访问时间才符合 LRU
     explanation: |
-      **trie 结构本身**：
-        - 每个 _Node 大约 ~80 bytes
-        - 1M 缓存 token = 1M nodes ≈ 80 MB → 不是瓶颈
+      LRU 需要反映最近使用情况。一个前缀频繁被命中，即使很久没有新插入，也不应被当成冷数据优先驱逐。
 
-      **KV cache 显存**：
-        - 每 token KV：layers × 2 (K, V) × hidden × dtype_size
-        - LLaMA-7B fp16：32 × 2 × 4096 × 2 = 512 KB / token
-        - 1M token 缓存 = 512 GB（80GB H100 一卡装不下！）
-        - 实际容量受限于 GPU 显存
-
-      **trade-off**：
-        - 增大 max_tokens → 命中率高，但占显存
-        - 减小 max_tokens → 显存富余给并发请求，但 prefill 重复
-        - 合理值：留 30-50% 显存给 KV cache，其中 20-50% 给 prefix cache
-
-      **CPU 开销**：
-        - trie ops 是 O(seq_len)，1ms 量级
-        - 与 prefill 时间（10-1000ms）相比可忽略
-
-      所以 RadixCache 的 max_tokens 设置是真实工程问题。SGLang 默认按显存比例自动计算。
-
-  - id: q5_capstone_image_prefix
-    prompt: |
-      Capstone Stage B 的多模态服务里，怎么用 RadixCache 给"同一张图的多个问题"
-      复用 KV？
+  - id: q5_validation_only
+    prompt: "repeated-prefix benchmark 写出 `status: validation_only` 时，报告能支持什么结论？"
     options:
       - id: a
-        text: 不能，图像不能进 RadixCache
-      - id: b
-        text: 把 image embedding 离散化成"image token id"插到 input_ids 里，
-              这样图像也能进 trie；同张图的不同问题共享 image_token 部分前缀
+        text: 命令、配置和 artifact 路径可用，但不能证明真实 TTFT 或 cache hit 改善
         correct: true
+      - id: b
+        text: 真实 SGLang server 已经完成性能 benchmark
       - id: c
-        text: 给每张图单独建一个 RadixCache
+        text: RadixCache patch 必定失败
       - id: d
-        text: 必须先把图换成文字描述再缓存
+        text: cache hit rate 一定高于 90%
     explanation: |
-      Trick：在 multimodal LLM 里，image / audio 通常以"占位 token"形式进入 LLM
-      （L06 已学），所以可以一并缓存。
-
-      具体做法（LLaVA / Qwen2-VL 的实际做法）：
-        1. Image 经过 ViT → 得 N 个 patch embedding
-        2. **给每个 patch 分配一个稳定的"image_token_id"**（基于图像内容的 hash）
-        3. 把这 N 个 image_token_id 拼到 input_ids 前
-        4. RadixCache 看到的是 `[img_id_1, img_id_2, ..., img_id_N, text_q1...]`
-        5. 同张图问 q2：input_ids = `[img_id_1, ..., img_id_N, text_q2...]`
-        6. 前 N 个 token 完美命中前缀！只需 prefill text_q2
-
-      关键 insight：
-        - image_token_id 必须**按图像内容**确定（如 phash + ViT hash），相同图给相同 id
-        - 不同图给不同 id（至少前几个 token 不同）
-        - 这样 RadixCache 自动按图分组
-
-      Capstone Stage B 你会真打这场仗：
-        - 收到 (image, question) 时先 hash image → 决定 image_token_ids
-        - 看 RadixCache 命中 → prefill 只算 question 部分
-        - SGLang 0.4+ 已经原生支持这个，叫 "multi-modal prefix cache"
-
-      面试金句："多模态 prefix cache 的关键是给图像编一个稳定 ID——
-      同一张图必须每次得到同样的 placeholder token 序列。"
+      `validation_only` 通常表示没有连上真实 serving 进程。它是配置和报告路径的证据，不是性能证据。真实 TTFT/cache 结论需要 server 可用、workload 固定和指标完整。

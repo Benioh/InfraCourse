@@ -1,4 +1,4 @@
-# Debug Tickets — L07.5
+# Debug Tickets — L21
 
 | Ticket | 故障形态 | 主要练什么 |
 |---|---|---|

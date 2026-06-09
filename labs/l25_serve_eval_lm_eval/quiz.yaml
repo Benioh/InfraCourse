@@ -1,80 +1,102 @@
 mission: l25_serve_eval_lm_eval
-title: L08.8 Quiz · evaluation harness
-pass_threshold: 0.8
+title: L26 Quiz · Serving Eval Harness
+pass_threshold: 1.0
 description: |
-  这 5 题确认你能解释为什么单一 metric 不可靠、few-shot 顺序为什么影响 GSM8K 分数。
+  检查学习者是否理解 evaluation harness 的 few-shot 切分、双指标、stop sequence、completion endpoint 和 artifact 边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L26 在 Serving 质量闭环中的位置
+    kind: doc
+    path: labs/l25_serve_eval_lm_eval/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从评测链路到 artifact 复盘
+    kind: doc
+    path: labs/l25_serve_eval_lm_eval/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、run_eval、SGLang eval 和 endpoint 主路径阅读
+    kind: doc
+    path: labs/l25_serve_eval_lm_eval/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l25_serve_eval_lm_eval/patch/task.md
-  - title: 读 lm-evaluation-harness
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照本讲 run_eval 脚本
     kind: source
-    path: github_repo/lm-evaluation-harness/lm_eval/api/task.py
+    path: labs/l25_serve_eval_lm_eval/scripts/run_eval.py
+    estimate_min: 10
+  - title: 对照 SGLang GSM8K eval
+    kind: source
+    path: github_repo/sglang/python/sglang/test/simple_eval_gsm8k.py
+    estimate_min: 15
 
 questions:
-  - id: q1_metric
-    prompt: GSM8K 同时报 exact_match 和 first_number_match 的目的是？
+  - id: q1_n_total
+    prompt: "`run_evaluation(items, client, n_shots=2)` 中 `items` 有 6 条时，`n_total` 应该是多少？"
     options:
       - id: a
-        text: 区分"格式错（数字对了但带$/句号）"和"实质错"
+        text: "4，因为前 2 条是 few-shot examples，不进入评测样本数"
         correct: true
       - id: b
-        text: 让 metric 看起来更多
+        text: "6，因为所有 items 都参与打分"
       - id: c
-        text: 强制 fp32
+        text: "2，因为只统计 few-shot examples"
       - id: d
-        text: 保护 tokenizer
-    explanation: "格式 robustness 是评测 noise 的主要来源；double metric 能把它隔离。"
-  - id: q2_few_shot
-    prompt: GSM8K few-shot 示例顺序为什么影响分数？
+        text: "0，因为 stub client 不算真实评测"
+    explanation: "few-shot examples 用来构造 prompt，评测样本从 `items[n_shots:]` 开始。"
+  - id: q2_exact_vs_numeric
+    prompt: "如果 exact_match 低、first_number_match 高，最可能说明什么？"
     options:
       - id: a
-        text: 模型对 prompt 顺序敏感（recency bias）+ token 总长影响 attention
+        text: "数值大多正确，但输出格式、附加文本或大小写不满足 strict match"
         correct: true
       - id: b
-        text: 数据 shuffle 一定不影响
+        text: "模型完全没有能力"
       - id: c
-        text: 与 LR 有关
+        text: "所有请求都 timeout"
       - id: d
-        text: 与 vocab 有关
-    explanation: "few-shot ordering 已被多篇论文证实显著影响分数。"
-  - id: q3_temperature
-    prompt: 评测时常用 temperature?
+        text: "few-shot examples 被计入了 n_total"
+    explanation: "numeric metric 能隔离格式噪声；exact 低时要抽查 prediction 和 reference。"
+  - id: q3_stop_sequence
+    prompt: "completion eval 中为什么常传 `stop=[\"Question:\"]`？"
     options:
       - id: a
-        text: 0（greedy）以保证可重复
+        text: "防止模型继续生成下一道题，污染当前答案"
         correct: true
       - id: b
-        text: 1.0
+        text: "提高 GPU 显存容量"
       - id: c
-        text: 必须 nucleus
+        text: "把 temperature 自动设为 1"
       - id: d
-        text: 必须 beam=4
-    explanation: "GSM8K 类 deterministic 评测一般 greedy；少数任务用 majority voting。"
-  - id: q4_stop
-    prompt: 评测必须设置 stop sequence 的原因？
+        text: "让 prompt 不需要 few-shot examples"
+    explanation: "缺少 stop 时，模型可能续写新题和答案，导致 parser 抽到错误数字或 exact match 失败。"
+  - id: q4_artifact
+    prompt: "一份可复查的 serving eval 报告至少应包含什么？"
     options:
       - id: a
-        text: 防止模型继续生成下一题，污染答案
+        text: "配置、命令、样本级 prediction/reference、聚合指标、完成率和运行摘要"
         correct: true
       - id: b
-        text: 提升吞吐
+        text: "只包含最终分数"
       - id: c
-        text: 与 KV cache 无关
+        text: "只包含 tokens/s"
       - id: d
-        text: 让 logits 变 fp32
-    explanation: "few-shot prompt 末尾要 'Question:' 之类 stop，否则模型会自问自答。"
+        text: "只包含模型名称"
+    explanation: "质量结论要能追溯到输入、输出、打分函数和运行条件。"
   - id: q5_endpoint
-    prompt: vLLM 与 SGLang 的 OpenAI 兼容接口共用什么 schema？
+    prompt: "本讲 OpenAIClient 默认调用哪个 endpoint 形状？"
     options:
       - id: a
-        text: /v1/chat/completions、/v1/completions
+        text: "`/v1/completions`，读取 `choices[0].text`"
         correct: true
       - id: b
-        text: 私有二进制
+        text: "`/v1/embeddings`，读取 embedding vector"
       - id: c
-        text: gRPC only
+        text: "`/metrics`，读取 Prometheus counter"
       - id: d
-        text: 必须用 streaming
-    explanation: "两者都暴露 OpenAI 兼容 REST，便于 lm-eval-harness 直接打。"
+        text: "`/v1/audio/transcriptions`，读取 text"
+    explanation: "本讲 prompt 是 raw completion 形状；chat endpoint 需要不同 client 或 prompt wrapper。"

@@ -1,4 +1,4 @@
-# L05.7 Patch · 1F1B Pipeline Schedule
+# L15 Patch · 1F1B Pipeline Schedule
 
 ## 你要交付什么
 
@@ -15,18 +15,18 @@ def bubble_count(num_stages: int) -> int:
     """Total bubble length under the standard 1F1B schedule = 2 * (num_stages - 1)."""
 ```
 
-补丁规模目标：30–50 行。
+补丁规模目标：30 到 50 行。
 
 ## 不变量
 
-1. `num_microbatches >= num_stages`，否则抛 `ValueError`
-2. 每个 stage 的 timeline 长度 = `2 * num_microbatches`
-3. stage `s` 的 warmup forward 数 = `num_stages - s - 1`
-4. stage `s` 的 cooldown backward 数 = `num_stages - s - 1`
-5. 同 stage 上 forward 的 microbatch idx 严格递增 0,1,2,...
-6. 同 stage 上 backward 的 microbatch idx 严格递增 0,1,2,...
-7. 同 stage 上对每个 i：F(i) 的位置 < B(i) 的位置
-8. 任意 stage `s+1` 的 F(i) 必须在 stage `s` 的 F(i) 之后（pipeline 依赖，下文不强制）
+1. `num_stages > 0`，否则抛 `ValueError`。
+2. `num_microbatches >= num_stages`，否则抛 `ValueError`。
+3. 每个 stage 的 timeline 长度是 `2 * num_microbatches`。
+4. stage `s` 的 warmup forward 数是 `num_stages - s - 1`。
+5. stage `s` 的 cooldown backward 数是 `num_stages - s - 1`。
+6. 同 stage 上 forward 的 microbatch index 递增。
+7. 同 stage 上 backward 的 microbatch index 递增。
+8. 同 stage 上对每个 `i`，`F(i)` 的位置早于 `B(i)`。
 
 ## 怎么验证
 
@@ -34,8 +34,14 @@ def bubble_count(num_stages: int) -> int:
 make patch-test M=l14_pipeline_1f1b
 ```
 
+通过后跑一次 smoke：
+
+```bash
+bash labs/l14_pipeline_1f1b/scripts/run_pp_smoke.sh l15_pp_smoke
+```
+
 ## 写完之后你能做什么
 
-- 看懂 `Megatron-LM/megatron/core/pipeline_parallel/schedules.py`
-- 解释 GPipe vs 1F1B vs interleaved 1F1B 的取舍
-- 在 capstone 用 PP 切 13B+ 模型
+- 看懂 Megatron `forward_backward_pipelining_without_interleaving` 的三段主路径。
+- 解释 GPipe、1F1B 和 interleaved 1F1B 的调度取舍。
+- 用 bubble count、bubble ratio 和 stage timeline 判断 PP 配置是否合理。

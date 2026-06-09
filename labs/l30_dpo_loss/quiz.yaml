@@ -1,83 +1,111 @@
 mission: l30_dpo_loss
-title: L10.3 Quiz · DPO 推导与实现细节
-pass_threshold: 0.8
+title: L33 Quiz · DPO 推导与实现边界
+pass_threshold: 1.0
 description: |
-  这 5 题确认你能从 Bradley-Terry 推导出 DPO loss，并理解 reference 的作用。
+  检查学习者是否理解 completion logprob、reference anchor、reward margin、beta 和数值稳定性。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L33 在偏好优化主线中的位置
+    kind: doc
+    path: labs/l30_dpo_loss/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从偏好对到 DPO loss
+    kind: doc
+    path: labs/l30_dpo_loss/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按 patch、tests 和 smoke 阅读
+    kind: doc
+    path: labs/l30_dpo_loss/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 25
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l30_dpo_loss/patch/task.md
-  - title: 读 DPO 论文
+    href: "#patch"
+    estimate_min: 8
+  - title: 对照 patch reference
     kind: source
-    path: https://arxiv.org/abs/2305.18290
-  - title: 读 TRL DPOTrainer 实现
+    path: labs/l30_dpo_loss/patch/reference/dpo.py
+    estimate_min: 10
+  - title: 对照 DPO smoke
     kind: source
-    path: github_repo/trl/trl/trainer/dpo_trainer.py
+    path: labs/l30_dpo_loss/scripts/run_dpo_smoke.py
+    estimate_min: 15
 
 questions:
   - id: q1_form
-    prompt: DPO loss 的核心数学形式是？
+    prompt: DPO patch 中 reward margin 的正确形式是什么？
     options:
       - id: a
-        text: -E[log σ(β·(log π(yw|x) - log π(yl|x) - log π_ref(yw|x) + log π_ref(yl|x)))]
+        text: beta * ((policy_chosen - ref_chosen) - (policy_rejected - ref_rejected))
         correct: true
       - id: b
-        text: 直接 cross-entropy on yw
+        text: beta * (policy_chosen - policy_rejected)
       - id: c
-        text: KL(policy || reference) 单独项
+        text: ref_chosen - ref_rejected
       - id: d
-        text: MSE(policy, reward)
-    explanation: "DPO 是 Bradley-Terry 闭式解；reference 提供 implicit reward baseline。"
-  - id: q2_ref
-    prompt: reference policy 在 DPO 中的角色是？
+        text: cross_entropy(policy_logits, chosen_labels)
+    explanation: |
+      A 对。DPO 比较的是 chosen 和 rejected 相对 reference 的 log-ratio 差。只看 policy 差值会丢掉 reference anchor。
+
+  - id: q2_mask
+    prompt: "`compute_logps_for_completions` 为什么要把 `labels == -100` 的位置 mask 掉？"
     options:
       - id: a
-        text: 提供 implicit reward 的 baseline，使 policy 在 SFT 附近做改动
+        text: prompt 和 padding 是条件或无效位置，不应计入 completion logprob
         correct: true
       - id: b
-        text: 直接被训练
+        text: 这样可以让所有 token 的概率变成 1
       - id: c
-        text: 提供 LR schedule
+        text: DPO 只能训练 prompt token
       - id: d
-        text: 提供 tokenizer
-    explanation: "reference 通常是 SFT model；它充当 KL anchor。"
+        text: mask 会自动冻结 reference
+    explanation: |
+      A 对。DPO 的 `log π(y|x)` 应只累加 completion token。prompt 混入会污染 chosen/rejected 的比较。
+
   - id: q3_logsigmoid
-    prompt: 为什么实现要用 `F.logsigmoid` 而不是 `torch.log(torch.sigmoid(...))`？
+    prompt: 为什么实现要用 `F.logsigmoid(margin)`，少用 `torch.log(torch.sigmoid(margin))`？
     options:
       - id: a
-        text: logsigmoid 数值稳定，避免 sigmoid 饱和后 log(0)=-inf
+        text: "`F.logsigmoid` 在大正负 margin 下更稳定，避免 sigmoid 饱和后 log 下溢"
         correct: true
       - id: b
-        text: 速度差很多
+        text: 后者没有梯度
       - id: c
-        text: 后者会改变梯度
+        text: 后者会改变 reward margin 的符号
       - id: d
-        text: 没区别
-    explanation: "对 |x| 大时 sigmoid 饱和，log 会下溢；logsigmoid 走稳定路径。"
-  - id: q4_beta
-    prompt: β 越大代表？
+        text: "`F.logsigmoid` 会自动加载 reference model"
+    explanation: |
+      A 对。pytest 用大 beta case 检查 loss 是否保持 finite。
+
+  - id: q4_reference
+    prompt: reference policy 在 DPO 中的工程角色是什么？
     options:
       - id: a
-        text: 越靠近 reference policy（KL 约束更强）
+        text: 作为冻结锚点，提供 policy 相对 SFT 分布的 log-ratio baseline
         correct: true
       - id: b
-        text: 完全脱离 reference
+        text: 和 policy 一起训练，越快越好
       - id: c
-        text: lr 必须更大
+        text: 只提供 tokenizer
       - id: d
-        text: tokenizer 改变
-    explanation: "β 是 implicit reward scaling；β 大 → 更紧地约束在 ref 附近。"
-  - id: q5_logp_extract
-    prompt: 计算 `log π(y|x)` 时常见错误是？
+        text: 替代 chosen/rejected 数据
+    explanation: |
+      A 对。reference 通常来自 SFT checkpoint。若 reference 进入 optimizer，DPO 的 anchor 会漂移。
+
+  - id: q5_smoke
+    prompt: 本讲 synthetic DPO smoke 能证明什么？
     options:
       - id: a
-        text: 把 prompt token 的 log-prob 也加进去
+        text: 最小训练循环、DPO 函数调用和 artifact 落盘闭合
         correct: true
       - id: b
-        text: 用 fp16
+        text: 真实 UltraFeedback 训练已经稳定
       - id: c
-        text: 用 logsumexp
+        text: tokenizer 的 chat template 已完全正确
       - id: d
-        text: 用 attention_mask
-    explanation: "DPO 的 logp 必须只在 completion token 上累加，prompt 要 mask。"
+        text: reference forward 的分布式性能达标
+    explanation: |
+      A 对。synthetic smoke 是本地证据链，不覆盖真实数据质量、tokenizer、多机训练或输出质量。

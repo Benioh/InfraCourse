@@ -1,83 +1,102 @@
 mission: l22_flash_attn_v2_bench
-title: L08.3 Quiz · FlashAttention v2
-pass_threshold: 0.8
+title: L23 Quiz · PyTorch SDPA and FlashAttention Benchmark
+pass_threshold: 1.0
 description: |
-  这 5 题确认你能解释 FA 的内存复杂度优势 + SDPA backend 切换语义。
+  检查学习者是否理解 eager attention 的中间矩阵成本、SDPA backend 边界、causal mask 和 benchmark 证据。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：确认 L23 在 Serving 性能路径中的位置
+    kind: doc
+    path: labs/l22_flash_attn_v2_bench/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从 eager baseline 到 SDPA benchmark
+    kind: doc
+    path: labs/l22_flash_attn_v2_bench/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按主路径读 patch、MiniInfra 和真实 wrapper
+    kind: doc
+    path: labs/l22_flash_attn_v2_bench/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l22_flash_attn_v2_bench/patch/task.md
-  - title: 读 PyTorch SDPA backend
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照 MiniInfra online softmax
     kind: source
-    path: github_repo/pytorch/torch/nn/functional.py
-  - title: 读 FlashAttention v2 论文
+    path: mini_infra/gpu/triton_softmax.py
+    estimate_min: 10
+  - title: 对照真实 SDPA wrapper
     kind: source
-    path: https://arxiv.org/abs/2307.08691
+    path: github_repo/torchtitan/torchtitan/models/common/attention.py
+    estimate_min: 10
 
 questions:
-  - id: q1_complexity
-    prompt: FA2 相对 eager attention 的核心优势？
+  - id: q1_eager_memory
+    prompt: eager attention 在长序列下最直接的中间内存压力来自哪里？
     options:
       - id: a
-        text: 内存 O(N) 而不是 O(N²)，由于不实例化全 N×N attention matrix
+        text: 显式生成 `[B, H, T, T]` 的 scores 和 weights
         correct: true
       - id: b
-        text: 计算复杂度更低
+        text: tokenizer vocab 变大
       - id: c
-        text: 只支持 fp16
+        text: optimizer state 增加
       - id: d
-        text: 只能用一个 head
-    explanation: "FA tile-by-tile 计算 softmax，从未把 N×N attention 实例化进 HBM。"
-  - id: q2_sdpa_backend
-    prompt: PyTorch `scaled_dot_product_attention` 默认怎么选 backend？
+        text: HTTP header 变长
+    explanation: "eager baseline 会保存 score matrix 和 softmax 后的 weights，二者都随 T^2 增长。"
+  - id: q2_flash_mechanism
+    prompt: FlashAttention 类 kernel 的主要收益来自什么？
     options:
       - id: a
-        text: 按 (head_dim, dtype, mask, device) 自动选 flash / mem-efficient / math
+        text: 分块计算并维护在线 softmax 状态，减少完整 attention matrix 写入 HBM
         correct: true
       - id: b
-        text: 总是用 math
+        text: 把注意力公式改成线性复杂度
       - id: c
-        text: 总是用 flash
+        text: 删除 value 张量
       - id: d
-        text: 报错
-    explanation: "PyTorch 有 dispatcher；torch.backends.cuda.sdp_kernel 可以强制。"
-  - id: q3_fp16
-    prompt: FA 通常要求 dtype 是？
+        text: 只保留一个 attention head
+    explanation: "FlashAttention 保留 QK softmax V 的语义，收益主要来自 tile 内融合和中间矩阵不落到 HBM。"
+  - id: q3_sdpa_backend
+    prompt: 看到 `F.scaled_dot_product_attention()` 调用后，最合理的判断是什么？
     options:
       - id: a
-        text: bf16 / fp16（fp32 会 fall back 到 math）
+        text: 这是统一 SDPA API，实际 backend 还要看 device、dtype、head_dim、mask 和可用性
         correct: true
       - id: b
-        text: 必须 int8
+        text: 它必然走 flash backend
       - id: c
-        text: 必须 fp64
+        text: 它必然只在 CPU 上运行
       - id: d
-        text: 必须 complex64
-    explanation: "FA kernel 只为 half/bf16 做了高度优化。"
-  - id: q4_causal
-    prompt: causal mask 在 FA 里怎么处理？
+        text: 它不支持 causal attention
+    explanation: "SDPA 是入口，不是 backend 证明。CPU、fp32、mask 或 head_dim 条件都可能改变实际执行路径。"
+  - id: q4_benchmark
+    prompt: 为什么 L23 的 reference 把正确性路径和性能路径分开？
     options:
       - id: a
-        text: 由 kernel 内部 skip 上三角块，不显式构造 mask
+        text: fp32 小 shape 适合严格对齐数值，目标 dtype 大 shape 适合观察 kernel 成本
         correct: true
       - id: b
-        text: 必须显式 attn_mask
+        text: 正确性和性能完全无关，不能在同一脚本里出现
       - id: c
-        text: 不能用 causal
+        text: CPU 不支持任何 attention
       - id: d
-        text: 必须先做 transpose
-    explanation: "FA causal=True 在 tile 边界判断；省去 N×N mask 内存。"
-  - id: q5_paged
-    prompt: vLLM 的 PagedAttention 与 FA 的关系？
+        text: CUDA 不需要同步
+    explanation: "小 shape fp32 能降低数值和内存干扰；性能判断要使用真实 dtype、device 和 seq_len。"
+  - id: q5_causal
+    prompt: patch 测试如何验证 causal mask 没有泄漏未来 token？
     options:
       - id: a
-        text: PagedAttention 是 FA 思路的 KV-cache 版本，把"按需 tile"扩展到分页 KV
+        text: 用 one-hot value 检查第 0 行输出只能来自位置 0
         correct: true
       - id: b
-        text: 完全无关
+        text: 只检查输出 dtype
       - id: c
-        text: PagedAttention 取代了 FA
+        text: 只比较文件名
       - id: d
-        text: PagedAttention 只在 fp32 工作
-    explanation: "PagedAttention 沿 KV 维度分块，FA 沿 Q×K 分块；两者经常组合。"
+        text: 只看 speedup
+    explanation: "第 0 个 token 在 causal attention 中只能看自己；若未来 value 泄漏，one-hot 检查会失败。"

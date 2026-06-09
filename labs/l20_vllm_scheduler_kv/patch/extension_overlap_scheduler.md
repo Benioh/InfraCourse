@@ -1,11 +1,11 @@
-# L20 扩展 · Zero-Overhead Overlap Scheduler + FutureMap
+# L21 扩展 · Zero-Overhead Overlap Scheduler + FutureMap
 
-> 这是 L20 的可选扩展挑战。**不在 patch-test 范围内**，不会影响主线测试通过。
+> 这是 L21 的可选扩展挑战。**不在 patch-test 范围内**，不会影响主线测试通过。
 > 完成后你会理解 SGLang 在 v0.4 后最重要的调度优化（怜悯 24/12 的工作）。
 
 ## 背景
 
-L20 主线实现的是 normal scheduler：CPU pre/post schedule 与 GPU compute/sample 串行。
+L21 主线实现的是 normal scheduler：CPU pre/post schedule 与 GPU compute/sample 串行。
 profiling 一下你会发现，CPU pre/post schedule 占了大约 30%–50% 的总耗时——
 GPU 在 idle 等 CPU 排序、组装张量、detokenize、判 EOS。
 

@@ -1,5 +1,5 @@
 """
-Shard 容灾与可复现 shuffle（L06.3 教学）。
+Shard 容灾与可复现 shuffle（L19 教学）。
 
 教学目的：
     把 "shard 损坏跳过、续读 cursor、detshuffle 可复现" 三件事的最小语义

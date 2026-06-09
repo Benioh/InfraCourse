@@ -1,4 +1,4 @@
-"""L04 Patch tests · pure CPU."""
+"""L09 Patch tests · pure CPU."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ sys.path.insert(0, str(PATCH_DIR))
 
 
 def _impl():
-    name = os.environ.get("IMPL", "starter")
+    name = os.environ.get("IMPL") or "starter"
     return importlib.import_module(f"{name}.lr_scheduler")
 
 

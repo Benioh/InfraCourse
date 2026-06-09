@@ -1,5 +1,5 @@
 """
-L08 Patch · RadixCache (prefix cache trie)
+L22 Patch · RadixCache (prefix cache trie)
 
 填空规则：
 - TODO(student) 必须自己写
@@ -48,7 +48,7 @@ class RadixCache:
         #       else:
         #           break
         #   return matched
-        raise NotImplementedError("L08 Patch: implement match_prefix")
+        raise NotImplementedError("L22 Patch: implement match_prefix")
 
     def insert(self, token_ids: List[int]) -> int:
         """插入序列，返回新增 token 数。"""
@@ -66,7 +66,7 @@ class RadixCache:
         #   if self._total > self.max_tokens:
         #       self.evict(self._total - self.max_tokens)
         #   return new_tokens
-        raise NotImplementedError("L08 Patch: implement insert")
+        raise NotImplementedError("L22 Patch: implement insert")
 
     def evict(self, num_tokens: int) -> int:
         """LRU 驱逐 num_tokens 个 token；返回实际驱逐数。
@@ -85,8 +85,8 @@ class RadixCache:
         #       evicted += 1
         #       self._total -= 1
         #   return evicted
-        raise NotImplementedError("L08 Patch: implement evict")
+        raise NotImplementedError("L22 Patch: implement evict")
 
     def _collect_leaves(self) -> List[_Node]:
         # TODO(student): DFS 遍历 self.root，返回所有 children == {} 且非 root 的节点
-        raise NotImplementedError("L08 Patch: implement _collect_leaves")
+        raise NotImplementedError("L22 Patch: implement _collect_leaves")

@@ -6,6 +6,7 @@ export type QuizPrereqItem = {
   title: string;
   kind: "read" | "notebook" | "source" | string;
   path: string;
+  href?: string;
   estimate_min?: number;
 };
 
@@ -96,6 +97,8 @@ export type PatchPayload = {
   reference_file?: string;
   status?: PatchStatus | null;
   quiz_passed?: boolean;  // ★ gate
+  lesson?: LessonPayload;
+  lesson_docs?: LessonDocItem[];
   source_reading?: SourceReadingItem[];
   notebooks?: string[];
   mini_infra_targets?: string[];
@@ -131,6 +134,8 @@ export type Quest = {
     test_count?: number;
     test_kind?: string;
   };
+  lesson?: LessonPayload;
+  lesson_docs?: LessonDocItem[];
   source_reading?: SourceReadingItem[];
   notebooks?: string[];
   mini_infra_targets?: string[];
@@ -145,6 +150,35 @@ export type Quest = {
   project?: QuestProject;
   commands?: Record<string, string>;
   badge?: { name?: string; pass_score?: number };
+};
+
+export type LessonSourceRef = {
+  repo_path: string;
+  lines?: [number, number] | string;
+  title?: string;
+  note?: string;
+};
+
+export type LessonSection = {
+  title: string;
+  plain_explanation?: string;
+  walkthrough?: string;
+  mental_model?: string;
+  why_it_matters?: string;
+  common_confusions?: string[];
+  source_refs?: LessonSourceRef[];
+  checkpoint_questions?: string[];
+};
+
+export type LessonPayload = {
+  opening?: string;
+  sections?: LessonSection[];
+};
+
+export type LessonDocItem = {
+  title: string;
+  path: string;
+  description?: string;
 };
 
 export type SourceReadingHighlight = {
@@ -257,6 +291,7 @@ export type CurriculumMission = {
   frameworks?: string[];
   patch_description?: string;
   patch_test_count?: number;
+  lesson_section_count?: number;
   source_count: number;
   notebook_count: number;
   ticket_count: number;

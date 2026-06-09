@@ -1,4 +1,4 @@
-"""L03.5 Patch · Convert JSONL text to a Megatron-shaped IndexedDataset."""
+"""L08 Patch · Convert JSONL text to a Megatron-shaped IndexedDataset."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def text_to_megatron_bin(
     # TODO(student): write <prefix>.idx with MAGIC | VERSION | dtype_code | n_samples | total_tokens
     #               followed by offsets[] (uint64) and lengths[] (uint64), all little-endian
     # TODO(student): return {"n_samples": ..., "total_tokens": ..., "bin_path": ..., "idx_path": ...}
-    raise NotImplementedError("L03.5: implement text_to_megatron_bin")
+    raise NotImplementedError("L08: implement text_to_megatron_bin")
 
 
 class IndexedDataset:
@@ -40,7 +40,7 @@ class IndexedDataset:
         # TODO(student): read dtype_code -> dtype_str; n_samples, total_tokens
         # TODO(student): read offsets[] and lengths[]
         # TODO(student): np.memmap the .bin file as a 1D array of dtype_str
-        raise NotImplementedError("L03.5: implement IndexedDataset.__init__")
+        raise NotImplementedError("L08: implement IndexedDataset.__init__")
 
     def __len__(self) -> int:
         raise NotImplementedError

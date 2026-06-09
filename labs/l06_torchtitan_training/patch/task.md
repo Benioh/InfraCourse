@@ -1,10 +1,10 @@
-# L03 Patch · Selective Activation Checkpoint
+# L07 Patch · Selective Activation Checkpoint
 
 ## 你要交付什么
 
 实现一个**选择性激活检查点**（selective activation checkpoint）：让你只对模型中的某些层（比如 attention）应用 `torch.utils.checkpoint`，其他层保留 activation。
 
-这是 TorchTitan / Megatron 的 ckpt policy 在做的事情——不是 "全 ckpt 或全不 ckpt"，而是按层挑。
+这是 TorchTitan 和 Megatron 的 ckpt policy 也会按层、按 block 或按 op 选择重算范围。
 
 ```python
 def selective_checkpoint_wrap(model, policy_fn) -> nn.Module:

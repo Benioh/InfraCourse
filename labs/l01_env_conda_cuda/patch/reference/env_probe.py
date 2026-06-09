@@ -1,4 +1,4 @@
-"""Reference solution for L00 patch — env probe."""
+"""Reference solution for L01 patch — env probe."""
 from __future__ import annotations
 
 import os

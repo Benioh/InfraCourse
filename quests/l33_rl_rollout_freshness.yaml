@@ -1,56 +1,578 @@
 id: l33_rl_rollout_freshness
-title: SLiME-shaped Versioned Rollout Manager
-level: L11.5
+title: L38 · SLiME Rollout Freshness：Versioned RolloutManager
+level: L38
 act: 第 4 章：RL 与对齐
 role: RL 系统主线学徒
 priority: 核心
-estimated_minutes: 120
+estimated_minutes: 100
 no_gpu_friendly: true
-
 frameworks:
   - SLiME
-  - verl
   - SGLang
+  - PyTorch
 
 patch:
   description: |
-    实现带 weight_version 的 SLiME-shaped RolloutManager，避免从 stale rollout
-    engine 生成样本，并支持全量/局部 update_weights。
+    实现带 weight_version 的 RolloutManager：generate 只选择足够新的 server，
+    update_weights 支持全量/局部更新，freshness 返回 actor 与 server 的版本差。
   task_md: labs/l33_rl_rollout_freshness/patch/task.md
   starter_file: labs/l33_rl_rollout_freshness/patch/starter/rollout_manager.py
   reference_file: labs/l33_rl_rollout_freshness/patch/reference/rollout_manager.py
-  test_command: make patch-test M=l33_rl_rollout_freshness
+  test_command: IMPL=reference make patch-test M=l33_rl_rollout_freshness
   status_file: labs/l33_rl_rollout_freshness/patch/.last_run.json
   test_count: 5
   test_kind: versioned rollout manager 行为验证
 
+lesson_docs:
+  - title: 系统地图
+    path: labs/l33_rl_rollout_freshness/system_map.md
+    description: L38 在 RL rollout 主线中的位置、局部系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l33_rl_rollout_freshness/lecture.md
+    description: 从 stale rollout 问题、版本合同、源码路径讲到 drill 和生产排障。
+  - title: 源码带读讲义
+    path: labs/l33_rl_rollout_freshness/source_walkthrough.md
+    description: 按 patch、MiniInfra、SLiME rollout manager、Sample、SGLang engine 和 drill 阅读。
+
 source_reading:
+  - title: Patch starter
+    repo_path: labs/l33_rl_rollout_freshness/patch/starter/rollout_manager.py
+    focus: 学生需要补齐的 versioned rollout manager 合同
+    highlights:
+      - title: RolloutData
+        lines: [8, 13]
+        note: |
+          L8-L13: RolloutData 保存 rollout id、prompts、responses 和 meta_info。
+      - title: RolloutServer state
+        lines: [16, 28]
+        note: |
+          L16-L22: server 保存 server_id 和 weight_version。
+          L23-L28: generate 按当前 weight_version 构造 response。
+      - title: version meta_info
+        lines: [32, 38]
+        note: |
+          L32-L38: meta_info 写入 server_id、weight_version、actor_version 和 staleness。
+      - title: manager generate TODO
+        lines: [47, 56]
+        note: |
+          L47-L50: manager 保存 servers、max_staleness 和 next_server_index。
+          L52-L56: generate 需要按 freshness 和 round-robin 选择 server。
+      - title: update and freshness TODO
+        lines: [58, 65]
+        note: |
+          L58-L61: update_weights 需要支持全量和局部更新。
+          L63-L65: freshness 需要返回 actor 与每个 server 的版本差。
+
+  - title: Patch reference
+    repo_path: labs/l33_rl_rollout_freshness/patch/reference/rollout_manager.py
+    focus: 参考实现中的 fresh 判断、round-robin、局部更新和 freshness
+    highlights:
+      - title: init and fresh gate
+        lines: [47, 55]
+        note: |
+          L47-L52: 构造函数拒绝空 server，并保存阈值和指针。
+          L54-L55: _fresh_enough 使用 actor_version 和 weight_version 的差值。
+      - title: generate loop
+        lines: [57, 65]
+        note: |
+          L57-L61: 从 next_server_index 开始遍历候选 server。
+          L62-L65: fresh server 被选中后推进指针，否则一圈后抛错。
+      - title: update weights
+        lines: [67, 74]
+        note: |
+          L67-L69: server_ids 存在时转为允许集合。
+          L70-L74: 只更新命中的 server，并返回 updated 列表。
+      - title: freshness dict
+        lines: [76, 80]
+        note: |
+          L76-L80: freshness 返回每个 server 落后 actor 的步数。
+
+  - title: Patch tests
+    repo_path: labs/l33_rl_rollout_freshness/patch/tests/test_patch.py
+    focus: 五个行为测试固定 L38 的最小合同
+    highlights:
+      - title: fresh meta_info
+        lines: [20, 30]
+        note: |
+          L20-L23: 构造 fresh server 并调用 generate。
+          L24-L30: response 和 meta_info 必须包含版本字段。
+      - title: skip stale
+        lines: [33, 41]
+        note: |
+          L33-L38: 构造 stale 和 fresh 两个 server。
+          L39-L41: generate 跳过 stale，并推进 round-robin 指针。
+      - title: all stale failure
+        lines: [44, 48]
+        note: |
+          L44-L48: 所有 server stale 时必须抛 RuntimeError。
+      - title: update subset
+        lines: [51, 58]
+        note: |
+          L51-L56: 局部更新只修改 s1。
+          L57-L58: 全量更新随后修改所有 server。
+      - title: freshness formula
+        lines: [61, 64]
+        note: |
+          L61-L64: freshness 直接验证 actor_version - engine_version。
+
+  - title: MiniInfra rollout
+    repo_path: mini_infra/slime/ray/rollout.py
+    focus: 最小 rollout server/manager 的版本链路
+    highlights:
+      - title: server generate
+        lines: [27, 39]
+        note: |
+          L27-L30: server 接收 prompts 和 actor_version。
+          L31-L39: response 和 rollout_id 使用当前 weight_version。
+      - title: server meta_info
+        lines: [40, 49]
+        note: |
+          L40-L49: meta_info 写出 cache、server、actor、weight 和 staleness 字段。
+      - title: manager state
+        lines: [55, 65]
+        note: |
+          L55-L65: manager 保存 server 列表、max_staleness 和 round-robin 指针。
+      - title: fresh gate
+        lines: [67, 68]
+        note: |
+          L67-L68: _fresh_enough 计算 actor 和 server 的版本差。
+      - title: manager generate
+        lines: [70, 82]
+        note: |
+          L70-L82: generate 遍历 server，找不到 fresh server 就抛错。
+      - title: update weights
+        lines: [84, 93]
+        note: |
+          L84-L93: update_weights 支持全量和 server_ids 子集。
+      - title: freshness view
+        lines: [95, 99]
+        note: |
+          L95-L99: freshness 导出每个 server 的 staleness。
+
+  - title: MiniInfra train actor
+    repo_path: mini_infra/slime/ray/train_actor.py
+    focus: actor 训练后递增版本，并写回 rollout manager
+    highlights:
+      - title: actor train
+        lines: [44, 53]
+        note: |
+          L44-L48: train 根据 rollout response 得到 reward，并递增 weight_version。
+          L49-L53: ActorTrainResult 返回新版本。
+      - title: actor update weights
+        lines: [55, 58]
+        note: |
+          L55-L58: update_weights 把 actor 当前版本写回 rollout manager。
+
+  - title: MiniInfra train loop
+    repo_path: mini_infra/slime/train.py
+    focus: generate、train、update_weights 的最小顺序
+    highlights:
+      - title: train loop
+        lines: [16, 19]
+        note: |
+          L16-L19: 每步按 generate、train、update_weights 推进。
+      - title: history
+        lines: [20, 29]
+        note: |
+          L20-L29: history 记录 reward、weight_version 和 rollout meta_info。
+
   - title: SLiME train loop
     repo_path: github_repo/slime/train.py
-    focus: rollout manager、actor_model.update_weights、训练循环
-  - title: SLiME rollout
+    focus: rollout manager、actor train 和 update_weights 的真实顺序
+    highlights:
+      - title: manager setup
+        lines: [15, 24]
+        note: |
+          L15-L17: 先创建 rollout manager。
+          L23-L24: actor/critic 创建时接收 rollout manager。
+      - title: initial update
+        lines: [26, 36]
+        note: |
+          L26-L30: 初始化阶段 onload rollout 后推送 actor 权重。
+          L32-L36: 可选检查权重一致并恢复 KV。
+      - title: rollout request
+        lines: [66, 72]
+        note: |
+          L66-L72: 训练循环先请求 rollout data。
+      - title: actor train
+        lines: [78, 85]
+        note: |
+          L78-L85: critic/actor 消费 rollout data 训练。
+      - title: offload and update
+        lines: [90, 94]
+        note: |
+          L90-L94: offload train 后 onload rollout，并触发 update_weights。
+
+  - title: SLiME rollout manager
     repo_path: github_repo/slime/slime/ray/rollout.py
-    focus: RolloutServer/Manager、SGLang engine、update_weights
-  - title: SLiME TrainRayActor
-    repo_path: github_repo/slime/slime/ray/train_actor.py
-    focus: actor train、save_model、update_weights 边界
+    focus: 生产 rollout manager、updatable engines 和 rollout data 主路径
+    highlights:
+      - title: ServerGroup overview
+        lines: [38, 45]
+        note: |
+          L38-L45: ServerGroup 表示一组同构 SGLang engines。
+      - title: ServerGroup fields
+        lines: [47, 57]
+        note: |
+          L47-L57: group 保存 args、engine 列表、worker type、offset 和 model path。
+      - title: RolloutServer model
+        lines: [210, 217]
+        note: |
+          L210-L217: RolloutServer 表示一个 router 后面的模型。
+      - title: RolloutServer update flag
+        lines: [219, 223]
+        note: |
+          L219-L223: server 持有 groups、model_name 和 update_weights 标记。
+      - title: RolloutManager init
+        lines: [349, 354]
+        note: |
+          L349-L354: Ray remote RolloutManager 初始化 args 和数据源。
+      - title: rollout functions
+        lines: [356, 363]
+        note: |
+          L356-L363: 保存 rollout/eval 函数。
+      - title: updatable server
+        lines: [444, 453]
+        note: |
+          L444-L453: 只选择 update_weights=True 的 server 作为可更新模型。
+      - title: updatable engines
+        lines: [460, 472]
+        note: |
+          L460-L472: 返回可更新 engines、engine lock、新 engine 数和 GPU 映射。
+      - title: generate entry
+        lines: [478, 486]
+        note: |
+          L478-L486: generate 取 rollout data、保存 debug data，并记录日志。
+      - title: train data handoff
+        lines: [487, 491]
+        note: |
+          L487-L491: 非 debug 模式把 samples 转成训练数据并按 DP 切分。
+      - title: rollout data source
+        lines: [567, 573]
+        note: |
+          L567-L573: debug 模式从保存的 rollout data 读取 samples。
+      - title: rollout function
+        lines: [583, 585]
+        note: |
+          L583-L585: 正常模式调用 rollout function，并取出 metrics 和 samples。
+
+  - title: SLiME Sample type
+    repo_path: github_repo/slime/slime/utils/types.py
+    focus: Sample 如何保存 rollout weight version
+    highlights:
+      - title: Sample prompt fields
+        lines: [8, 18]
+        note: |
+          L8-L18: Sample 保存 prompt、tokens 和多模态输入。
+      - title: Sample response fields
+        lines: [19, 27]
+        note: |
+          L19-L27: Sample 保存 response、reward、weight_versions 和 rollout logprob。
+      - title: meta_info update
+        lines: [153, 163]
+        note: |
+          L153-L163: update_from_meta_info 更新 speculative 和 prefix cache 信息。
+      - title: weight version capture
+        lines: [165, 166]
+        note: |
+          L165-L166: meta_info 带 weight_version 时追加到 sample.weight_versions。
+
+  - title: SGLang engine version
+    repo_path: github_repo/slime/slime/backends/sglang_utils/sglang_engine.py
+    focus: engine 更新和查询 weight_version 的入口
+    highlights:
+      - title: tensor update entry
+        lines: [266, 278]
+        note: |
+          L266-L278: tensor update 接口接收 serialized tensors 和可选 weight_version。
+      - title: tensor update payload
+        lines: [279, 289]
+        note: |
+          L279-L289: payload 写入 weight_version 后发给 SGLang server。
+      - title: get weight version
+        lines: [349, 355]
+        note: |
+          L349-L355: engine 通过 HTTP endpoint 查询当前 weight_version。
+
+  - title: L38 drill script
+    repo_path: labs/l33_rl_rollout_freshness/scripts/run_rl_drill.py
+    focus: CPU drill 如何模拟 update 频率、staleness 和 failure
+    highlights:
+      - title: drill update and generate
+        lines: [54, 63]
+        note: |
+          L54-L57: 创建随机数、servers 和 manager。
+          L60-L63: 每步按 update_rate 更新部分 server。
+      - title: drill failure
+        lines: [64, 68]
+        note: |
+          L64-L68: generate 成功记录 staleness，失败记录 failure。
+      - title: drill metrics
+        lines: [69, 78]
+        note: |
+          L69-L78: 返回 failures、p50/p99 staleness 和 successful_rollouts。
+      - title: run setup
+        lines: [87, 95]
+        note: |
+          L87-L95: 读取配置、准备 run 目录，并写 resolved config。
 
 mini_infra_targets:
   - mini_infra/slime/train.py
   - mini_infra/slime/ray/rollout.py
   - mini_infra/slime/ray/train_actor.py
-
 notebooks:
   - notebooks/n10_rl_kl_reward.ipynb
-
 tickets:
-  - slime_weight_sync_003
-  - slime_rollout_bottleneck_001
-  - slime_reward_collapse_002
-
+  - slime_stale_rollout_silent
+  - slime_weight_sync_stall
+  - slime_subset_starvation
+  - slime_freshness_metric_missing
 prereq: l32_slime_rl_core
-next_lab: l35_multimodal_capstone
-
+next_lab: l34_grpo
 gpu_modes:
-  local: CPU 即可
-  cluster: 可对照 SLiME rollout/actor 集群实验
+  local: CPU OK
+  cluster: H200/NCCL + SGLang 在线更新验证（可选）
+
+lesson:
+  opening: |
+    L38 讲 rollout freshness。L36/L37 已经说明 actor 权重如何同步到推理侧；这一讲继续看同步以后，训练侧怎样证明 rollout 样本来自足够新的 policy。核心证据是 actor_version、server weight_version、staleness 和 server_id。
+  sections:
+    - title: 系统位置
+      plain_explanation: |
+        RL rollout 系统把 actor 训练和推理生成拆到不同组件。actor 每训练一步都会推进 policy 版本，rollout engine 可能因为同步频率、局部更新、offload/onload 或故障恢复而落后。L38 的位置在 weight sync 之后、下一轮 rollout 之前：manager 必须判断某个 server 是否还能产训练样本。
+      mental_model: |
+        actor_version 是主版本号，server.weight_version 是副本版本号，staleness 是副本落后主版本的步数。
+      why_it_matters: |
+        样本格式正确不代表样本来自当前 policy。没有版本证据时，reward、KL 和 advantage 曲线很难和真实训练状态对应。
+      source_refs:
+        - title: MiniInfra train loop
+          repo_path: mini_infra/slime/train.py
+          lines: [16, 19]
+          note: |
+            L16-L19: 每步按 generate、train、update_weights 推进。
+        - title: SLiME train loop
+          repo_path: github_repo/slime/train.py
+          lines: [66, 72]
+          note: |
+            L66-L72: 真实 SLiME 先请求 rollout data。
+      common_confusions:
+        - 把 freshness 理解成 prompt 是否新。
+        - 只看 reward，不看样本来自哪一版 policy。
+        - 认为 weight sync 成功后所有 rollout server 必然同步。
+      checkpoint_questions:
+        - L38 位于 L36/L37 weight sync 的哪一步之后？
+        - staleness 的公式是什么？
+        - 为什么样本格式正确仍可能不能用于当前训练？
+
+    - title: Versioned Manager 合同
+      plain_explanation: |
+        L38 patch 的 `RolloutManager.generate` 需要按 round-robin 顺序找 server，并跳过 `actor_version - server.weight_version > max_staleness` 的 server。一圈都找不到 fresh server 时必须抛 RuntimeError。`update_weights` 默认更新所有 server；传入 `server_ids` 时只更新命中的 server。`freshness` 返回每个 server 的版本差。
+      mental_model: |
+        manager 像一个带准入规则的调度器：先看副本版本是否过旧，再决定是否分配样本生成任务。
+      why_it_matters: |
+        round-robin 只解决负载公平，freshness 解决 policy 版本正确性。两者缺一项都会让训练数据或服务负载出现偏差。
+      source_refs:
+        - title: reference fresh gate
+          repo_path: labs/l33_rl_rollout_freshness/patch/reference/rollout_manager.py
+          lines: [47, 55]
+          note: |
+            L47-L52: 构造函数保存 servers、阈值和指针。
+            L54-L55: _fresh_enough 计算版本差是否在阈值内。
+        - title: reference generate
+          repo_path: labs/l33_rl_rollout_freshness/patch/reference/rollout_manager.py
+          lines: [57, 65]
+          note: |
+            L57-L61: 从 next_server_index 开始遍历候选 server。
+            L62-L65: 找到 fresh server 后推进指针，否则抛错。
+        - title: reference update
+          repo_path: labs/l33_rl_rollout_freshness/patch/reference/rollout_manager.py
+          lines: [67, 74]
+          note: |
+            L67-L69: server_ids 存在时转为允许集合。
+            L70-L74: 只更新命中的 server。
+      common_confusions:
+        - 只检查当前 next_server_index，不继续找后面的 server。
+        - 局部更新时误改所有 server。
+        - freshness 返回 weight_version 本身。
+      checkpoint_questions:
+        - generate 在什么时候推进 next_server_index？
+        - server_ids 存在时 update_weights 应该修改哪些 server？
+        - 没有 fresh server 时为什么要失败？
+
+    - title: 版本证据进入样本
+      plain_explanation: |
+        `RolloutServer.generate` 必须把 `server_id`、`weight_version`、`actor_version` 和 `staleness` 写进 meta_info。真实 SLiME 的 `Sample` 也会从 rollout engine 返回的 meta_info 中收集 weight_version。这样训练侧可以把 reward/KL/advantage 和样本来源版本对齐。
+      mental_model: |
+        meta_info 是 rollout 样本的收据。没有收据，就不知道样本来自哪个 server 和哪一版权重。
+      why_it_matters: |
+        stale rollout 可能只在训练指标里表现为 reward 下降或 KL 异常。版本字段能把问题定位到同步和准入层。
+      source_refs:
+        - title: starter meta_info
+          repo_path: labs/l33_rl_rollout_freshness/patch/starter/rollout_manager.py
+          lines: [32, 38]
+          note: |
+            L32-L38: meta_info 写出 server、actor、weight 和 staleness。
+        - title: MiniInfra meta_info
+          repo_path: mini_infra/slime/ray/rollout.py
+          lines: [40, 49]
+          note: |
+            L40-L49: MiniInfra 同时记录 cache 和版本字段。
+        - title: Sample weight versions
+          repo_path: github_repo/slime/slime/utils/types.py
+          lines: [19, 27]
+          note: |
+            L19-L27: Sample 包含 weight_versions 字段。
+        - title: Sample meta update
+          repo_path: github_repo/slime/slime/utils/types.py
+          lines: [165, 166]
+          note: |
+            L165-L166: meta_info 中有 weight_version 时追加到 sample.weight_versions。
+      common_confusions:
+        - 只保存 actor step，不保存 engine 版本。
+        - 只看全局 staleness，不记录 server_id。
+        - 认为 meta_info 只是调试附属字段。
+      checkpoint_questions:
+        - L38 meta_info 至少需要哪四个版本字段？
+        - Sample.weight_versions 从哪里填入？
+        - server_id 对 subset starvation 有什么帮助？
+
+    - title: MiniInfra 到 SLiME
+      plain_explanation: |
+        MiniInfra 用本地 Python 对象模拟 server、manager 和 actor version。真实 SLiME 多了 Ray remote、SGLang engine group、updatable server 选择、engine lock、debug data 和训练数据切分。虽然生产复杂度更高，但版本问题仍落在同一条链路：actor 更新权重，rollout engine 暴露版本，sample 收集版本。
+      mental_model: |
+        patch 是最小合同，MiniInfra 是可运行模型，SLiME 是带分布式和服务端状态的生产形态。
+      why_it_matters: |
+        先用本地合同看清版本控制，再读真实源码时就能分辨哪些分支改变语义，哪些只是部署、容错或性能细节。
+      source_refs:
+        - title: SLiME updatable server
+          repo_path: github_repo/slime/slime/ray/rollout.py
+          lines: [444, 453]
+          note: |
+            L444-L453: 只选择 update_weights=True 的 server 作为可更新模型。
+        - title: SLiME updatable engines
+          repo_path: github_repo/slime/slime/ray/rollout.py
+          lines: [460, 472]
+          note: |
+            L460-L472: 返回 engines、engine lock、新 engine 数和 GPU 映射。
+        - title: SGLang update payload
+          repo_path: github_repo/slime/slime/backends/sglang_utils/sglang_engine.py
+          lines: [279, 289]
+          note: |
+            L279-L289: payload 可携带 weight_version 发给 SGLang server。
+        - title: SGLang version query
+          repo_path: github_repo/slime/slime/backends/sglang_utils/sglang_engine.py
+          lines: [349, 355]
+          note: |
+            L349-L355: engine 通过 HTTP endpoint 查询当前 weight_version。
+      common_confusions:
+        - 认为所有 server 都应该接收 actor 权重。
+        - 把 Ray remote 等同于 tensor 传输。
+        - 忽略 engine lock 和 fault recovery 对同步时机的影响。
+      checkpoint_questions:
+        - SLiME 如何找出需要更新的 rollout engines？
+        - SGLang payload 为什么需要 weight_version？
+        - MiniInfra 省略了哪些生产分支？
+
+    - title: 测试闭环
+      plain_explanation: |
+        五个 tests 分别覆盖：正常生成和 meta_info、跳过 stale server、全部 stale 时失败、局部/全量更新、freshness 公式。它们不测试真实 RL、Ray、SGLang endpoint 或 NCCL，只固定 versioned manager 的本地行为。
+      mental_model: |
+        测试在问三件事：能不能拒绝旧副本，能不能正确更新版本，能不能留下诊断证据。
+      why_it_matters: |
+        stale rollout 的危险在于输出看起来正常。测试强制错误在 generate 阶段暴露，而不是等到训练曲线异常后再猜。
+      source_refs:
+        - title: skip stale test
+          repo_path: labs/l33_rl_rollout_freshness/patch/tests/test_patch.py
+          lines: [33, 41]
+          note: |
+            L33-L38: 构造 stale 和 fresh server。
+            L39-L41: 要求跳过 stale 并推进指针。
+        - title: all stale test
+          repo_path: labs/l33_rl_rollout_freshness/patch/tests/test_patch.py
+          lines: [44, 48]
+          note: |
+            L44-L48: 所有 server stale 时必须抛 RuntimeError。
+        - title: update subset test
+          repo_path: labs/l33_rl_rollout_freshness/patch/tests/test_patch.py
+          lines: [51, 58]
+          note: |
+            L51-L56: 局部更新只改 s1。
+            L57-L58: 全量更新再覆盖所有 server。
+      common_confusions:
+        - response 字符串正确就足够。
+        - RuntimeError 是坏体验。
+        - patch-test 覆盖真实 SLiME 长训。
+      checkpoint_questions:
+        - 哪个测试证明 stale server 被跳过？
+        - 哪个测试证明局部更新不会误改其他 server？
+        - patch-test 没覆盖哪些生产分支？
+
+    - title: Drill 和参数取舍
+      plain_explanation: |
+        `run_rl_drill.py` 用 CPU 模拟多 server、多 step 的版本准入。每步按 update_rate 更新一部分 server，再调用 generate。它同时跑 nominal 和 no_update 两种场景，输出 failures、successful_rollouts、p50/p99 staleness 和 acceptance artifact。
+      mental_model: |
+        update_rate 控制同步频率，update_subset_size 控制覆盖范围，max_staleness 控制准入门槛。
+      why_it_matters: |
+        成功率、staleness 和同步成本要一起看。只放宽阈值会让样本更旧，只提高同步频率会增加等待和传输开销。
+      source_refs:
+        - title: drill loop
+          repo_path: labs/l33_rl_rollout_freshness/scripts/run_rl_drill.py
+          lines: [54, 63]
+          note: |
+            L54-L57: 创建 servers 和 manager。
+            L60-L63: 每步按 update_rate 更新部分 server。
+        - title: drill summary
+          repo_path: labs/l33_rl_rollout_freshness/scripts/run_rl_drill.py
+          lines: [64, 68]
+          note: |
+            L64-L68: generate 成功或失败分别记录。
+        - title: drill metrics
+          repo_path: labs/l33_rl_rollout_freshness/scripts/run_rl_drill.py
+          lines: [69, 78]
+          note: |
+            L69-L78: 汇总 failure 和 staleness 分位数。
+        - title: drill setup
+          repo_path: labs/l33_rl_rollout_freshness/scripts/run_rl_drill.py
+          lines: [87, 95]
+          note: |
+            L87-L95: 写出 run 目录、prediction 和 resolved config。
+      common_confusions:
+        - CPU drill 的 success rate 等于真实 GPU 吞吐。
+        - no_update 能跑完代表系统健壮。
+        - 只调 max_staleness，不看 update 频率和覆盖范围。
+      checkpoint_questions:
+        - nominal 和 no_update 分别验证什么？
+        - p99 staleness 太大时可以调哪些变量？
+        - CPU drill 不能替代哪些集群验证？
+
+    - title: 排障顺序
+      plain_explanation: |
+        遇到 reward 或 KL 异常时，先确认样本来自哪一版 policy。记录 actor_version、weight_version、staleness、server_id、failure 和 run 配置，再看 reward、KL、entropy、parse_success_rate、rollout latency 和 weight sync 时间。
+      mental_model: |
+        先回答“样本来自谁”，再讨论“样本质量怎样”。
+      why_it_matters: |
+        stale rollout、reward parser、policy collapse 和服务瓶颈可能表现成相似曲线。版本证据能减少误判。
+      source_refs:
+        - title: MiniInfra history
+          repo_path: mini_infra/slime/train.py
+          lines: [20, 29]
+          note: |
+            L20-L29: history 把 reward、weight version 和 meta_info 放在一起。
+        - title: rollout data source
+          repo_path: github_repo/slime/slime/ray/rollout.py
+          lines: [567, 573]
+          note: |
+            L567-L573: debug 模式从保存的 rollout data 恢复 samples。
+        - title: rollout function path
+          repo_path: github_repo/slime/slime/ray/rollout.py
+          lines: [583, 585]
+          note: |
+            L583-L585: 正常模式调用 rollout function，并取 metrics 和 samples。
+      common_confusions:
+        - reward 下降时只改 parser。
+        - staleness 大时只放宽阈值。
+        - 报告里只贴平均 reward。
+      checkpoint_questions:
+        - reward 突然下降时应先查哪些版本字段？
+        - no_update 场景为什么必须最终失败？
+        - 真实 SLiME 报告里应补哪些证据？

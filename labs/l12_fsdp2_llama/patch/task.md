@@ -1,4 +1,4 @@
-# L05.3 Patch · FSDP2 wrap with mixed-precision policy
+# L13 Patch · FSDP2 wrap with mixed-precision policy
 
 ## 你要交付什么
 
@@ -48,6 +48,6 @@ SHARDED_STATE_DICT 往返。
 
 ## 写完之后你能做什么
 
-- 看懂 TorchTitan `parallelize_llama.py::apply_fsdp2`
+- 看懂 TorchTitan `models/llama3/parallelize.py::apply_fsdp`
 - 在自己的训练代码里把 Llama 1B / 7B 切碎跑起来
 - 在面试里讲清楚 FSDP1 vs FSDP2 的差异：composable、DTensor-native、no flat-parameter

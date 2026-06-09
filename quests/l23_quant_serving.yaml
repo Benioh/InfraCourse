@@ -1,49 +1,851 @@
 id: l23_quant_serving
-title: AWQ-lite W8 per-channel 量化
-level: L08.5
+title: L24 · AWQ-lite W8 Per-Channel 量化 Serving
+level: L24
 act: 第 3 章：推理服务
-role: 量化学徒
+role: 量化 Serving 调试学员
 priority: 核心
-estimated_minutes: 90
+estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
-  - PyTorch
-  - AWQ / SmoothQuant (对照)
-
+- PyTorch
+- MiniInfra
+- vLLM
+- SGLang
 patch:
   description: |
-    实现 compute_awq_scale + quantize_w8_per_channel + dequantize：
-    用 activation amax 计算 per-channel scale，再做对称 INT8 weight 量化。
-    AWQ 思路的简化版。
+    实现 AWQ-lite 的 input-channel scale、W8 per-output-channel 对称量化和反量化，
+    验证 int8 范围、roundtrip 误差、outlier 响应和 alpha=0 退化路径。
   task_md: labs/l23_quant_serving/patch/task.md
   starter_file: labs/l23_quant_serving/patch/starter/awq_calibrate.py
   reference_file: labs/l23_quant_serving/patch/reference/awq_calibrate.py
   test_command: make patch-test M=l23_quant_serving
   status_file: labs/l23_quant_serving/patch/.last_run.json
   test_count: 5
-  test_kind: 结果对比 + 误差门槛
-
+  test_kind: AWQ-lite 数学与量化误差合同验证
 source_reading:
-  - title: AWQ paper / SmoothQuant
-    repo_path: docs/术语表.md
-  - title: vLLM AWQ kernel 实现
-    repo_path: github_repo/vllm/
-
+- title: Patch starter
+  repo_path: labs/l23_quant_serving/patch/starter/awq_calibrate.py
+  focus: 学生需要补齐的 AWQ scale、quantize 和 dequantize 合同
+  highlights:
+  - title: AWQ scale 输入输出
+    lines:
+    - 18
+    - 27
+    note: |
+      L18-L22: `compute_awq_scale` 接收 `(out,in)` weight 和 `(in,)` activation amax。
+      L23-L27: 文档明确返回 scale 是输入通道维度。
+  - title: AWQ scale TODO
+    lines:
+    - 28
+    - 34
+    note: |
+      L28-L33: TODO 给出 `w_amax_in`、eps、pow 和 clamp 步骤。
+      L34: 未实现时显式失败，patch-test 会定位到 scale 计算。
+  - title: quantize 参数
+    lines:
+    - 37
+    - 45
+    note: |
+      L37-L40: `quantize_w8_per_channel` 接收 weight 和输入通道 scale。
+      L41-L45: 量化对象是 `weight * scale`，scale 来自 AWQ 计算。
+  - title: quantize 返回和 TODO
+    lines:
+    - 47
+    - 58
+    note: |
+      L47-L50: 返回 int8 权重和 per-output dequant scale。
+      L51-L57: TODO 指定 `w_scaled`、按输出通道求 amax、除以 127 并 clamp。
+      L58: 未实现时显式失败，避免生成空指标。
+  - title: dequantize 合同
+    lines:
+    - 61
+    - 72
+    note: |
+      L61-L66: dequantize 接收 int8 权重、per-output scale 和可选 AWQ scale。
+      L67-L71: 先乘 per-output scale，再按输入通道除回 AWQ scale。
+      L72: 未实现时显式失败，测试会捕捉 roundtrip 错误。
+- title: Patch reference
+  repo_path: labs/l23_quant_serving/patch/reference/awq_calibrate.py
+  focus: 最小正确实现和 shape 广播位置
+  highlights:
+  - title: AWQ scale 实现
+    lines:
+    - 8
+    - 17
+    note: |
+      L8-L12: 函数签名和 starter 对齐。
+      L13-L16: 沿 `dim=0` 求输入通道 weight amax，并计算 AWQ scale。
+      L17: 返回 `(in_features,)` 的输入通道 scale。
+  - title: W8 per-channel quantize
+    lines:
+    - 20
+    - 30
+    note: |
+      L20-L24: `scale.unsqueeze(0)` 把输入通道 scale 广播到每个输出行。
+      L25-L26: 按输出通道求 amax，并生成 per-output dequant scale。
+      L27-L30: round、clamp 到 `[-127,127]`，再转成 int8。
+  - title: dequantize 除回
+    lines:
+    - 33
+    - 41
+    note: |
+      L33-L38: 先用 per-output scale 把 int8 还原到 `weight * awq_scale` 空间。
+      L39-L40: 如果传入 AWQ scale，按输入通道除回原始 weight 空间。
+      L41: 返回 fp32 近似权重。
+- title: Patch tests
+  repo_path: labs/l23_quant_serving/patch/tests/test_patch.py
+  focus: int8 范围、roundtrip、scale shape、outlier 响应和 alpha=0
+  highlights:
+  - title: 实现选择
+    lines:
+    - 17
+    - 19
+    note: |
+      L17-L19: 测试用 `IMPL` 选择 starter 或 reference 包。
+  - title: int8 范围
+    lines:
+    - 22
+    - 31
+    note: |
+      L22-L28: 构造 weight 和 activation amax，并执行 scale 与 quantize。
+      L29-L31: int_weight 必须是 int8，且范围在 `[-127,127]`。
+  - title: roundtrip 误差
+    lines:
+    - 34
+    - 43
+    note: |
+      L34-L41: 量化后调用 dequantize，并传入 AWQ scale 除回。
+      L42-L43: 平均相对误差必须低于 5%。
+  - title: scale shape
+    lines:
+    - 46
+    - 51
+    note: |
+      L46-L50: 使用 `(64,128)` weight 时，scale 必须匹配输入通道。
+      L51: 测试明确要求返回 shape 是 `(128,)`。
+  - title: outlier 输入
+    lines:
+    - 54
+    - 65
+    note: |
+      L54-L59: 注释说明测试目标是验证 outlier 响应。
+      L60-L65: 在 activation 的若干输入通道注入 10 倍 outlier。
+  - title: outlier 响应
+    lines:
+    - 67
+    - 78
+    note: |
+      L67: 使用 `alpha=0.5` 计算 AWQ scale。
+      L69-L75: outlier 通道的 scale 均值必须高于非 outlier 通道。
+      L77-L78: 所有 scale 都必须大于等于 1。
+  - title: AWQ roundtrip
+    lines:
+    - 80
+    - 84
+    note: |
+      L80-L84: 带 outlier 的 AWQ roundtrip 相对误差必须低于 10%。
+  - title: alpha=0
+    lines:
+    - 87
+    - 95
+    note: |
+      L87-L95: `alpha=0` 时 scale 必须等于全 1。
+- title: MiniInfra calibrator
+  repo_path: mini_infra/vllm/quant/calibrator.py
+  focus: calibration samples、channel amax 和 activation order
+  highlights:
+  - title: channel absmax
+    lines:
+    - 25
+    - 34
+    note: |
+      L25-L30: `channel_absmax` 对 calibration samples 的最后一维求绝对最大值。
+      L31-L34: 空样本返回空列表，非空时按 channel 逐列聚合。
+  - title: SmoothQuant 与 AWQ 信号
+    lines:
+    - 37
+    - 44
+    note: |
+      L37-L39: SmoothQuant scale 使用 channel max 和 alpha。
+      L42-L44: AWQ activation order 按 activation max 从大到小排序。
+  - title: calibration summary 输入
+    lines:
+    - 47
+    - 53
+    note: |
+      L47-L52: summary 使用三条示意 activation samples。
+      L53: 使用 `alpha=0.5` 计算 SmoothQuant scales。
+  - title: calibration summary 输出
+    lines:
+    - 54
+    - 60
+    note: |
+      L54-L58: 输出样本数、alpha、scales 和 AWQ activation order。
+      L59-L60: note 提醒真实 kernel 还要验证 accuracy drift。
+- title: MiniInfra AWQ loader
+  repo_path: mini_infra/vllm/quant/awq_loader.py
+  focus: group layout、zero point、packed int4 和压缩比
+  highlights:
+  - title: group_size gate
+    lines:
+    - 43
+    - 45
+    note: |
+      L43-L45: hidden_size 不能被 group_size 整除时直接报错。
+  - title: group metadata
+    lines:
+    - 46
+    - 57
+    note: |
+      L46-L48: 按 group_size 遍历 hidden 维度。
+      L49-L55: 每个 group 保存 group id、起止位置、scale 和 zero point。
+      L57: 返回全部 group metadata。
+  - title: 字节估算
+    lines:
+    - 60
+    - 66
+    note: |
+      L60-L62: `awq_summary` 接收 hidden_size、group_size 和 weight_bits。
+      L63-L66: 计算 group 数、fp16 bytes、packed bytes 和 scale bytes。
+  - title: summary 输出
+    lines:
+    - 67
+    - 77
+    note: |
+      L67-L75: 输出 quant method、shape 参数、显存估算和压缩比。
+      L76-L77: 只展示前几个 group，避免 artifact 过大。
+- title: MiniInfra KV-int8
+  repo_path: mini_infra/sglang/quant/kv_int8.py
+  focus: KV cache 对称量化和 scale metadata
+  highlights:
+  - title: symmetric scale
+    lines:
+    - 26
+    - 33
+    note: |
+      L26-L31: 对称量化使用 `max(abs(x))/127`，并说明 zero-centered KV 的边界。
+      L33: 返回裁剪后的 scale，避免全零输入导致除零。
+  - title: quantize 和 dequantize
+    lines:
+    - 36
+    - 42
+    note: |
+      L36-L38: quantize 返回 int8 值和 scale。
+      L41-L42: dequantize 必须使用保存的 scale 还原。
+  - title: KV summary 输入
+    lines:
+    - 45
+    - 52
+    note: |
+      L45-L50: summary 用 tokens、heads、head_dim 估算 fp16 和 int8 KV 字节数。
+      L51-L52: 输出 quant method，并记录上下文参数。
+  - title: KV summary 输出
+    lines:
+    - 53
+    - 62
+    note: |
+      L53-L58: 输出 scale、量化样本和最大绝对误差。
+      L59-L62: 输出 fp16/int8 KV 显存，并说明 prefix cache key 与量化 value 的边界。
+- title: MiniInfra run_engine
+  repo_path: mini_infra/vllm/run_engine.py
+  focus: 量化 serving 指标矩阵和 artifact 写入
+  highlights:
+  - title: AWQ 指标前半段
+    lines:
+    - 13
+    - 20
+    note: |
+      L13-L16: `quant_payload` 根据 kind 生成量化指标行。
+      L17-L20: AWQ 行包含 summary 和 TTFT/ITL 指标。
+  - title: AWQ 指标后半段
+    lines:
+    - 21
+    - 26
+    note: |
+      L21-L26: AWQ 行继续记录 tokens/s、peak KV memory、accuracy drop 和 cache hit。
+  - title: FP8 延迟指标
+    lines:
+    - 27
+    - 33
+    note: |
+      L27-L33: FP8 行记录 summary、TTFT 和 ITL。
+  - title: FP8 吞吐和边界
+    lines:
+    - 34
+    - 40
+    note: |
+      L34-L40: FP8 行记录吞吐、显存、accuracy drop、cache hit 和硬件边界。
+  - title: KV-int8 指标
+    lines:
+    - 41
+    - 53
+    note: |
+      L41-L44: KV-int8 行先调用 `kv_int8_summary`。
+      L45-L53: 输出延迟、吞吐、KV 显存、accuracy drop 和 cache hit。
+  - title: fp16 baseline
+    lines:
+    - 54
+    - 64
+    note: |
+      L54-L64: 默认行是 fp16 baseline，是所有量化指标的比较对象。
+  - title: 量化 payload
+    lines:
+    - 79
+    - 87
+    note: |
+      L79-L83: smoke 先生成一次 OpenAI-shaped completion。
+      L84-L87: 量化模式下写入 quant payload 和 calibration summary。
+  - title: 量化 artifact
+    lines:
+    - 91
+    - 99
+    note: |
+      L91-L99: run id 存在时写入 command、quant_matrix 和 accuracy_drift artifact。
+- title: vLLM AWQ loader
+  repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+  focus: AWQ config、packed 参数、shape 对齐和 kernel 路径
+  highlights:
+  - title: AWQConfig 字段
+    lines:
+    - 40
+    - 51
+    note: |
+      L40-L46: config 接收 weight_bits、group_size、zero_point 和跳过层。
+      L47-L51: 字段保存到 quant config，供后续方法使用。
+  - title: 4-bit 限制
+    lines:
+    - 53
+    - 58
+    note: |
+      L53-L58: 当前 AWQ 路径只支持 4-bit weight quantization，并计算 pack_factor。
+  - title: config 解析
+    lines:
+    - 87
+    - 95
+    note: |
+      L87-L91: 从 checkpoint config 读取 bits、group_size 和 zero_point。
+      L92-L95: 读取可跳过模块，并构造 `AWQConfig`。
+  - title: group_size gate
+    lines:
+    - 192
+    - 204
+    note: |
+      L192-L197: group_size 为 -1 时退化为整输入维。
+      L198-L204: input partition 不能被 group_size 整除时直接报错。
+  - title: pack_factor gate
+    lines:
+    - 205
+    - 213
+    note: |
+      L205-L211: output partition 不能被 pack_factor 整除时直接报错。
+      L213: 后续参数注册会使用 weight_loader。
+  - title: qweight 注册
+    lines:
+    - 214
+    - 225
+    note: |
+      L214-L219: qweight 使用 int32 packed 存储。
+      L220-L225: 参数记录 input/output/packed 维度和 pack_factor。
+  - title: qzeros shape
+    lines:
+    - 227
+    - 235
+    note: |
+      L227-L235: qzeros 的第一维是 group 数，第二维是 packed output。
+  - title: qzeros metadata
+    lines:
+    - 236
+    - 240
+    note: |
+      L236-L240: qzeros 同样记录 packed 维度和 loader。
+  - title: scales shape
+    lines:
+    - 242
+    - 251
+    note: |
+      L242-L251: scales 是 group quant scale parameter，dtype 跟随 params_dtype。
+  - title: AWQ 参数注册
+    lines:
+    - 253
+    - 255
+    note: |
+      L253-L255: qweight、qzeros、scales 注册到 layer 上。
+  - title: apply 输入
+    lines:
+    - 268
+    - 274
+    note: |
+      L268-L274: apply 读取 qweight/scales/qzeros，并整理输出 shape。
+  - title: apply kernel 路径
+    lines:
+    - 275
+    - 286
+    note: |
+      L275-L283: 根据 token 数选择 dequantize+matmul 或 AWQ GEMM。
+      L284-L286: bias 和 reshape 在 kernel 输出后处理。
+- title: vLLM FP8 and KV cache
+  repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/fp8.py
+  focus: FP8 config、activation scheme、weight/input scale
+  highlights:
+  - title: Fp8Config 字段
+    lines:
+    - 96
+    - 105
+    note: |
+      L96-L105: config 接收 serialized 标记、activation_scheme、ignored layers 和 block size。
+  - title: activation_scheme gate
+    lines:
+    - 108
+    - 112
+    note: |
+      L108-L112: activation_scheme 必须在支持列表中。
+  - title: block quant checkpoint gate
+    lines:
+    - 114
+    - 123
+    note: |
+      L114-L119: block-wise quantization 目前要求 fp8 serialized checkpoint。
+      L120-L123: block size 必须是二维配置。
+  - title: block quant activation gate
+    lines:
+    - 125
+    - 131
+    note: |
+      L120-L131: block size 和 dynamic activation scheme 有额外约束。
+  - title: FP8 config 解析输入
+    lines:
+    - 155
+    - 160
+    note: |
+      L155-L160: 从 config 解析 quant_method、activation_scheme、ignored layers 和 block size。
+  - title: FP8 config 构造
+    lines:
+    - 161
+    - 170
+    note: |
+      L161-L170: modules_to_not_convert 可回填 ignored layers，并构造 config。
+  - title: FP8 weight
+    lines:
+    - 342
+    - 346
+    note: |
+      L342-L346: 创建 FP8 weight parameter 并注册到 layer。
+  - title: FP8 weight_scale
+    lines:
+    - 347
+    - 356
+    note: |
+      L347-L356: 非 block quant 路径创建 per-tensor weight_scale。
+  - title: input scale
+    lines:
+    - 371
+    - 376
+    note: |
+      L371-L376: 静态 activation 路径注册 input_scale。
+  - title: FP8 kernel
+    lines:
+    - 377
+    - 384
+    note: |
+      L377-L384: 根据 activation/weight quant key 初始化 FP8 linear kernel。
+- title: vLLM KV cache quantization
+  repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/kv_cache.py
+  focus: q/k/v/prob scale 初始化和加载后处理
+  highlights:
+  - title: scale 参数创建
+    lines:
+    - 32
+    - 39
+    note: |
+      L32-L36: Attention layer 会创建 q/k/v scale 参数。
+      L37-L39: scale 会等待 checkpoint 或动态计算覆盖。
+  - title: invalid scale 默认值
+    lines:
+    - 40
+    - 45
+    note: |
+      L37-L45: q、k、v、prob scale 初始为无效值，等待 checkpoint 或后续计算覆盖。
+  - title: per-token-head 路径
+    lines:
+    - 57
+    - 69
+    note: |
+      L57-L60: per-token-head KV scale 在 kernel 写 cache 时动态计算。
+      L61-L69: 该路径忽略 checkpoint scale，并清理临时参数。
+  - title: checkpoint k/v scale gate
+    lines:
+    - 75
+    - 82
+    note: |
+      L75-L82: 量化 KV 且不动态计算时，优先使用 checkpoint k/v scale。
+  - title: checkpoint scale fallback
+    lines:
+    - 83
+    - 88
+    note: |
+      L83-L88: 没有 scale 时回退到默认值 1.0。
+  - title: q/prob scale 写回
+    lines:
+    - 154
+    - 160
+    note: |
+      L154-L160: q_scale 和 prob_scale 写入 Attention 的运行时字段。
+  - title: 未校准 FP8 warning
+    lines:
+    - 161
+    - 167
+    note: |
+      L161-L167: 未校准 FP8 scale 会触发 warning，提示准确率风险。
+lesson_docs:
+- title: 系统地图
+  path: labs/l23_quant_serving/system_map.md
+  description: L24 在 Serving 性能路径中的位置、局部系统图、scale 关系和易混点。
+- title: 主讲义
+  path: labs/l23_quant_serving/lecture.md
+  description: 从 weight/KV 显存压力、AWQ-lite 机制讲到真实加载器和量化报告。
+- title: 源码带读讲义
+  path: labs/l23_quant_serving/source_walkthrough.md
+  description: 按 patch、MiniInfra 和 vLLM quantization 主路径组织的源码阅读路线。
 mini_infra_targets:
-  - mini_infra/serving/
-
+- mini_infra/vllm/quant/calibrator.py
+- mini_infra/vllm/quant/awq_loader.py
+- mini_infra/sglang/quant/kv_int8.py
+- mini_infra/vllm/run_engine.py
 notebooks:
-  - notebooks/n17_quant_calibration.ipynb
-
+- notebooks/n17_quant_calibration.ipynb
 tickets:
-  - awq_load_fail_001
-  - fp8_calibration_002
-  - kv_int8_acc_drift_003
-
-prereq: l21_sglang_serving_core
+- awq_load_fail_001
+- fp8_calibration_002
+- kv_int8_acc_drift_003
+prereq: l22_flash_attn_v2_bench
 next_lab: l24_spec_decode
-
 gpu_modes:
-  local: CPU 完整
-  cluster: 实测加速度（可选）
+  local: CPU smoke 可完成数学合同和 artifact 验证
+  cluster: 真实 AWQ/FP8/KV-int8 速度与准确率需要目标 GPU 和评估集
+lesson:
+  opening: |
+    # 第 24 讲：AWQ-lite W8 Per-Channel 量化 Serving
+
+    这一讲处理推理服务里的低精度权重和 KV cache。权重越大，留给 KV cache、并发和长上下文的显存越少；scale 选错时，服务可能能启动，但 logits 和 accuracy drift 会出问题。L24 先用 CPU-safe patch 写清 AWQ-lite 的 input-channel scale、W8 per-output-channel quant 和 dequant，再对照 MiniInfra 指标矩阵和真实 vLLM AWQ/FP8/KV cache 加载器。
+
+    课程按“系统地图 -> 主讲义 -> 源码带读 -> notebook -> quiz -> patch -> smoke -> 课后产物”的顺序组织。lab 只检查最小数学合同，生产结论还要结合 kernel、checkpoint、硬件和评估集。
+  sections:
+  - title: 课程定位：量化服务要同时看资源和误差
+    plain_explanation: |
+      L24 属于 Serving systems 的显存和低精度路径。它连接 L23 的 kernel 性能讨论和 L25 的 speculative decoding：前者关注 attention 的中间矩阵和 backend，L24 关注权重、KV cache、scale metadata 和 accuracy drift。量化可以降低权重显存或 KV cache 显存，也可能因为 kernel 不匹配而没有端到端速度收益。
+
+      写 patch 前要先分清四类对象：AWQ scale、per-output dequant scale、FP8 weight/input scale、KV cache k/v scale。它们都叫 scale，但来源、shape 和用途不同。
+    mental_model: |
+      把量化 serving 看成两张账本：资源账本记录权重、KV 和吞吐；误差账本记录 roundtrip、calibration 和 accuracy drift。
+    why_it_matters: |
+      真实服务上线时，能启动只说明加载路径走通。还要同时证明显存、速度和质量都在可接受范围内。
+    source_refs:
+    - title: AWQ scale 输入输出
+      repo_path: labs/l23_quant_serving/patch/starter/awq_calibrate.py
+      lines:
+      - 18
+      - 27
+      note: |
+        L18-L22: `compute_awq_scale` 接收 weight、activation amax 和 alpha。
+        L23-L27: 返回 scale 是输入通道维度，不能写成输出通道。
+    - title: fp16 baseline
+      repo_path: mini_infra/vllm/run_engine.py
+      lines:
+      - 54
+      - 64
+      note: |
+        L54-L64: fp16 baseline 提供比较对象，量化行必须和它对照。
+    common_confusions:
+    - 只看 weight bit 数，不看 activation dtype、kernel 和 accuracy drift。
+    - 把所有 scale 当成同一类元数据。
+    checkpoint_questions:
+    - L24 里 AWQ scale、per-output dequant scale 和 KV scale 的 shape 分别是什么？
+    - CPU smoke 能证明什么，不能证明什么？
+  - title: AWQ-lite scale：activation amax 保护输入通道
+    plain_explanation: |
+      `compute_awq_scale` 的输入是 `(out_features, in_features)` weight 和 `(in_features,)` activation amax。activation 沿输入通道进入 linear，所以要沿 `dim=0` 求每个输入通道的 weight amax，再用 `act_amax^alpha / w_amax_in^alpha` 得到输入通道 scale。课堂 patch 把下限裁到 1.0，目标是让 activation outlier 对应通道得到额外保护。
+
+      `alpha=0` 是重要边界。此时所有 scale 都应为 1，流程退回普通 weight-only INT8。测试用它确认 AWQ 分支没有破坏普通路径。
+    mental_model: |
+      Activation amax 是风险信号：某个输入通道经常出现大值，就在量化前给对应 weight 列更多表示空间。
+    why_it_matters: |
+      scale 方向写错会直接影响 logits。这个错误在小模型里可能只表现为轻微漂移，在大模型和长上下文里会放大。
+    source_refs:
+    - title: 沿输入通道求 amax
+      repo_path: labs/l23_quant_serving/patch/reference/awq_calibrate.py
+      lines:
+      - 8
+      - 17
+      note: |
+        L8-L12: 函数签名保留 weight、act_amax 和 alpha。
+        L13-L16: 沿 `dim=0` 求输入通道 weight amax，并计算 AWQ scale。
+        L17: 返回输入通道 scale。
+    - title: channel absmax
+      repo_path: mini_infra/vllm/quant/calibrator.py
+      lines:
+      - 25
+      - 34
+      note: |
+        L25-L30: calibration samples 按 channel 求绝对最大值。
+        L31-L34: 非空样本按最后一维逐列聚合。
+    - title: activation order
+      repo_path: mini_infra/vllm/quant/calibrator.py
+      lines:
+      - 37
+      - 44
+      note: |
+        L37-L39: SmoothQuant scale 也来自 channel max 和 alpha。
+        L42-L44: AWQ activation order 按 activation max 排序。
+    common_confusions:
+    - 沿 `dim=1` 求 weight amax，得到输出通道统计。
+    - 忽略 `alpha=0` 退化路径。
+    checkpoint_questions:
+    - 为什么 `w_amax_in` 要沿 `dim=0` 计算？
+    - '`alpha=0.5` 和 `alpha=0` 分别代表什么？'
+  - title: W8 quant/dequant：两个 scale 的广播方向
+    plain_explanation: |
+      `quantize_w8_per_channel` 先计算 `w_scaled = weight * awq_scale.unsqueeze(0)`，再按输出通道求 `per_out_scale`。int8 权重保存在 `[-127,127]` 范围内。`dequantize_w8_per_channel` 先乘 `per_out_scale.unsqueeze(1)`，恢复到 `weight * awq_scale` 空间；如果要回到原始 weight，还要除以 `awq_scale.unsqueeze(0)`。
+
+      本节的核心是广播方向。`unsqueeze(0)` 表示输入通道 scale 作用到每一行；`unsqueeze(1)` 表示输出通道 dequant scale 作用到每一列。
+    mental_model: |
+      AWQ scale 是先放大某些列，per-output scale 是每一行的整数刻度尺，dequant 后还要把列方向的放大除回去。
+    why_it_matters: |
+      很多量化 bug 不会立刻崩溃，而是产生看似合理的 int8 范围，却在 dequant 后输出错误分布。
+    source_refs:
+    - title: quantize 广播
+      repo_path: labs/l23_quant_serving/patch/reference/awq_calibrate.py
+      lines:
+      - 20
+      - 30
+      note: |
+        L20-L24: 输入通道 scale 用 `unsqueeze(0)` 乘到 weight 上。
+        L25-L30: 按输出通道求 dequant scale，并把结果裁到 int8 范围。
+    - title: dequantize 除回
+      repo_path: labs/l23_quant_serving/patch/reference/awq_calibrate.py
+      lines:
+      - 33
+      - 41
+      note: |
+        L33-L38: int8 先乘 per-output scale。
+        L39-L41: 传入 AWQ scale 时，按输入通道除回。
+    - title: int8 range
+      repo_path: labs/l23_quant_serving/patch/tests/test_patch.py
+      lines:
+      - 22
+      - 31
+      note: |
+        L22-L31: 测试 int8 dtype 和 `[-127,127]` 范围。
+    - title: roundtrip error
+      repo_path: labs/l23_quant_serving/patch/tests/test_patch.py
+      lines:
+      - 34
+      - 43
+      note: |
+        L34-L43: 测试 dequant 后相对误差低于 5%。
+    - title: scale shape
+      repo_path: labs/l23_quant_serving/patch/tests/test_patch.py
+      lines:
+      - 46
+      - 51
+      note: |
+        L46-L51: scale shape 必须是 `(128,)`。
+    - title: outlier setup
+      repo_path: labs/l23_quant_serving/patch/tests/test_patch.py
+      lines:
+      - 54
+      - 65
+      note: |
+        L54-L65: 测试构造 activation outlier。
+    - title: outlier response
+      repo_path: labs/l23_quant_serving/patch/tests/test_patch.py
+      lines:
+      - 67
+      - 78
+      note: |
+        L67-L78: outlier channel 的 scale 均值必须更大。
+    common_confusions:
+    - 把 `per_out_scale` 当成 AWQ scale 传回去。
+    - dequantize 时忘记除回 AWQ scale。
+    checkpoint_questions:
+    - '`scale.unsqueeze(0)` 和 `per_out_scale.unsqueeze(1)` 分别在广播哪一维？'
+    - 为什么测试要求 `alpha=0` 返回全 1？
+  - title: Serving smoke：指标矩阵要覆盖速度、显存和质量
+    plain_explanation: |
+      MiniInfra 的 `run_engine.py` 会生成 fp16 baseline、AWQ、FP8、KV-int8 四类指标。每一行都包含延迟、吞吐、显存和 accuracy drift 相关字段。它是教学 smoke，目标是让学生练习报告结构，不是声明某个硬件上的真实性能。
+
+      `bench_acc.py` 也用 `quant_payload` 生成对比矩阵。写报告时，必须把 fp16 baseline 作为比较对象，并说明本地 CPU validation-only 与真实 GPU benchmark 的差别。
+    mental_model: |
+      量化报告像一张多列对照表：省了多少显存、快了多少、质量掉了多少、在哪个硬件和数据集上测到。
+    why_it_matters: |
+      只报告 tokens/s 会漏掉 accuracy drift 和硬件边界。量化上线风险通常来自这些被省略的条件。
+    source_refs:
+    - title: AWQ 延迟指标
+      repo_path: mini_infra/vllm/run_engine.py
+      lines:
+      - 13
+      - 20
+      note: |
+        L13-L20: AWQ 行包含 summary、TTFT 和 ITL。
+    - title: AWQ 吞吐和质量
+      repo_path: mini_infra/vllm/run_engine.py
+      lines:
+      - 21
+      - 26
+      note: |
+        L21-L26: AWQ 行继续记录吞吐、KV 显存、accuracy drop 和 cache hit。
+    - title: FP8 延迟指标
+      repo_path: mini_infra/vllm/run_engine.py
+      lines:
+      - 27
+      - 33
+      note: |
+        L27-L33: FP8 行记录 summary、TTFT 和 ITL。
+    - title: FP8 吞吐和边界
+      repo_path: mini_infra/vllm/run_engine.py
+      lines:
+      - 34
+      - 40
+      note: |
+        L34-L40: FP8 行记录吞吐、显存、accuracy drop、cache hit 和硬件边界。
+    - title: 量化 payload
+      repo_path: mini_infra/vllm/run_engine.py
+      lines:
+      - 79
+      - 87
+      note: |
+        L79-L87: 量化模式下生成 quant payload 和 calibration summary。
+    - title: artifact 写入
+      repo_path: mini_infra/vllm/run_engine.py
+      lines:
+      - 91
+      - 99
+      note: |
+        L91-L99: run id 存在时写入 quant matrix 和 accuracy drift。
+    - title: 四类量化行
+      repo_path: labs/l23_quant_serving/scripts/bench_acc.py
+      lines:
+      - 12
+      - 23
+      note: |
+        L12-L15: CLI 接收 eval 名称和 server 列表。
+        L16-L23: 生成 fp16、AWQ、FP8、KV-int8 四行 JSON。
+    common_confusions:
+    - 把 validation-only 数字写成生产 GPU 结论。
+    - 忽略 acc_drop_pp，只看 tokens/s。
+    checkpoint_questions:
+    - 为什么量化报告必须保留 fp16 baseline？
+    - '`quant_matrix.json` 和 `accuracy_drift.json` 分别支撑什么结论？'
+  - title: 真实加载器：AWQ、FP8 和 KV scale 的生产边界
+    plain_explanation: |
+      vLLM AWQ 加载器处理的是 W4A16 packed checkpoint，不会重新执行课堂 patch 的 W8 量化。它检查 weight_bits、group_size、zero_point、qweight、qzeros、scales、input partition 和 pack_factor。FP8 路径关注 checkpoint 是否已经 serialized、activation_scheme、weight_scale、input_scale 和 block scale。KV cache quantization 则给 Attention layer 增加 q/k/v/prob scale，并在加载后决定是否使用 checkpoint scale 或动态 scale。
+
+      所以，真实排查要从“数学合同”扩展到“checkpoint 合同”和“kernel 合同”。
+    mental_model: |
+      patch 是一个 linear 的量化显微镜；真实加载器是 checkpoint、tensor parallel、kernel backend 和 runtime scale 的组合系统。
+    why_it_matters: |
+      线上量化失败常表现为 load error、shape mismatch、kernel fallback 或 accuracy drift。每一种都对应不同源码入口。
+    source_refs:
+    - title: AWQ config 字段
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+      lines:
+      - 40
+      - 51
+      note: |
+        L40-L51: AWQConfig 保存 weight_bits、group_size、zero_point 和跳过层。
+    - title: AWQ 4-bit 限制
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+      lines:
+      - 53
+      - 58
+      note: |
+        L53-L58: 当前 AWQ 路径只支持 4-bit weight，并计算 pack_factor。
+    - title: group_size gate
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+      lines:
+      - 192
+      - 204
+      note: |
+        L192-L204: input partition 必须能被 group_size 整除。
+    - title: pack_factor gate
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+      lines:
+      - 205
+      - 213
+      note: |
+        L205-L213: output partition 必须能被 pack_factor 整除。
+    - title: apply 输入
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+      lines:
+      - 268
+      - 274
+      note: |
+        L268-L274: apply 读取 packed 参数并整理输出 shape。
+    - title: apply kernel
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/awq.py
+      lines:
+      - 275
+      - 286
+      note: |
+        L275-L286: 根据条件选择 dequantize+matmul 或 AWQ GEMM。
+    - title: FP8 config 字段
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/fp8.py
+      lines:
+      - 96
+      - 105
+      note: |
+        L96-L105: Fp8Config 记录 serialized、activation_scheme 和 block size。
+    - title: activation scheme gate
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/fp8.py
+      lines:
+      - 108
+      - 112
+      note: |
+        L108-L112: activation_scheme 必须属于支持列表。
+    - title: input scale
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/fp8.py
+      lines:
+      - 371
+      - 376
+      note: |
+        L371-L376: 静态 activation 路径注册 input_scale。
+    - title: FP8 kernel
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/fp8.py
+      lines:
+      - 377
+      - 384
+      note: |
+        L377-L384: 根据 quant key 初始化 FP8 linear kernel。
+    - title: scale 参数
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/kv_cache.py
+      lines:
+      - 32
+      - 39
+      note: |
+        L32-L39: Attention layer 创建 q/k/v scale 参数。
+    - title: scale 默认值
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/kv_cache.py
+      lines:
+      - 40
+      - 45
+      note: |
+        L40-L45: scale 初始为无效值，等待 checkpoint 或动态计算覆盖。
+    - title: runtime scale 写回
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/kv_cache.py
+      lines:
+      - 154
+      - 160
+      note: |
+        L154-L160: q_scale 和 prob_scale 写入 Attention 运行时字段。
+    - title: 未校准 warning
+      repo_path: github_repo/vllm/vllm/model_executor/layers/quantization/kv_cache.py
+      lines:
+      - 161
+      - 167
+      note: |
+        L161-L167: 未校准 FP8 scale 会提示准确率风险。
+    common_confusions:
+    - 以为课堂 W8 patch 等同于真实 AWQ W4 checkpoint。
+    - 把 FP8 activation scale 和 AWQ group scale 混用。
+    checkpoint_questions:
+    - vLLM AWQ 的 group_size 和 pack_factor 分别约束哪一维？
+    - KV cache quantization 为什么要单独保存 k/v scale？

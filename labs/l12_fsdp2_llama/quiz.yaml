@@ -1,84 +1,103 @@
 mission: l12_fsdp2_llama
-title: L05.3 Quiz · FSDP2 wrap 与 MixedPrecisionPolicy
+title: L13 Quiz · FSDP2 Wrap、Reshard 与 Mixed Precision
 pass_threshold: 0.8
 description: |
-  这 5 题确认你能把 fully_shard 的 wrap 顺序、reshard 时机、mp policy 选型
-  讲清楚。
+  这 5 题检查 L13 讲过的关键边界：FSDP2 解决什么显存问题、为什么先 wrap block 再 wrap root、
+  reshard 的收益和代价、mixed precision policy 的含义，以及 checkpoint 证据为什么不能只看模型权重。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图
+    kind: doc
+    path: labs/l12_fsdp2_llama/system_map.md
+    href: "#lesson"
+  - title: 读主讲义
+    kind: doc
+    path: labs/l12_fsdp2_llama/lecture.md
+    href: "#lesson"
+  - title: 读源码带读
+    kind: doc
+    path: labs/l12_fsdp2_llama/source_walkthrough.md
+    href: "#lesson"
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l12_fsdp2_llama/patch/task.md
-  - title: 读 PyTorch FSDP2 文档
+    href: "#patch"
+  - title: 对照 TorchTitan parallelize
     kind: source
-    path: github_repo/pytorch/torch/distributed/_composable/fsdp/fully_shard.py
-  - title: 读 TorchTitan apply_fsdp2
-    kind: source
-    path: github_repo/torchtitan/torchtitan/parallelisms/parallelize_llama.py
+    path: github_repo/torchtitan/torchtitan/models/llama3/parallelize.py
 
 questions:
-  - id: q1_wrap_order
-    prompt: 为什么 FSDP2 推荐"先 wrap 每个 block，再 wrap root"？
+  - id: q1_fsdp2_problem
+    prompt: FSDP2 主要解决 Data Parallel 训练里的哪类问题？
     options:
       - id: a
-        text: 这样 root 的参数列表只剩 unsharded 的 embedding/head，blocks 各自管理 unshard/reshard
+        text: 每个 rank 都复制完整参数、梯度和 optimizer state，导致单卡显存压力过高
         correct: true
       - id: b
-        text: 反过来才正确
+        text: tokenizer 无法并行处理 prompt
       - id: c
-        text: 顺序无关
+        text: KV cache 在推理阶段无法释放
       - id: d
-        text: 先 root 才能注册 hook
-    explanation: "FSDP2 的 unshard 粒度等于 wrap 粒度；先 block 再 root 才能让 block 之间真正流水。"
-  - id: q2_reshard
-    prompt: `reshard_after_forward=True` 的代价是什么？
+        text: 数据集 `.idx` 文件加载太慢
+    explanation: |
+      FSDP2 的核心是把模型状态按 data parallel rank 分片。它降低的是参数、梯度和 optimizer state 的单卡显存重复，代价是 forward/backward 需要 all-gather 或 reshard 等通信。
+
+  - id: q2_wrap_order
+    prompt: 为什么本关要求先 wrap 每个 transformer block，再 wrap root model？
     options:
       - id: a
-        text: 反向时需要再次 all-gather，但显存占用更小
+        text: block 是主要计算单元，先 wrap block 可以让每个 block 独立管理 unshard/reshard，root 最后处理剩余参数
         correct: true
       - id: b
-        text: 完全无代价
+        text: root 必须最先 wrap，否则 PyTorch 无法创建 ModuleList
       - id: c
-        text: 必须用 fp32
+        text: wrap 顺序不会影响 FSDP2 单元
       - id: d
-        text: 会让 loss 变 NaN
-    explanation: "reshard 之后反向 backward 还要再 all-gather 一次；时间换显存。"
-  - id: q3_mp_policy
-    prompt: `MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32)` 的含义？
+        text: 先 wrap root 可以避免所有 all-gather
+    explanation: |
+      wrap 粒度决定 FSDP2 的 unshard/reshard 单元。Llama-style 模型通常先 wrap transformer block，再 wrap root，和 TorchTitan `apply_fsdp` 的主路径一致。
+
+  - id: q3_reshard
+    prompt: "`reshard_after_forward=True` 的主要收益和代价是什么？"
     options:
       - id: a
-        text: 计算用 bf16，gradient reduce 用 fp32 提高数值稳定性
+        text: forward 后释放完整参数以降低峰值显存，但 backward 可能需要再次 all-gather
         correct: true
       - id: b
-        text: 全部 fp32
+        text: 永远降低 step time，且没有通信代价
       - id: c
-        text: 全部 fp16
+        text: 只影响 checkpoint 文件名
       - id: d
-        text: 只用 int8
-    explanation: "param_dtype 控制前向计算精度；reduce_dtype 控制 NCCL 全归约累加精度。"
-  - id: q4_grad_form
-    prompt: FSDP2 下每个 rank 看到的 `param.grad` 形状是什么？
+        text: 只在 CPU dryrun 中生效
+    explanation: |
+      reshard 是显存和通信之间的选择。它适合显存紧张的训练，但要结合 pipeline、microbatch、模型规模和网络条件判断。
+
+  - id: q4_mp_policy
+    prompt: "`MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32)` 在本讲里应该怎样理解？"
     options:
       - id: a
-        text: 1D shard（DTensor 视图，rank 维度切分）
+        text: 参数计算可用 bf16，梯度通信或规约按 fp32 处理，以平衡显存、带宽和数值稳定性
         correct: true
       - id: b
-        text: 与 param 完整形状一致
+        text: 所有参数、梯度、optimizer state 和输出都强制变成 fp32
       - id: c
-        text: 一定是 0D
+        text: 它只控制 tokenizer 输出 dtype
       - id: d
-        text: 由 Triton kernel 决定
-    explanation: "FSDP2 用 DTensor，每个 rank 只看到自己那片。"
-  - id: q5_save
-    prompt: 推荐的 FSDP2 checkpoint 类型是？
+        text: 它会自动跳过所有 LayerNorm
+    explanation: |
+      mixed precision policy 不是一句“用了低精度”。不同字段控制不同阶段；patch 要求 policy 对象原样传给每个 `fully_shard` 调用。
+
+  - id: q5_checkpoint
+    prompt: 为什么 FSDP2 训练恢复不能只检查 model weights？
     options:
       - id: a
-        text: SHARDED_STATE_DICT（每 rank 保存自己分片，恢复时支持重切）
+        text: 训练恢复还涉及 optimizer state、lr scheduler、dataloader、train state、world size 和可能的 pipeline chunk layout
         correct: true
       - id: b
-        text: FULL_STATE_DICT 永远是首选
+        text: FSDP2 训练不需要 checkpoint
       - id: c
-        text: 不保存 optimizer state
+        text: 只要 loss 降过一次，checkpoint 就一定可恢复
       - id: d
-        text: 把 fp32 master weights 丢掉
-    explanation: "SHARDED_STATE_DICT 支持任意 rank 数恢复，FULL_STATE_DICT 只用于发布给推理。"
+        text: checkpoint 只服务推理发布
+    explanation: |
+      TorchTitan 的 checkpoint manager 会处理 model、optimizer、lr scheduler、dataloader 和 train state。分片训练里 state dict layout 与并行度、PP chunk 和 optimizer 状态相关，恢复证据不能只看模型参数文件。

@@ -1,6 +1,6 @@
-# L13 扩展 · DP Attention（DeepSeek 风格 MoE 必备）
+# L14 扩展 · DP Attention（DeepSeek 风格 MoE 必备）
 
-> 这是 L13 的可选扩展。**不在 patch-test 范围内**。
+> 这是 L14 的可选扩展。**不在 patch-test 范围内**。
 > 完成后你会理解 DeepSeek-V2 / V3 的 DP Attention 为什么能 1) 避免 KV cache 重复，
 > 2) 在 MoE 模型上释放 EP 的吞吐。
 

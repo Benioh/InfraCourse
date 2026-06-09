@@ -66,7 +66,7 @@ def run_hello() -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="L01.5 process group hello")
+    parser = argparse.ArgumentParser(description="L04 process group hello")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     payload = run_hello()

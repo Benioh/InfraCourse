@@ -1,19 +1,38 @@
 mission: l20_vllm_scheduler_kv
-title: L07.5 Quiz · vLLM scheduler / KV cache
+title: L21 Quiz · vLLM Scheduler and KV Cache
 pass_threshold: 1.0
 description: |
   检查学习者是否理解 vLLM 请求生命周期和 KV block 调度边界。
 
 prereq_checklist:
-  - title: 读 patch/task.md
-    kind: read
+  - title: 读系统地图：知道 L21 在 Serving 主线里的位置
+    kind: doc
+    path: labs/l20_vllm_scheduler_kv/system_map.md
+    href: "#lesson"
+    estimate_min: 8
+  - title: 读主讲义：从问题、机制到生产排查串起来
+    kind: doc
+    path: labs/l20_vllm_scheduler_kv/lecture.md
+    href: "#lesson"
+    estimate_min: 35
+  - title: 跟源码带读：按主路径读 MiniInfra 和真实 vLLM
+    kind: doc
+    path: labs/l20_vllm_scheduler_kv/source_walkthrough.md
+    href: "#lesson"
+    estimate_min: 30
+  - title: 最后读 patch/task.md
+    kind: task
     path: labs/l20_vllm_scheduler_kv/patch/task.md
-  - title: 读 vLLM engine
+    href: "#patch"
+    estimate_min: 5
+  - title: 对照真实 vLLM engine
     kind: source
     path: github_repo/vllm/vllm/v1/engine/llm_engine.py
-  - title: 读 vLLM scheduler
+    estimate_min: 10
+  - title: 对照真实 vLLM scheduler
     kind: source
     path: github_repo/vllm/vllm/v1/core/sched/scheduler.py
+    estimate_min: 15
 
 questions:
   - id: q1_lifecycle
@@ -28,7 +47,7 @@ questions:
         text: WebDataset shard
       - id: d
         text: PPO advantage
-    explanation: "OpenAI facade 不是核心调度层，请求会进入 engine/scheduler。"
+    explanation: "OpenAI-compatible API 负责协议入口，请求随后会进入 engine/core 的内部请求生命周期。调度决策发生在 engine/scheduler 之后。"
   - id: q2_kv_pressure
     prompt: KV block 不足最直接影响什么？
     options:
@@ -41,7 +60,7 @@ questions:
         text: README 渲染
       - id: d
         text: optimizer warmup
-    explanation: "KV cache 是 serving scheduler 的核心资源约束。"
+    explanation: "KV cache 是 serving scheduler 的硬资源。block 不够时，新请求不能进入 running，running 请求也可能无法继续扩展上下文。"
   - id: q3_ttft
     prompt: 长 prompt 的 TTFT 通常主要受哪一阶段影响？
     options:
@@ -54,7 +73,7 @@ questions:
         text: Adam moment update
       - id: d
         text: MinHash
-    explanation: "首 token 前要先完成 prompt prefill。"
+    explanation: "首 token 出现前要先处理 prompt 并写入对应 KV。prompt 越长，prefill 计算和 KV 写入越重。"
   - id: q4_itl
     prompt: ITL 更直接对应哪个阶段？
     options:
@@ -67,7 +86,7 @@ questions:
         text: LR restart
       - id: d
         text: tar shard 写入
-    explanation: "Inter-token latency 是 decode token 间隔。"
+    explanation: "ITL 观察的是输出 token 之间的间隔，主要对应 decode 阶段的循环推进、KV 读取、batch 组织和采样。"
   - id: q5_debug
     prompt: 如果服务吞吐下降且 waiting 队列增长，最应该同时看什么？
     options:
@@ -80,4 +99,4 @@ questions:
         text: 只看 README
       - id: d
         text: 只看训练 loss
-    explanation: "serving 性能问题需要看 scheduler 资源和请求分布。"
+    explanation: "waiting 增长通常要把请求分布、running 上限、token budget、KV free blocks 和 prefix/cache 命中一起看，单看 HTTP 状态或吞吐很容易误判。"

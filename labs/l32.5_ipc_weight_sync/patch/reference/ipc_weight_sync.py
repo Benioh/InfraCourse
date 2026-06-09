@@ -1,4 +1,4 @@
-"""Reference solution for L32.5 Patch · CUDA IPC Weight Sync."""
+"""Reference solution for L37 Patch · CUDA IPC Weight Sync."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Distributed harness — same shape as L01.5 / L02."""
+"""Distributed harness for L12 bucketed grad sync."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _free_port() -> int:
 
 
 def _get_impl():
-    name = os.environ.get("IMPL", "starter")
+    name = os.environ.get("IMPL") or "starter"
     return importlib.import_module(f"{name}.bucketed_ddp")
 
 

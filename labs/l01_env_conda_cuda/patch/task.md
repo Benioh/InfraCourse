@@ -1,4 +1,4 @@
-# L00 Patch · 环境探针：把环境变成机器可读的证据
+# L01 Patch · 环境探针：把环境变成机器可读的证据
 
 > 实现 3 个函数，让你能在 10 分钟内判断"这台机器能不能跑后续 lab"，并留下别人可以复现的环境证据。
 
@@ -10,7 +10,7 @@
 
 ## 任务背景
 
-接手一台陌生 4090/H200 时，最先暴雷的不是模型代码，而是环境本身：
+接手一台陌生 4090/H200 时，最先出问题的常常是环境层，模型代码往往还没跑到：
 
 - `torch.cuda.is_available() == False` —— driver 在、wheel 不对。
 - `LOCAL_RANK=1` 但跑出来在 `cuda:0` —— `CUDA_VISIBLE_DEVICES` 把物理卡重映射了。
@@ -107,4 +107,4 @@ make patch-test M=l01_env_conda_cuda
 
 ## 进入下一关的前置
 
-`make patch-test M=l01_env_conda_cuda` 全绿后，再去看下一关 [L01 显存账本](../l02_pytorch_systems/README.md)。
+`make patch-test M=l01_env_conda_cuda` 全绿后，再去看下一关 [L02 显存账本](../l02_pytorch_systems/README.md)。

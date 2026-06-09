@@ -1,50 +1,545 @@
 id: l08_megatron_text_pretrain
-title: Cosine With Restarts LR Scheduler
-level: L04
-act: 第 1 章：训练框架
-role: Megatron 学徒
+title: L09 · Megatron 文本预训练训练环与 LR Scheduler
+level: L09
+act: 第 2 章：训练系统、并行与数据
+role: Megatron 训练环学徒
 priority: 核心
-estimated_minutes: 90
+estimated_minutes: 120
 no_gpu_friendly: true
-
 frameworks:
   - PyTorch
-  - Megatron-LM (对照)
+  - Megatron-LM
+  - MiniInfra
 
 patch:
   description: |
-    实现 CosineWithRestartsLR：在多段 cosine 衰减区间之间做"热重启"——
-    每个 restart_step 把 lr 重置回 max_lr。Megatron 没有内置这个，但 SDXL /
-    长训 LLM 经常需要。
+    实现 CosineWithRestartsLR，练习训练框架中 scheduler 的 boundaries、
+    cosine 公式、restart 边界、total clamp 和多 param group 同步。
   task_md: labs/l08_megatron_text_pretrain/patch/task.md
   starter_file: labs/l08_megatron_text_pretrain/patch/starter/lr_scheduler.py
   reference_file: labs/l08_megatron_text_pretrain/patch/reference/lr_scheduler.py
   test_command: make patch-test M=l08_megatron_text_pretrain
   status_file: labs/l08_megatron_text_pretrain/patch/.last_run.json
   test_count: 7
-  test_kind: 结果对比
+  test_kind: 结果对比与边界验证
+
+lesson:
+  opening: |
+    L09 把 L08 的 IndexedDataset prefix 接到 Megatron-shaped 训练控制面。学生要看清 data iterator、forward/backward、optimizer、LR scheduler、training log 和 checkpoint 的边界。
+
+    本关 patch 只实现 `CosineWithRestartsLR`。它不替代完整 Megatron scheduler，课程用途是最小训练框架组件：保存 step 状态，按 boundaries 计算 lr，写入 optimizer param groups，并让测试覆盖 restart、total clamp 和多组参数。
+  sections:
+    - title: 从 data-path 到训练闭环
+      plain_explanation: |
+        L08 生成的 `--data-path <prefix>` 是 L09 的输入。训练启动后，系统要把 prefix 转成 data iterator，再进入 forward/backward、optimizer、scheduler、training log 和 checkpoint。
+
+        这一节先建立边界：训练命令存在只能说明入口被记录；是否真实完成训练，要看数据文件、Megatron runtime、loss、lr、tokens/sec、checkpoint 和 fallback artifact。
+      mental_model: |
+        L09 是把数据货架接到训练流水线，并在每个关键工位留下记录。
+      why_it_matters: |
+        训练事故常出现在边界：数据 prefix 错、scheduler 计数错、日志缺 lr、resume 缺 state。先画清链路，后续排查才不会只盯着 loss。
+      source_refs:
+        - title: run_train resolved config
+          repo_path: labs/l08_megatron_text_pretrain/scripts/run_train.py
+          lines: [45, 52]
+          note: |
+            L45-L52: 读取配置，创建 run_dir，并写出 resolved config，后续排查以这里的配置为准。
+        - title: run_train readiness checks
+          repo_path: labs/l08_megatron_text_pretrain/scripts/run_train.py
+          lines: [54, 59]
+          note: |
+            L54-L57: 分别检查 JSONL 和 indexed `.bin/.idx` 是否存在。
+            L58-L59: 检查本地 Python 环境能否导入 Megatron。
+        - title: Megatron schedule construction input
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [1546, 1555]
+          note: |
+            L1546-L1548: 训练代码从 args 构造 optimizer parameter scheduler。
+            L1550-L1555: iteration-based 配置会换算出 lr decay 和 weight decay 的步数。
+      common_confusions:
+        - 把 expected command 当成真实训练完成证据。
+        - 把 `--data-path` 指向 `.bin` 或 `.idx` 后缀。
+        - 只看 loss，不看 lr 和 skipped iteration。
+      checkpoint_questions:
+        - L09 的输入承接 L08 的哪个 artifact？
+        - fallback artifact 能证明什么？
+        - 训练日志至少要有哪些字段才便于判断真实训练状态？
+
+    - title: Train step 中 optimizer 和 scheduler 的顺序
+      plain_explanation: |
+        一次训练 step 的主路径是清梯度、forward/backward、optimizer update、scheduler update、记录 metrics。Scheduler 应该在 optimizer update 成功之后推进；如果本次 update 被跳过，继续推进 lr 会让学习率时间轴和实际参数更新错位。
+
+        Megatron 的真实代码还会处理 microbatch、pipeline、溢出、通信和日志，但这个顺序没有变。
+      mental_model: |
+        Optimizer 改参数，scheduler 改下一拍的步长；日志把这一拍发生的事写下来。
+      why_it_matters: |
+        LR 错位会让 loss 曲线难以解释。特别是 resume、skipped iteration 和 batch size 变化时，必须知道 scheduler 是按什么条件推进。
+      source_refs:
+        - title: MiniInfra train_step signature
+          repo_path: mini_infra/megatron/training/training.py
+          lines: [83, 90]
+          note: |
+            L83-L90: `train_step` 接收 forward/backward、data iterator、model、optimizer、scheduler 和 iteration。
+        - title: MiniInfra optimizer then scheduler
+          repo_path: mini_infra/megatron/training/training.py
+          lines: [100, 110]
+          note: |
+            L100: 执行 optimizer step 并解析是否成功。
+            L101-L102: 只有成功时才推进 lr scheduler。
+            L104-L110: metrics 记录 iteration、loss、skipped_iter 和 lr。
+        - title: Megatron optimizer step
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [1945, 1949]
+          note: |
+            L1945-L1948: 真实训练 step 在 optimizer timer 内执行参数更新。
+            L1949: 后续逻辑会依据 update_successful 判断 scheduler 是否推进。
+        - title: Megatron scheduler increment
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [1976, 1983]
+          note: |
+            L1976-L1979: update 成功时按 microbatch、micro_batch_size 和 DP size 计算 increment。
+            L1980-L1983: 成功时 skipped_iter 为 0，失败时记为 1。
+      common_confusions:
+        - 认为 scheduler 每个 Python loop 都要推进。
+        - 忽略 skipped iteration 对 LR 时间轴的影响。
+        - 把 Megatron 的 sample-based increment 误当成固定加 1。
+      checkpoint_questions:
+        - optimizer update 失败时 scheduler 应该怎样处理？
+        - Megatron 的 increment 由哪些 batch 参数决定？
+        - metrics 里的 lr 应该在 step 前还是 step 后读取？
+
+    - title: Cosine with restarts 的最小合同
+      plain_explanation: |
+        本关 patch 的输入是 optimizer、`max_lr`、`min_lr`、`restart_steps` 和 `total_steps`。中间状态是 `step_count` 与 boundaries。输出是所有 optimizer param groups 中的当前 lr。
+
+        `restart_steps=[1000,3000]`、`total_steps=5000` 时，boundaries 为 `[0,1000,3000,5000]`。每个 segment 使用段内相对位置计算 cosine；restart step 是新 segment 起点；total 之后直接返回 `min_lr`。
+      mental_model: |
+        先把训练时间轴切成段，再在每段上复制同一条 cosine 曲线。
+      why_it_matters: |
+        Scheduler bug 多出在边界和计数。公式本身容易写，难点是 restart 点、total clamp 和多 param group 输出。
+      source_refs:
+        - title: Starter boundaries TODO
+          repo_path: labs/l08_megatron_text_pretrain/patch/starter/lr_scheduler.py
+          lines: [48, 51]
+          note: |
+            L48-L50: 注释给出 boundaries 的目标形式。
+            L51: 未实现时抛出 L09 patch 提示。
+        - title: Reference segment search
+          repo_path: labs/l08_megatron_text_pretrain/patch/reference/lr_scheduler.py
+          lines: [33, 42]
+          note: |
+            L33-L35: total 之后直接返回 `min_lr`。
+            L36-L40: 用 `start <= step < end` 查找当前 segment。
+            L41-L42: 未命中时返回 `min_lr`。
+        - title: Reference cosine formula
+          repo_path: labs/l08_megatron_text_pretrain/patch/reference/lr_scheduler.py
+          lines: [43, 49]
+          note: |
+            L43-L45: 防御非正 segment 长度。
+            L46-L48: 计算段内相对位置、ratio 和 cosine factor。
+            L49: 用 `min_lr`、`max_lr` 和 factor 得到当前 lr。
+        - title: Megatron cosine branch
+          repo_path: github_repo/Megatron-LM/megatron/core/optimizer_param_scheduler.py
+          lines: [250, 262]
+          note: |
+            L250-L254: Megatron 在 warmup 后计算 decay ratio 并检查范围。
+            L255-L262: linear 与 cosine 分支都基于 `max_lr - min_lr` 计算系数。
+      common_confusions:
+        - 把 restart step 当成旧段最后一步。
+        - 第二段仍用全局 step 计算 ratio。
+        - 忘记 total 后的 clamp。
+      checkpoint_questions:
+        - "`restart_steps=[]` 时 boundaries 是什么？"
+        - step 1000 应该属于哪一段？
+        - 为什么 `_set_lr()` 要遍历所有 param groups？
+
+    - title: 日志、param group 和 checkpoint
+      plain_explanation: |
+        真实训练里，scheduler 的输出要被三处消费：optimizer param groups 用它更新参数，training log 用它解释 loss 曲线，checkpoint 用它恢复训练时间轴。
+
+        Megatron 的 scheduler 会遍历 param groups 写 lr 和 weight decay。日志层通过 canonical lr 读取可代表默认配置的学习率。checkpoint 需要保存 scheduler state，避免恢复后 lr 回到初始段。
+      mental_model: |
+        LR 是训练 step 的控制信号。它必须同时对更新、观测和恢复可见。
+      why_it_matters: |
+        如果日志没有 lr，restart 带来的 loss 抖动无法解释；如果 checkpoint 没有 scheduler state，resume 后的训练曲线会断开。
+      source_refs:
+        - title: Megatron step writes groups
+          repo_path: github_repo/Megatron-LM/megatron/core/optimizer_param_scheduler.py
+          lines: [284, 290]
+          note: |
+            L284-L289: `step` 接收 increment，并把它加到 scheduler 内部计数。
+            L290: 从这里开始遍历 optimizer param groups。
+        - title: Megatron group update
+          repo_path: github_repo/Megatron-LM/megatron/core/optimizer_param_scheduler.py
+          lines: [291, 300]
+          note: |
+            L291-L294: 注释说明空 param group 也不能跳过，因为日志会读取默认组 lr。
+            L295-L300: 对每个 param group 写 lr，并同步 weight decay。
+        - title: Megatron scheduler state
+          repo_path: github_repo/Megatron-LM/megatron/core/optimizer_param_scheduler.py
+          lines: [302, 309]
+          note: |
+            L302-L304: `state_dict` 返回 scheduler 状态。
+            L305-L309: 保存 max_lr、warmup steps、num_steps、decay style 和 decay steps。
+        - title: Megatron lr logging
+          repo_path: github_repo/Megatron-LM/megatron/training/training.py
+          lines: [2118, 2128]
+          note: |
+            L2118-L2119: learning rate 会跨模型并行组规约。
+            L2121-L2128: TensorBoard 和 wandb 记录 learning rate。
+      common_confusions:
+        - 认为 scheduler 只影响 optimizer，不需要进 checkpoint。
+        - 多 param group 中只改第一个 group。
+        - 日志缺 lr 时仍然尝试解释 restart 行为。
+      checkpoint_questions:
+        - Scheduler state 至少要保存什么？
+        - Megatron 为什么不跳过空 param group？
+        - training log 中的 learning rate 从哪里来？
+
+    - title: Drill 和 patch 证据
+      plain_explanation: |
+        本关有两类证据。Patch tests 证明 `CosineWithRestartsLR` 的最小行为合同。Drill artifact 证明训练启动边界和本地前置条件是否满足。
+
+        如果缺少 Megatron 包或 L08 数据产物，run_train 会记录 fallback reason。它明确告诉你本地验证到哪一层，避免把启动边界写成真实训练。
+      mental_model: |
+        Patch 证明组件，drill 证明启动边界；真实训练还要看运行指标。
+      why_it_matters: |
+        没有证据分级时，团队容易把本地 smoke、fallback、真实训练和 resume 验证混成一个结论。
+      source_refs:
+        - title: Restart test
+          repo_path: labs/l08_megatron_text_pretrain/patch/tests/test_patch.py
+          lines: [48, 55]
+          note: |
+            L48-L52: 构造带两个 restart 点的 scheduler。
+            L52-L55: 推进到 step 1000 后，断言 lr 回到 `max_lr`。
+        - title: Param group test
+          repo_path: labs/l08_megatron_text_pretrain/patch/tests/test_patch.py
+          lines: [67, 76]
+          note: |
+            L67-L72: 创建两个 param groups 的 SGD optimizer。
+            L73-L76: 推进 scheduler 后，断言所有 groups 的 lr 一致。
+        - title: Fallback artifact
+          repo_path: labs/l08_megatron_text_pretrain/scripts/run_train.py
+          lines: [80, 90]
+          note: |
+            L80-L84: 缺前置条件时写出 fallback reason。
+            L85-L90: 写 fallback log 和 expected command。
+        - title: Log parse payload
+          repo_path: labs/l08_megatron_text_pretrain/scripts/parse_megatron_log.py
+          lines: [46, 57]
+          note: |
+            L46-L51: 初始化解析结果，记录 expected command、fallback 和行数。
+            L52-L57: 逐字段抽取最新匹配，并判断是否有训练指标。
+      common_confusions:
+        - patch 通过就声明真实训练可用。
+        - fallback 完成就声明 Megatron 已经跑完 forward/backward。
+        - 解析器缺核心字段时仍给出强结论。
+      checkpoint_questions:
+        - 哪些测试证明 restart 和 param group 边界？
+        - "`fallback_reason.txt` 应该怎样解读？"
+        - 真实训练日志还需要哪些字段？
 
 source_reading:
-  - title: Megatron optimizer_param_scheduler 源码
-    repo_path: github_repo/Megatron-LM/megatron/training/optimizer_param_scheduler.py
-    focus: 看 Megatron 的 LR scheduler 接口；linear / cosine / inverse_square_root 三种
-  - title: PyTorch CosineAnnealingWarmRestarts 源码
-    repo_path: docs/术语表.md
-    focus: 看 PyTorch 自带 warm restarts 与本关的差别
+  - title: Patch starter
+    repo_path: labs/l08_megatron_text_pretrain/patch/starter/lr_scheduler.py
+    focus: 学生需要补齐的 scheduler 输入、boundaries、公式和输出位置
+    highlights:
+      - title: Constructor state
+        lines: [33, 45]
+        note: |
+          L33-L40: 构造函数接收 optimizer、lr 上下界、restart steps 和 total steps。
+          L41-L45: 保存 optimizer、lr 配置、restart 列表和 total steps。
+      - title: Boundaries TODO
+        lines: [48, 51]
+        note: |
+          L48-L50: 注释给出 boundaries 的目标形式。
+          L51: 未实现时抛出 L09 patch 提示。
+      - title: Set lr TODO
+        lines: [56, 58]
+        note: |
+          L56-L58: `_set_lr` 必须把 lr 写入所有 optimizer param groups。
+      - title: Total clamp
+        lines: [60, 62]
+        note: |
+          L60: `_compute_lr` 接收要计算的 step。
+          L61-L62: step 超过 total 后应直接返回 `min_lr`。
+      - title: Cosine TODO
+        lines: [63, 75]
+        note: |
+          L63-L69: TODO 提示先找到 step 所属 segment。
+          L70-L74: TODO 提示计算段内相对位置、ratio、cosine factor 和 lr。
+          L75: 未实现时抛出 L09 patch 提示。
+
+  - title: Patch reference
+    repo_path: labs/l08_megatron_text_pretrain/patch/reference/lr_scheduler.py
+    focus: 参考实现中的状态变化和边界处理
+    highlights:
+      - title: Boundaries and set lr
+        lines: [26, 31]
+        note: |
+          L26: reference 构造 `[0] + restart_steps + [total_steps]`。
+          L27: 初始化后立即把 lr 写成 `max_lr`。
+          L29-L31: `_set_lr` 遍历所有 param groups。
+      - title: Segment search
+        lines: [33, 42]
+        note: |
+          L33-L35: total 之后直接返回 `min_lr`。
+          L36-L40: 使用 `start <= step < end` 查找 segment。
+          L41-L42: 没有匹配 segment 时返回 `min_lr`。
+      - title: Cosine math
+        lines: [43, 49]
+        note: |
+          L43-L45: 防御非正 segment 长度。
+          L46-L48: 计算 t、ratio 和 cosine factor。
+          L49: 返回当前段内的 lr。
+      - title: Step and get lr
+        lines: [51, 56]
+        note: |
+          L51-L53: `step()` 先增加计数，再写入新 lr。
+          L55-L56: `get_lr()` 读取第一个 param group 的当前 lr。
+
+  - title: Patch tests
+    repo_path: labs/l08_megatron_text_pretrain/patch/tests/test_patch.py
+    focus: 7 个 CPU 测试定义的行为合同
+    highlights:
+      - title: Implementation switch
+        lines: [18, 20]
+        note: |
+          L18-L20: `IMPL` 环境变量选择 starter 或 reference，空值回退到 starter。
+      - title: Restart boundary
+        lines: [48, 55]
+        note: |
+          L48-L52: 构造带两个 restart 点的 scheduler。
+          L52-L55: 推进 1000 次后断言 lr 等于 `max_lr`。
+      - title: Multiple groups
+        lines: [67, 76]
+        note: |
+          L67-L72: 创建两个 param groups。
+          L73-L76: 推进后断言所有 groups 的 lr 相同。
+      - title: Pure cosine fallback
+        lines: [88, 97]
+        note: |
+          L88-L92: 空 restart 列表构造单段 scheduler。
+          L93-L97: midpoint 处 lr 应等于上下界平均值。
+
+  - title: MiniInfra train loop
+    repo_path: mini_infra/megatron/training/training.py
+    focus: 教学版训练 step、scheduler、metrics 和 checkpoint
+    highlights:
+      - title: Mini scheduler
+        lines: [29, 40]
+        note: |
+          L29-L35: Mini scheduler 保存 optimizer、decay 和 step_count。
+          L37-L40: 每次 step 后递增计数，并写所有 param groups。
+      - title: Train step inputs
+        lines: [83, 90]
+        note: |
+          L83-L90: `train_step` 明确接收 optimizer 和 lr_scheduler。
+      - title: Optimizer then scheduler
+        lines: [100, 110]
+        note: |
+          L100: optimizer step 返回 success 和 grad_norm。
+          L101-L102: 只有成功时才调用 scheduler。
+          L104-L110: metrics 写入 iteration、loss、skipped_iter 和 lr。
+      - title: Save scheduler state
+        lines: [169, 175]
+        note: |
+          L169-L174: checkpoint 保存 iteration、model、optimizer 和 scheduler state。
+          L175: parallel state 也进入 checkpoint。
+
+  - title: Megatron OptimizerParamScheduler
+    repo_path: github_repo/Megatron-LM/megatron/core/optimizer_param_scheduler.py
+    focus: 真实 Megatron 的 lr 计算、param group 写入和 state dict
+    highlights:
+      - title: Constructor inputs
+        lines: [125, 132]
+        note: |
+          L125-L132: 构造函数接收 optimizer、init_lr、max_lr、min_lr、warmup 和 decay steps。
+      - title: Class state
+        lines: [147, 159]
+        note: |
+          L147-L155: 保存 lr 配置和 `num_steps`。
+          L156-L159: 保存 decay steps 和 WSD 配置。
+      - title: Warmup branch
+        lines: [218, 227]
+        note: |
+          L218-L224: `get_lr` 接收 param group。
+          L226-L227: param group 可以覆盖 max_lr 和 min_lr。
+      - title: Warmup formula
+        lines: [229, 233]
+        note: |
+          L229-L233: warmup 阶段按当前 `num_steps` 从 init_lr 线性升到 max_lr。
+      - title: Cosine branch
+        lines: [250, 262]
+        note: |
+          L250-L254: warmup 后计算 decay ratio，并检查在 0 到 1 内。
+          L255-L262: linear 与 cosine 分支用不同 coeff 计算 lr。
+      - title: Step increment
+        lines: [284, 290]
+        note: |
+          L284-L289: `step` 接收 increment。
+          L290: 内部 `num_steps` 增加 increment。
+      - title: Param group update
+        lines: [291, 300]
+        note: |
+          L291-L294: 注释说明空 param groups 也要写 lr。
+          L295-L300: 对每个 group 写 lr 和 weight decay。
+      - title: State dict head
+        lines: [302, 309]
+        note: |
+          L302-L304: scheduler state 由 `state_dict` 返回。
+          L305-L309: 保存 max_lr、warmup steps、num_steps、decay style 和 decay steps。
+      - title: State dict tail
+        lines: [310, 316]
+        note: |
+          L310-L315: 保存 min_lr、weight decay 配置和 increment 配置。
+          L316: 返回 state dict。
+      - title: Canonical lr doc
+        lines: [40, 45]
+        note: |
+          L40-L45: canonical lr 来自第一个 default_config group，空 rank 对齐组也需要有效 lr。
+      - title: Canonical lr loop
+        lines: [54, 57]
+        note: |
+          L54-L56: 找到 default_config group 后返回其 lr。
+          L57: 没有默认组时返回 None。
+
+  - title: Megatron training loop
+    repo_path: github_repo/Megatron-LM/megatron/training/training.py
+    focus: scheduler 构造、train_step 更新和 learning rate 日志
+    highlights:
+      - title: Scheduler factory
+        lines: [1546, 1555]
+        note: |
+          L1546-L1548: 从训练 args 构造 scheduler。
+          L1550-L1555: iteration-based 训练换算 lr decay 和 weight decay 步数。
+      - title: Scheduler object
+        lines: [1581, 1590]
+        note: |
+          L1581-L1588: 把 optimizer 和 lr 配置传入 `OptimizerParamScheduler`。
+          L1589-L1590: 同时传入 weight decay 起止值。
+      - title: Scheduler object tail
+        lines: [1591, 1599]
+        note: |
+          L1591-L1597: 继续传入 weight decay、checkpoint 和 WSD 配置。
+          L1599: 返回构造好的 scheduler。
+      - title: Optimizer update
+        lines: [1945, 1949]
+        note: |
+          L1945-L1948: 执行 optimizer step。
+          L1949: update_successful 会决定后续 scheduler 是否推进。
+      - title: LR update
+        lines: [1976, 1983]
+        note: |
+          L1976-L1979: update 成功时按 batch 相关增量推进 scheduler。
+          L1980-L1983: 记录 skipped_iter。
+      - title: TensorBoard lr
+        lines: [2118, 2128]
+        note: |
+          L2118-L2119: learning rate 先跨模型并行组规约。
+          L2121-L2128: 按日志间隔写入 TensorBoard 和 wandb。
+      - title: Stdout lr
+        lines: [2308, 2311]
+        note: |
+          L2308-L2310: stdout 日志字符串加入 learning rate。
+          L2311: 同一行继续记录 global batch size。
+      - title: Main loop lr read
+        lines: [3211, 3221]
+        note: |
+          L3211-L3216: 主 loop 从 optimizer param groups 读取 canonical lr。
+          L3217-L3221: 把 lr 传入 `training_log`。
+
+  - title: L09 run_train drill
+    repo_path: labs/l08_megatron_text_pretrain/scripts/run_train.py
+    focus: 本地训练启动边界、fallback 和 report artifact
+    highlights:
+      - title: Config and run dir
+        lines: [45, 52]
+        note: |
+          L45-L47: 读取课程配置并创建 run_dir。
+          L48-L52: 写 prediction 和 resolved config。
+      - title: Data readiness
+        lines: [54, 59]
+        note: |
+          L54-L57: 检查 JSONL 和 indexed dataset。
+          L58-L59: 检查 Megatron 是否可导入。
+      - title: Expected command
+        lines: [60, 72]
+        note: |
+          L60-L65: 构造真实 Megatron 启动命令模板。
+          L66-L72: 汇总 fallback reason。
+      - title: Fallback files
+        lines: [80, 90]
+        note: |
+          L80-L84: 缺条件时写出 fallback reason。
+          L85-L90: 写 fallback train log 和 expected command。
+      - title: Metrics
+        lines: [93, 105]
+        note: |
+          L93-L100: metrics 写入时间、stage 和 resume 状态。
+          L101-L105: status 区分 fallback 与 ready for manual launch。
+      - title: Report head
+        lines: [107, 118]
+        note: |
+          L107-L118: report 写入目标、GPU、模型、数据集、precision 和并行配置。
+      - title: Report diagnosis
+        lines: [126, 137]
+        note: |
+          L126-L132: report 记录数据、indexed dataset、Megatron 和 resume 检查结果。
+          L133-L137: report 记录一个 checkpoint debug 工单示例。
+
+  - title: L09 log parser
+    repo_path: labs/l08_megatron_text_pretrain/scripts/parse_megatron_log.py
+    focus: 训练日志字段抽取和缺失字段判断
+    highlights:
+      - title: Basic patterns
+        lines: [12, 18]
+        note: |
+          L12-L18: 定义 iteration、loss 和 grad_norm 的正则模式。
+      - title: Throughput patterns
+        lines: [19, 28]
+        note: |
+          L19-L28: 定义 consumed_samples、tokens/sec 和 MFU 的正则模式。
+      - title: Parse payload
+        lines: [46, 57]
+        note: |
+          L46-L51: 初始化 expected command、fallback 和 line_count。
+          L52-L57: 抽取字段并判断是否包含训练指标。
+      - title: Missing fields
+        lines: [62, 68]
+        note: |
+          L62-L67: iteration、loss 和 tokens/sec 缺失时进入 missing_core_fields。
+          L68: 返回结构化解析结果。
+      - title: Self-test input
+        lines: [71, 77]
+        note: |
+          L71-L76: self-test 构造含 expected command、loss、tokens/sec 和 MFU 的日志文本。
+          L77: 调用 parser 得到解析结果。
+      - title: Self-test checks
+        lines: [78, 86]
+        note: |
+          L78-L84: 定义期望字段。
+          L85-L86: 返回每个字段的检查结果和整体 passed。
 
 mini_infra_targets:
-  - mini_infra/megatron/training/
-
+  - mini_infra/megatron/training/training.py
 notebooks: []
-
 tickets:
-  - mgt_oom_001
   - mgt_checkpoint_002
   - mgt_tokenizer_003
-
-prereq: l06_torchtitan_training
+prereq: l07_dataset_megatron_bin
 next_lab: l09_long_context_cp
-
 gpu_modes:
-  local: CPU 即可
-  cluster: 完整 Megatron 训练验证（可选）
+  local: CPU OK，patch 和 log parser 可运行；真实训练可能进入 fallback
+  cluster: 可用真实 Megatron、L08 indexed dataset 和 torchrun 启动命令验证
+
+lesson_docs:
+  - title: 系统地图
+    path: labs/l08_megatron_text_pretrain/system_map.md
+    description: L09 在 Megatron 预训练主线中的位置、训练 step 系统图、概念依赖和易混点。
+  - title: 主讲义
+    path: labs/l08_megatron_text_pretrain/lecture.md
+    description: 从 data-path、train step、scheduler、日志、checkpoint 讲到 patch 和 fallback 排查。
+  - title: 源码带读讲义
+    path: labs/l08_megatron_text_pretrain/source_walkthrough.md
+    description: 按 MiniInfra、Megatron 源码、patch 和 drill 组织的阅读路线。

@@ -26,3 +26,4 @@ reports/**/*.md
 app/frontend/tsconfig.tsbuildinfo
 .ruff_cache
 *.tsbuildinfo
+.claude/
